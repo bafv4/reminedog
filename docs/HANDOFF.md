@@ -160,3 +160,21 @@ IATフックではなくインラインのデトアにする。LWJGLは関数の
 - [ ] `LdrRegisterDllNotification` の通知の中でデトアを入れて問題ないか（ローダーロックを持った状態）
 - [ ] 同じHDCの2つのコンテキストの間で、ゲーム側の描画が終わる前にズームのコピーが走らないか（必要なら同期を入れる）
 - [ ] `glfwSetCharModsCallback` を使っているか、1.21.9以降でF3の判定がどう変わったか
+
+## 追記：プロトタイプ1で分かったこと（2026-09-29）
+
+### フックのクレートは MinHook にした
+`retour` 0.3.1 は、RIP相対のアドレスの後ろに即値が続く命令を正しく移せない（変位を「命令の最後の4バイト」とみなして書き換える。`retour/src/arch/x86/trampoline/mod.rs` の `instruction_bytes.len() - 4`）。
+GLFWの関数はどれも `_GLFW_REQUIRE_INIT()` で始まり、先頭が `cmp dword [rip+_glfw.initialized], 0`（`83 3d <disp32> 00`）になる。このため `retour` でフックすると、元の関数を呼んだ瞬間に不正なアドレスを読んで落ちる（Wine上で再現を確認）。
+MinHook は即値の長さを差し引いて変位の位置を求めるので問題ない。Windows では `minhook` クレートを使う。Linux対応のときは別の方法（`retour` の修正版など）を検討する。
+
+### Wine上で確かめたこと（`scripts/wine-smoke.sh`）
+実機のWindowsではなく、Wine 9.0 と Mesa llvmpipe での結果。
+- `-agentpath:` で `Agent_OnLoad` が呼ばれ、`LdrRegisterDllNotification` の通知がすべてのDLLについて届く
+- LWJGLは `glfw.dll` を `GLFW` クラスの初期化時（`glfwInit` の前）に読み込む。ファイル名はいつも `glfw.dll`で、場所は起動方法で変わる
+  - `-Dorg.lwjgl.system.SharedLibraryExtractPath` があればそのフォルダ（公式ランチャー 1.19以降の `natives`）
+  - なければ `%TEMP%\lwjgl_<ユーザー>\<バージョン>\x64\glfw.dll`（3.2.2 は `%TEMP%\lwjgl<ユーザー>\3.2.2-build-10\glfw.dll`）
+  - `java.library.path` で見つける場合はそのフォルダ（1.18以前の公式ランチャー、Prism、MultiMC）
+- `opengl32.dll` は `glfwCreateWindow` の中で読み込まれる。`glfwTerminate` の後も `glfw.dll` と `opengl32.dll` は解放されない
+- 通知の中でGLFWのエクスポートを調べてフックを入れられる（エクスポート表は `GetProcAddress` を使わず、PEのヘッダーから直接読む）
+- 同じHDCに作った自前のコンテキスト（Compatibility Profile）で egui を描き、ゲームのコンテキスト（Core Profile 3.2）に戻せる。ゲーム側のGLのエラーは増えず、終了時の `glfwFreeCallbacks` でも落ちない

@@ -1,0 +1,267 @@
+//! Per-frame work inside the `glfwSwapBuffers` detour.
+
+use std::cell::RefCell;
+use std::ffi::c_void;
+use std::sync::Arc;
+use std::time::Instant;
+
+use glow::HasContext as _;
+use reminedog_render::{FrameParams, Overlay, StatusLine, gl_summary};
+
+use crate::agent::{self, Globals};
+use crate::fonts;
+use crate::glfw::{self, Glfw};
+use crate::wgl::{self, OwnContext};
+
+/// Consecutive failed frames after which the overlay gives up for the session.
+const MAX_FAILURES: u32 = 30;
+/// GL errors reported before going quiet.
+const MAX_GL_ERRORS_LOGGED: u32 = 10;
+
+enum State {
+    Uninit,
+    Ready(Box<Runtime>),
+    Disabled,
+}
+
+thread_local! {
+    // Only the thread that owns the window swaps its buffers, so per-thread state is
+    // enough and needs no locking.
+    static STATE: RefCell<State> = const { RefCell::new(State::Uninit) };
+}
+
+/// Draws the overlay into the back buffer right before GLFW presents it.
+pub fn before_swap(window: *mut c_void) {
+    let Some(agent) = agent::globals() else {
+        return;
+    };
+    let Some(glfw) = glfw::get() else {
+        return;
+    };
+    if !agent.options.overlay || window.is_null() {
+        return;
+    }
+    let _ = STATE.try_with(|cell| {
+        let Ok(mut state) = cell.try_borrow_mut() else {
+            return;
+        };
+        // Disabled while we work: if anything below panics, the overlay stays off
+        // instead of failing again on every frame.
+        *state = match std::mem::replace(&mut *state, State::Disabled) {
+            State::Disabled => State::Disabled,
+            // A hidden helper window (some mods create one) never gets the overlay; wait
+            // for a visible one.
+            State::Uninit if !glfw.is_visible(window) => State::Uninit,
+            State::Uninit => match Runtime::create(glfw, window, agent) {
+                Ok(runtime) => run_frame(runtime, glfw, window, agent),
+                Err(e) => {
+                    log::error!("overlay disabled: {e}");
+                    State::Disabled
+                }
+            },
+            State::Ready(runtime) => run_frame(runtime, glfw, window, agent),
+        };
+    });
+}
+
+fn run_frame(
+    mut runtime: Box<Runtime>,
+    glfw: &Glfw,
+    window: *mut c_void,
+    agent: &Globals,
+) -> State {
+    match runtime.render(glfw, window, agent) {
+        Ok(()) => {
+            runtime.failures = 0;
+            State::Ready(runtime)
+        }
+        Err(FrameError::DrawableChanged) => {
+            log::warn!("the game's device context changed; recreating the overlay context");
+            runtime.teardown();
+            State::Uninit
+        }
+        Err(FrameError::Failed(e)) => {
+            runtime.failures += 1;
+            if runtime.failures == 1 {
+                log::warn!("overlay frame failed: {e}");
+            }
+            if runtime.failures >= MAX_FAILURES {
+                log::error!("overlay disabled after {MAX_FAILURES} failed frames in a row: {e}");
+                runtime.teardown();
+                State::Disabled
+            } else {
+                State::Ready(runtime)
+            }
+        }
+    }
+}
+
+enum FrameError {
+    DrawableChanged,
+    Failed(String),
+}
+
+struct Runtime {
+    /// The GLFW window the overlay is drawn on; swaps of other windows are left alone.
+    window: usize,
+    context: OwnContext,
+    gl: Arc<glow::Context>,
+    overlay: Overlay,
+    /// Static diagnostics plus, last, the per-frame cost.
+    status: Vec<StatusLine>,
+    /// Smoothed CPU time of one overlay frame (context switches included), in ms.
+    cost_ms: f64,
+    failures: u32,
+    gl_errors_logged: u32,
+}
+
+impl Runtime {
+    fn create(glfw: &Glfw, window: *mut c_void, agent: &Globals) -> Result<Box<Self>, String> {
+        let wgl = wgl::get()?;
+        let (hdc, game_context) = wgl.current();
+        if hdc.is_null() || game_context.is_null() {
+            return Err("no GL context is current in glfwSwapBuffers".into());
+        }
+        let (width, height) = glfw.framebuffer_size(window);
+        let game_gl = wgl.describe_current();
+        log::info!("GLFW {}", glfw.version_string());
+        log::info!(
+            "window framebuffer {width}x{height}, content scale {:.2}",
+            glfw.content_scale(window)
+        );
+        log::info!("game GL: {game_gl}");
+        log::info!("pixel format {}", wgl::describe_pixel_format(hdc));
+
+        let context = OwnContext::create(wgl, hdc)?;
+        let created = (|| {
+            let _current = context.make_current(wgl)?;
+            // SAFETY: our context is current; the loader resolves functions for it.
+            let gl = Arc::new(unsafe {
+                glow::Context::from_loader_function_cstr(|name| wgl.load(name))
+            });
+            let overlay_gl = gl_summary(&gl);
+            log::info!("overlay GL: {overlay_gl}");
+            let overlay =
+                Overlay::new(gl.clone(), fonts::load_japanese()).map_err(|e| e.to_string())?;
+            Ok::<_, String>((gl, overlay, overlay_gl))
+        })();
+        let (gl, overlay, overlay_gl) = match created {
+            Ok(created) => created,
+            Err(e) => {
+                context.delete(wgl);
+                return Err(e);
+            }
+        };
+        log::info!("overlay: initialized");
+
+        let status = vec![
+            StatusLine::new(
+                "ビルド",
+                format!("{} ({})", env!("CARGO_PKG_VERSION"), agent::BUILD_ID),
+            ),
+            StatusLine::new("GLFW", glfw.version_string()),
+            StatusLine::new("ゲームのGL", game_gl),
+            StatusLine::new("オーバーレイのGL", overlay_gl),
+            StatusLine::new("ゲームフォルダ", agent.game_dir.display().to_string()),
+            StatusLine::new("処理時間", "-"),
+        ];
+        Ok(Box::new(Self {
+            window: window as usize,
+            context,
+            gl,
+            overlay,
+            status,
+            cost_ms: 0.0,
+            failures: 0,
+            gl_errors_logged: 0,
+        }))
+    }
+
+    fn render(
+        &mut self,
+        glfw: &Glfw,
+        window: *mut c_void,
+        agent: &Globals,
+    ) -> Result<(), FrameError> {
+        if window as usize != self.window {
+            return Ok(());
+        }
+        let wgl = wgl::get().map_err(FrameError::Failed)?;
+        let (hdc, _) = wgl.current();
+        if hdc.is_null() {
+            return Err(FrameError::Failed("no GL context is current".into()));
+        }
+        if hdc != self.context.hdc() {
+            return Err(FrameError::DrawableChanged);
+        }
+        let (width, height) = glfw.framebuffer_size(window);
+        if width <= 0 || height <= 0 {
+            // Minimized.
+            return Ok(());
+        }
+        let scale = glfw.content_scale(window) * agent.options.ui_scale.unwrap_or(1.0);
+
+        let started = Instant::now();
+        {
+            let _current = self.context.make_current(wgl).map_err(FrameError::Failed)?;
+            self.overlay.render(&FrameParams {
+                framebuffer_size: [width as u32, height as u32],
+                pixels_per_point: scale,
+                time: agent.start.elapsed().as_secs_f64(),
+                status: &self.status,
+            });
+            self.log_gl_errors();
+        }
+        let cost_ms = started.elapsed().as_secs_f64() * 1000.0;
+        self.cost_ms = if self.overlay.frames() <= 1 {
+            cost_ms
+        } else {
+            self.cost_ms * 0.95 + cost_ms * 0.05
+        };
+        if let Some(line) = self.status.last_mut() {
+            line.value = format!("{:.2} ms", self.cost_ms);
+        }
+
+        match self.overlay.frames() {
+            1 => log::info!("overlay: first frame rendered ({width}x{height}, scale {scale:.2})"),
+            n @ (100 | 1000 | 10_000) => log::info!(
+                "overlay: {n} frames rendered, {:.2} ms per frame",
+                self.cost_ms
+            ),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Drains our context's GL error queue (never the game's).
+    fn log_gl_errors(&mut self) {
+        for _ in 0..8 {
+            // SAFETY: our context is current.
+            let error = unsafe { self.gl.get_error() };
+            if error == glow::NO_ERROR {
+                break;
+            }
+            self.gl_errors_logged += 1;
+            if self.gl_errors_logged <= MAX_GL_ERRORS_LOGGED {
+                log::warn!("GL error 0x{error:04X} in the overlay context");
+            }
+        }
+    }
+
+    /// Frees GL resources and deletes the context. Best effort: the DC may be gone.
+    fn teardown(self: Box<Self>) {
+        let Ok(wgl) = wgl::get() else {
+            return;
+        };
+        let Runtime {
+            context,
+            mut overlay,
+            ..
+        } = *self;
+        match context.make_current(wgl) {
+            Ok(_current) => overlay.destroy(),
+            Err(e) => log::warn!("cannot free overlay resources: {e}"),
+        }
+        context.delete(wgl);
+    }
+}
