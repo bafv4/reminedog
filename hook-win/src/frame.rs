@@ -2,14 +2,15 @@
 //! 1.21, `SDL_GL_SwapWindow` for 26.x).
 
 use std::ffi::c_void;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Instant;
 
 use glow::HasContext as _;
-use reminedog_render::{FrameParams, Overlay, StatusLine, gl_summary};
+use reminedog_render::{FrameInput, FrameParams, Overlay, StatusLine, gl_summary};
 
 use crate::agent::{self, Globals};
 use crate::fonts;
+use crate::input;
 use crate::wgl::{self, OwnContext, Wgl};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
@@ -53,12 +54,18 @@ pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
     }
     // Contended means another thread is swapping another window; poisoned means a panic
     // hit mid-frame (the state was set to Disabled first). Skip the frame either way.
-    let Ok(mut state) = STATE.try_lock() else {
-        return;
+    let mut state = match STATE.try_lock() {
+        Ok(state) => state,
+        Err(TryLockError::WouldBlock) => return,
+        Err(TryLockError::Poisoned(_)) => {
+            // Stay off, and make sure no invisible UI keeps taking the game's input.
+            input::router().set_enabled(false);
+            return;
+        }
     };
     // Disabled while we work: if anything below panics, the overlay stays off instead of
     // failing again on every frame.
-    *state = match std::mem::replace(&mut *state, State::Disabled) {
+    let next = match std::mem::replace(&mut *state, State::Disabled) {
         State::Disabled => State::Disabled,
         // A hidden helper window (some mods create one) never gets the overlay; wait for a
         // visible one.
@@ -72,6 +79,10 @@ pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
         },
         State::Ready(runtime) => run_frame(runtime, ws, window, agent),
     };
+    if matches!(next, State::Disabled) {
+        input::router().set_enabled(false);
+    }
+    *state = next;
 }
 
 /// The window's device context. GLFW's and SDL's window classes have CS_OWNDC, so this is
@@ -245,12 +256,28 @@ impl Runtime {
         let started = Instant::now();
         {
             let _current = self.context.make_current(wgl).map_err(FrameError::Failed)?;
-            self.overlay.render(&FrameParams {
+            let input = {
+                let mut router = input::router();
+                router.set_enabled(true);
+                router.set_screen([width as u32, height as u32], scale);
+                FrameInput {
+                    events: router.take_events(),
+                    modifiers: router.modifiers(),
+                    ui_open: router.ui_open(),
+                    zoom: router.zoom_active(),
+                    software_cursor: router.software_cursor(),
+                }
+            };
+            let output = self.overlay.render(FrameParams {
                 framebuffer_size: [width as u32, height as u32],
                 pixels_per_point: scale,
                 time: agent.start.elapsed().as_secs_f64(),
                 status: &self.status,
+                input,
             });
+            if output.close_ui {
+                input::router().set_ui_open(false);
+            }
             self.log_gl_errors();
         }
         let cost_ms = started.elapsed().as_secs_f64() * 1000.0;

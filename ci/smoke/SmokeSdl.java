@@ -4,7 +4,10 @@
 // it. Java 8 source: javac --release 8.
 //
 // Usage: java -cp <lwjgl jars incl. lwjgl-sdl>;<classes> SmokeSdl [FRAMES] [--screenshot]
+//                                                                [--seconds=N] [--capture]
 //   --screenshot  save the back buffer after the last swap as smoke-screenshot.png
+//   --seconds=N   run for N seconds at about 60 fps instead of a frame count (input tests)
+//   --capture     relative mouse mode, as Minecraft uses in game
 // Prints "SMOKE OK frames=N" and exits 0, or "SMOKE FAIL: <reason>" and exits 1.
 
 import org.lwjgl.Version;
@@ -13,7 +16,8 @@ import org.lwjgl.sdl.SDL_Event;
 
 import static org.lwjgl.opengl.GL11.*;
 import static org.lwjgl.sdl.SDLError.SDL_GetError;
-import static org.lwjgl.sdl.SDLEvents.SDL_PollEvent;
+import static org.lwjgl.sdl.SDLEvents.*;
+import static org.lwjgl.sdl.SDLMouse.SDL_SetWindowRelativeMouseMode;
 import static org.lwjgl.sdl.SDLInit.*;
 import static org.lwjgl.sdl.SDLVideo.*;
 
@@ -45,8 +49,17 @@ public final class SmokeSdl {
 
     private static void run(String[] args) {
         int frames = 120;
-        boolean screenshot = false;
+        boolean screenshot = false, capture = false;
+        double seconds = 0;
         for (String arg : args) {
+            if (arg.startsWith("--seconds=")) {
+                seconds = Double.parseDouble(arg.substring("--seconds=".length()));
+                continue;
+            }
+            if (arg.equals("--capture")) {
+                capture = true;
+                continue;
+            }
             if (arg.equals("--screenshot")) {
                 screenshot = true;
                 continue;
@@ -88,20 +101,56 @@ public final class SmokeSdl {
             throw new Fail("SDL_GL_MakeCurrent failed: " + SDL_GetError());
         }
         SDL_GL_SetSwapInterval(0);
+        if (capture) {
+            SDL_SetWindowRelativeMouseMode(window, true);
+        }
         GL.createCapabilities();
         System.out.println("GL_VERSION " + glGetString(GL_VERSION));
         System.out.println("GL_RENDERER " + glGetString(GL_RENDERER));
 
+        int keys = 0, texts = 0, buttons = 0, motions = 0, wheels = 0;
+        StringBuilder typed = new StringBuilder();
+        long until = System.nanoTime() + (long) (seconds * 1e9);
+        int frame = 0;
         SDL_Event event = SDL_Event.calloc();
         try {
-            for (int frame = 0; frame < frames; frame++) {
+            for (; seconds > 0 ? System.nanoTime() < until : frame < frames; frame++) {
+                if (seconds > 0) {
+                    try {
+                        Thread.sleep(15);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
                 glClearColor(0.2f, 0.4f, 0.6f, 1f);
                 glClear(GL_COLOR_BUFFER_BIT);
+                SmokeImage.drawPattern(854, 480);
                 if (!SDL_GL_SwapWindow(window)) {
                     throw new Fail("frame " + frame + ": SDL_GL_SwapWindow failed: " + SDL_GetError());
                 }
                 while (SDL_PollEvent(event)) {
-                    // Drain the queue, as a game loop does.
+                    switch (event.type()) {
+                        case SDL_EVENT_KEY_DOWN:
+                        case SDL_EVENT_KEY_UP:
+                            keys++;
+                            break;
+                        case SDL_EVENT_TEXT_INPUT:
+                            texts++;
+                            typed.append(event.text().textString());
+                            break;
+                        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                        case SDL_EVENT_MOUSE_BUTTON_UP:
+                            buttons++;
+                            break;
+                        case SDL_EVENT_MOUSE_MOTION:
+                            motions++;
+                            break;
+                        case SDL_EVENT_MOUSE_WHEEL:
+                            wheels++;
+                            break;
+                        default:
+                            break;
+                    }
                 }
                 int error = glGetError();
                 if (error != GL_NO_ERROR) {
@@ -111,6 +160,10 @@ public final class SmokeSdl {
         } finally {
             event.free();
         }
+        frames = frame;
+        System.out.printf("EVENTS key=%d char=%d button=%d cursor=%d scroll=%d%n",
+            keys, texts, buttons, motions, wheels);
+        System.out.println("TYPED " + typed);
         if (screenshot) {
             SmokeImage.saveBackBuffer(854, 480, "smoke-screenshot.png");
         }

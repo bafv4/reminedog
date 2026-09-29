@@ -71,4 +71,19 @@ final class SmokeImage {
         out.write(data);
         out.writeInt((int) crc.getValue());
     }
+
+    // A pattern around the centre of the frame (scissored clears work in any profile), so
+    // a zoomed frame looks different from an unzoomed one.
+    static void drawPattern(int width, int height) {
+        glEnable(GL_SCISSOR_TEST);
+        int cx = width / 2, cy = height / 2;
+        float[][] colors = {{0.9f, 0.2f, 0.2f}, {0.2f, 0.8f, 0.2f}, {0.9f, 0.9f, 0.2f}, {0.9f, 0.5f, 0.1f}};
+        int[][] offsets = {{-40, 0}, {0, 0}, {-40, -40}, {0, -40}};
+        for (int i = 0; i < 4; i++) {
+            glScissor(cx + offsets[i][0], cy + offsets[i][1], 40, 40);
+            glClearColor(colors[i][0], colors[i][1], colors[i][2], 1f);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+        glDisable(GL_SCISSOR_TEST);
+    }
 }

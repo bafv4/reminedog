@@ -140,6 +140,7 @@ fn install(module: HMODULE, path: &str) -> Result<Glfw, String> {
             &SWAP_BUFFERS,
         )?;
     }
+    crate::glfw_input::install(module);
     Ok(glfw)
 }
 

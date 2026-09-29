@@ -2,10 +2,13 @@
 // reminedog agent (-agentpath:) without the game. Java 8 source: javac --release 8.
 //
 // Usage: java -cp <lwjgl jars>;<classes> Smoke [FRAMES] [--legacy] [--readback] [--screenshot]
+//                                            [--seconds=N] [--capture]
 //   FRAMES      frames to render (default 120)
 //   --legacy    default window hints, like Minecraft 1.13-1.16 (else 3.2 core, like 1.17+)
 //   --readback  after the last swap, print "PIXEL x y r g b" (front buffer) and
 //               "PIXEL_BACK x y r g b" (back buffer) for a few window coordinates
+//   --seconds=N   run for N seconds at about 60 fps instead of a frame count (for input tests)
+//   --capture     grab the cursor like Minecraft in game (GLFW_CURSOR_DISABLED)
 //   --screenshot  after the last swap, save the back buffer as smoke-screenshot.png in the
 //                 current directory (diagnostic: what an overlay drew, where the driver keeps
 //                 the back buffer after a swap, as Wine + llvmpipe does)
@@ -36,6 +39,9 @@ public final class Smoke {
         "/execute in minecraft:overworld run tp @s 12.50 64.00 -7.25 90.00 15.00";
 
     private static int keys, chars, buttons, cursorMoves, scrolls, glfwErrors;
+    private static final StringBuilder typed = new StringBuilder();
+    // SMOKE_VERBOSE=1 prints every key event the "game" receives.
+    private static final boolean VERBOSE = System.getenv("SMOKE_VERBOSE") != null;
     private static String lastGlfwError = "none";
 
     private static final class Fail extends RuntimeException {
@@ -65,9 +71,14 @@ public final class Smoke {
 
     private static void run(String[] args) {
         int frames = 120;
-        boolean legacy = false, readback = false, screenshot = false;
+        boolean legacy = false, readback = false, screenshot = false, capture = false;
+        double seconds = 0;
         for (String arg : args) {
-            if (arg.equals("--legacy")) {
+            if (arg.startsWith("--seconds=")) {
+                seconds = Double.parseDouble(arg.substring("--seconds=".length()));
+            } else if (arg.equals("--capture")) {
+                capture = true;
+            } else if (arg.equals("--legacy")) {
                 legacy = true;
             } else if (arg.equals("--readback")) {
                 readback = true;
@@ -125,16 +136,25 @@ public final class Smoke {
 
         glfwSetKeyCallback(window, (w, key, scancode, action, mods) -> {
             keys++;
+            if (VERBOSE) {
+                System.out.printf("KEY %d %d %d%n", key, action, mods);
+            }
             // Minecraft checks F3 with glfwGetKey when C is pressed, then copies the location.
             if (action == GLFW_PRESS && key == GLFW_KEY_C && glfwGetKey(w, GLFW_KEY_F3) == GLFW_PRESS) {
                 glfwSetClipboardString(w, F3C_TEXT);
                 System.out.println("F3C copied");
             }
         });
-        glfwSetCharModsCallback(window, (w, codepoint, mods) -> chars++);
+        glfwSetCharModsCallback(window, (w, codepoint, mods) -> {
+            chars++;
+            typed.appendCodePoint(codepoint);
+        });
         glfwSetMouseButtonCallback(window, (w, button, action, mods) -> buttons++);
         glfwSetCursorPosCallback(window, (w, x, y) -> cursorMoves++);
         glfwSetScrollCallback(window, (w, dx, dy) -> scrolls++);
+        if (capture) {
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        }
 
         // The agent swaps GL contexts inside the swap; make sure ours is current afterwards.
         long wglContext = Platform.get() == Platform.WINDOWS ? GLFWNativeWGL.glfwGetWGLContext(window) : 0;
@@ -144,9 +164,15 @@ public final class Smoke {
         }
 
         long t1 = System.nanoTime();
-        for (int frame = 0; frame < frames; frame++) {
+        long until = t1 + (long) (seconds * 1e9);
+        int frame = 0;
+        for (; seconds > 0 ? System.nanoTime() < until : frame < frames; frame++) {
+            if (seconds > 0) {
+                sleep(15);
+            }
             glClearColor(CLEAR_R, CLEAR_G, CLEAR_B, 1f);
             glClear(GL_COLOR_BUFFER_BIT);
+            SmokeImage.drawPattern(854, 480);
             glfwSwapBuffers(window);
             glfwPollEvents();
             if (wglContext != 0 && WGL.wglGetCurrentContext() != wglContext) {
@@ -165,8 +191,10 @@ public final class Smoke {
         if (screenshot) {
             screenshot(window, "smoke-screenshot.png");
         }
+        frames = frame;
         System.out.printf("EVENTS key=%d char=%d button=%d cursor=%d scroll=%d glfw_errors=%d%n",
             keys, chars, buttons, cursorMoves, scrolls, glfwErrors);
+        System.out.println("TYPED " + typed);
         System.out.printf("TIMING setup_ms=%d loop_ms=%d fps=%.0f%n",
             (t1 - t0) / 1000000, (t2 - t1) / 1000000, frames * 1e9 / Math.max(1, t2 - t1));
 
@@ -217,5 +245,13 @@ public final class Smoke {
         int[] w = new int[1], h = new int[1];
         glfwGetFramebufferSize(window, w, h);
         SmokeImage.saveBackBuffer(w[0], h[0], path);
+    }
+
+    private static void sleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 }

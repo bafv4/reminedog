@@ -196,6 +196,7 @@ pub fn attach(module: HMODULE, path: &str) {
             &VULKAN_CREATE_SURFACE,
         );
     }
+    crate::sdl_input::install(module);
     log::info!("SDL3 hooks installed");
 }
 

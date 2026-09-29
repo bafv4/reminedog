@@ -5,6 +5,7 @@
 # Usage: scripts/wine-smoke.sh [--agent DLL] [--agent-options STR] [--lwjgl VERSION]
 #                              [--frames N] [--legacy] [--readback] [--natives MODE]
 #                              [--jvm-arg ARG]... [--screenshot PNG] [--sdl] [--keep]
+#                              [--seconds N] [--capture] [--xdotool CMDS] [--xdotool-delay S]
 #   --agent DLL          load DLL with -agentpath: (reminedog.dll)
 #   --agent-options STR  options string passed to Agent_OnLoad (-agentpath:DLL=STR)
 #   --lwjgl VERSION      LWJGL version (default 3.3.3; 3.2.2 = Minecraft 1.14-1.18)
@@ -22,6 +23,10 @@
 #   --screenshot PNG     save the last frame (back buffer after the swap) to PNG
 #   --sdl                run ci/smoke/SmokeSdl.java (an SDL3 window, like Minecraft 26.x)
 #                        instead of the GLFW one; needs --lwjgl 3.4.0 or later
+#   --seconds N          run the harness for N seconds (~60 fps) instead of --frames
+#   --capture            grab the cursor as Minecraft does in game
+#   --xdotool CMDS       once the window is up (after --xdotool-delay seconds, default 4),
+#                        focus it and run "xdotool CMDS", e.g. "key ctrl+i sleep 0.5 type abc"
 #   --keep               keep the run directory (game dir, output) instead of deleting it
 # Environment:
 #   REMINEDOG_WINE_CACHE  cache for the JRE, LWJGL, classes and WINEPREFIX
@@ -76,6 +81,17 @@ wine_session() {
   local status=0
   cd "$gamedir"
   echo "wine-smoke: wine $java_win ${args[*]}" >"$output"
+  if [ -n "$xdotool_cmds" ]; then
+    # Simulated input once the harness window is up (xdotool talks to this Xvfb).
+    (
+      sleep "$xdotool_delay"
+      xdotool search --sync --name "reminedog smoke" windowfocus --sync >/dev/null 2>&1 || true
+      local cmds
+      read -ra cmds <<<"$xdotool_cmds"
+      echo "wine-smoke: xdotool ${cmds[*]}" >>"$output"
+      xdotool "${cmds[@]}" >>"$output" 2>&1 || echo "wine-smoke: xdotool failed" >>"$output"
+    ) &
+  fi
   timeout -k 10 "$timeout" wine "$java_win" "${args[@]}" >>"$output" 2>&1 || status=$?
   if [ "$status" -eq 124 ]; then
     echo "wine-smoke: timed out after ${timeout}s" >>"$output"
@@ -97,10 +113,12 @@ usage() {
 
 agent='' agent_options='' lwjgl=3.3.3 frames=120 natives=extract keep=0 screenshot=''
 main_class=Smoke extra_modules=''
+xdotool_cmds='' xdotool_delay=4
 smoke_flags=() jvm_args=()
 while [ "$#" -gt 0 ]; do
   case $1 in
-    --agent | --agent-options | --lwjgl | --frames | --natives | --jvm-arg | --screenshot)
+    --agent | --agent-options | --lwjgl | --frames | --natives | --jvm-arg | --screenshot | \
+      --seconds | --xdotool | --xdotool-delay)
       [ "$#" -ge 2 ] || usage
       case $1 in
         --agent) agent=$2 ;;
@@ -110,10 +128,13 @@ while [ "$#" -gt 0 ]; do
         --natives) natives=$2 ;;
         --jvm-arg) jvm_args+=("$2") ;;
         --screenshot) screenshot=$2 ;;
+        --seconds) smoke_flags+=("--seconds=$2") ;;
+        --xdotool) xdotool_cmds=$2 ;;
+        --xdotool-delay) xdotool_delay=$2 ;;
       esac
       shift 2
       ;;
-    --legacy | --readback) smoke_flags+=("$1"); shift ;;
+    --legacy | --readback | --capture) smoke_flags+=("$1"); shift ;;
     --keep) keep=1; shift ;;
     --sdl) main_class=SmokeSdl extra_modules=lwjgl-sdl; shift ;;
     -h | --help) usage ;;
@@ -129,6 +150,9 @@ fi
 for tool in wine wineboot winepath wineserver xvfb-run javac python3 curl timeout flock; do
   command -v "$tool" >/dev/null || { echo "wine-smoke: $tool not found" >&2; exit 2; }
 done
+if [ -n "$xdotool_cmds" ]; then
+  command -v xdotool >/dev/null || { echo "wine-smoke: xdotool not found" >&2; exit 2; }
+fi
 
 cache=${REMINEDOG_WINE_CACHE:-$repo/target/wine-cache}
 mkdir -p "$cache"
@@ -202,6 +226,7 @@ export WINEPREFIX=$cache/prefix WINEARCH=win64 WINEDEBUG=${WINEDEBUG:--all}
 # No Mono/Gecko install prompts, no menu entries on the host.
 export WINEDLLOVERRIDES="mscoree,mshtml=;winemenubuilder.exe=d${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
 declare -p java_exe classpath agent agent_options natives jvm_args main_class smoke_args gamedir output timeout \
+  xdotool_cmds xdotool_delay \
   >"$run/session.sh"
 
 start=$(date +%s)

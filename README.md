@@ -7,13 +7,13 @@ Mod ではなく、JVM に `-agentpath:` で読み込ませるネイティブの
 
 ## 現在の状態
 
-**プロトタイプ 1**：GLFW の `glfwSwapBuffers` をフックし、自前の OpenGL コンテキストで egui のウィンドウを 1 つ描く。
-キーやマウスの入力はまだ受け付けない。確認の手順は [docs/TESTING.md](docs/TESTING.md) にある。
+**プロトタイプ 2**：Ctrl+I でメニューを開き、マウスとキーボードで操作できる。ゲーム中に Z を押している間、画面の中央を拡大する。
+確認の手順は [docs/TESTING.md](docs/TESTING.md) にある。
 
 | 機能 | 状態 |
 |---|---|
 | オーバーレイの描画（egui） | プロトタイプ 1。実機（1.21.11 と 26.3、NVIDIA）で確認済み |
-| 入力の横取り・ホットキー・ズーム | 未実装（プロトタイプ 2） |
+| 入力の横取り・ホットキー・ズーム | プロトタイプ 2。Wine で確認済み、実機では未確認 |
 | F3+C による座標の記録 | 未実装（プロトタイプ 3）。パースと保存は `core` に実装済み |
 | Minecraft 26.x | 対応（ウィンドウが GLFW ではなく SDL3 になったため、SDL3 の `SDL_GL_SwapWindow` をフックする）。26.3 で確認済み |
 
@@ -58,6 +58,16 @@ JVM は `-agentpath:` の DLL を読み込めないと起動をやめるので�
    （Prism Launcher ならインスタンスの `minecraft` フォルダ。公式ランチャーなら起動構成の「ゲームディレクトリ」で、空欄なら `%APPDATA%\.minecraft`）。
    実際のフォルダはオーバーレイの「ゲームフォルダ」の行とログの `game dir:` の行に出る
 
+### 操作
+
+| キー | 動作 |
+|---|---|
+| Ctrl+I | メニューを開く／閉じる（開いている間、マウスとキーボードはメニューが受け取る） |
+| Esc | メニューを閉じる |
+| Z（ゲーム中に押している間） | 画面の中央を拡大する。倍率はメニューで変えられる |
+
+メニューの設定はまだ保存されない（ゲームを終了すると元に戻る）。
+
 ### オプション
 
 `-agentpath:C:\reminedog\reminedog.dll=log=debug,scale=1.5` のように `=` の後ろにカンマ区切りで書く。
@@ -83,4 +93,5 @@ scripts/wine-smoke.sh --agent target/x86_64-pc-windows-gnu/debug/reminedog.dll -
 必要なもの：64 ビットの Wine、Xvfb（`xvfb-run`、Mesa の GLX）、JDK 9 以降の `javac`、pip の入った `python3`、`curl`、`flock` と `timeout`。
 初回は PyPI（Windows 版 Java）と Maven Central（LWJGL）からダウンロードし、`target/wine-cache` に Wine の環境を作る（`cargo clean` で消える）。
 `--screenshot` を付けると最後のフレームを PNG で保存する。
+`--seconds 8 --capture --xdotool "key ctrl+i"` のように、秒数を決めて動かし、`xdotool` でキーやマウスの操作を送れる（`--sdl` で SDL3 版）。
 日本語を表示するには、日本語フォントを `target/wine-cache/prefix/drive_c/windows/Fonts/msgothic.ttc` などの名前で置く（`~/.wine` ではない。初回の実行でフォルダができる）。

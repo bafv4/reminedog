@@ -210,3 +210,16 @@ Windows、Prism Launcher、バニラ、NVIDIA GeForce RTX 4060 Ti（ドライバ
 - どちらもタイトル画面にオーバーレイが表示され、日本語（游ゴシック）も正しく出た。FPS（60、垂直同期）は下がっていない
 - 未検証の前提5（同じHDCに別のコンテキストを作って切り替える方式）は、NVIDIAでは問題なく動いた。AMD・Intelは未確認
 - 数字と英字だけegui内蔵のフォントで描いていたため、日本語と基準線がずれた（「プロトタイプ 1」の「1」が下がる）。日本語フォントがあるときはそれを優先して使うようにした
+
+## 追記：プロトタイプ2（入力・ホットキー・ズーム）の設計（2026-09-29）
+
+- ホットキー：Ctrl+I でメニューを開閉（どの画面でも有効）、Esc で閉じる、Z を押している間ズーム（ゲーム中＝カーソルを捕まえているときだけ。チャットでは効かない）。設定の保存は未実装
+- 入力の振り分けは `render/src/input.rs` の `InputRouter`（OSに依存しない。単体テストあり）。GLFWとSDL3のフックは、イベントを渡して「ゲームに渡す／横取りする」の答えに従うだけ
+  - メニューを開いている間は、押したイベントを横取りし、離したイベントはゲームに渡す（押しっぱなしの状態が残らないように）
+  - オーバーレイが描けていないとき（`overlay=off`、初期化の失敗、フレーム中のパニック）は何も横取りしない。見えないメニューが入力を奪うことはない
+- マウス：カーソルを捕まえたまま（GLFW の `CURSOR_DISABLED`、SDL3 の相対マウスモード）、自前の矢印を描いて相対移動で動かす。ゲームのカーソルの状態は切り替えない
+  - GLFW は捕まえたカーソルの位置を、どこまでも増える仮想の座標で報告し、ゲームは前回との差で視点を回す。メニューを開いている間に動いた量を覚えておき、閉じた後にゲームへ渡す座標から差し引く（閉じた瞬間に視点が飛ばない）。ゲームがカーソルを捕まえ直したり放したりしたら、この補正は捨てる
+- GLFW：`glfwSet{Key,Char,CharMods,MouseButton,CursorPos,Scroll,WindowFocus}Callback` をフックし、GLFWには自前のラッパーを登録する。戻り値にはゲームが前に登録したポインタを返す（終了時の `glfwFreeCallbacks` 対策）。ゲーム中かどうかは `glfwGetInputMode(CURSOR)` で判定
+- SDL3：`SDL_PollEvent` をフックし、横取りするイベントは取り除いて次のイベントを返す。メニューを開いている間は `SDL_StartTextInput` で文字入力（とIME）を有効にし、閉じたら元に戻す。ゲームが別の経路で入力を読む可能性があるので、`SDL_PeepEvents`・`SDL_WaitEvent(Timeout)`・`SDL_GetKeyboardState`・`SDL_GetMouseState`・`SDL_GetRelativeMouseState`・`SDL_AddEventWatch`・`SDL_SetEventFilter` を最初に使ったときと、`SDL_SetWindowRelativeMouseMode` の呼び出しをログに記録する
+- ズーム：`render/src/zoom.rs`。中央部分を同じ大きさで自前のFBOにコピーしてから、画面全体に引き伸ばす（2段階）。eguiが有効のまま残すscissor testをblitの前に切る。GL 3.0 未満では使わない
+- Wine上で `xdotool` により実際のキー・マウス操作を送って確認した（GLFW・SDL3の両方）：Ctrl+I で開閉、テキスト欄への入力、ゲームには離したイベントだけが届くこと、ズーム。カーソルを捕まえた状態のマウスの相対移動は、Wine+Xvfbでは届かないため未確認
