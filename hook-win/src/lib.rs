@@ -18,6 +18,7 @@ mod glfw_input;
 mod hook;
 mod input;
 mod loader;
+mod pointer;
 mod sdl;
 mod sdl_input;
 mod wgl;

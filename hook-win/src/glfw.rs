@@ -68,6 +68,10 @@ impl WindowSystem for Glfw {
         unsafe { (self.get_window_attrib)(window, GLFW_VISIBLE) != 0 }
     }
 
+    fn raw_motion(&self, window: *mut c_void) -> bool {
+        crate::glfw_input::raw_motion(window)
+    }
+
     fn describe(&self) -> String {
         match self.get_version_string {
             // SAFETY: returns a static NUL-terminated string; safe to call any time.

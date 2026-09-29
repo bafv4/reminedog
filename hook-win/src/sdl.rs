@@ -33,6 +33,7 @@ type GetWindowDisplayScaleFn = unsafe extern "C" fn(window: *mut c_void) -> f32;
 type GetWindowPropertiesFn = unsafe extern "C" fn(window: *mut c_void) -> u32;
 type GetPointerPropertyFn =
     unsafe extern "C" fn(props: u32, name: *const c_char, default: *mut c_void) -> *mut c_void;
+type GetHintBooleanFn = unsafe extern "C" fn(name: *const c_char, default: bool) -> bool;
 
 const WINDOW_OPENGL: u64 = 0x0000_0002;
 const WINDOW_HIDDEN: u64 = 0x0000_0008;
@@ -56,6 +57,7 @@ struct Sdl {
     get_window_display_scale: GetWindowDisplayScaleFn,
     get_window_properties: GetWindowPropertiesFn,
     get_pointer_property: GetPointerPropertyFn,
+    get_hint_boolean: Option<GetHintBooleanFn>,
 }
 
 impl Sdl {
@@ -87,6 +89,8 @@ impl Sdl {
                 get_pointer_property: std::mem::transmute::<*const c_void, GetPointerPropertyFn>(
                     get(c"SDL_GetPointerProperty")?,
                 ),
+                get_hint_boolean: export(module, c"SDL_GetHintBoolean")
+                    .map(|f| std::mem::transmute::<*const c_void, GetHintBooleanFn>(f)),
             })
         }
     }
@@ -108,6 +112,19 @@ impl WindowSystem for Sdl {
     fn is_visible(&self, window: *mut c_void) -> bool {
         // SAFETY: see above.
         unsafe { (self.get_window_flags)(window) & WINDOW_HIDDEN == 0 }
+    }
+
+    /// SDL3 reads raw input in relative mouse mode unless the game asked it to warp the
+    /// system pointer instead or to apply the system's pointer speed itself.
+    fn raw_motion(&self, _window: *mut c_void) -> bool {
+        let Some(get) = self.get_hint_boolean else {
+            return true;
+        };
+        // SAFETY: NUL-terminated hint names; hints may be read from any thread.
+        unsafe {
+            !get(c"SDL_MOUSE_RELATIVE_MODE_WARP".as_ptr(), false)
+                && !get(c"SDL_MOUSE_RELATIVE_SYSTEM_SCALE".as_ptr(), false)
+        }
     }
 
     fn framebuffer_size(&self, window: *mut c_void) -> (i32, i32) {

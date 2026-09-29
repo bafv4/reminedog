@@ -223,3 +223,17 @@ Windows、Prism Launcher、バニラ、NVIDIA GeForce RTX 4060 Ti（ドライバ
 - SDL3：`SDL_PollEvent` をフックし、横取りするイベントは取り除いて次のイベントを返す。メニューを開いている間は `SDL_StartTextInput` で文字入力（とIME）を有効にし、閉じたら元に戻す。ゲームが別の経路で入力を読む可能性があるので、`SDL_PeepEvents`・`SDL_WaitEvent(Timeout)`・`SDL_GetKeyboardState`・`SDL_GetMouseState`・`SDL_GetRelativeMouseState`・`SDL_AddEventWatch`・`SDL_SetEventFilter` を最初に使ったときと、`SDL_SetWindowRelativeMouseMode` の呼び出しをログに記録する
 - ズーム：`render/src/zoom.rs`。中央部分を同じ大きさで自前のFBOにコピーしてから、画面全体に引き伸ばす（2段階）。eguiが有効のまま残すscissor testをblitの前に切る。GL 3.0 未満では使わない
 - Wine上で `xdotool` により実際のキー・マウス操作を送って確認した（GLFW・SDL3の両方）：Ctrl+I で開閉、テキスト欄への入力、ゲームには離したイベントだけが届くこと、ズーム。カーソルを捕まえた状態のマウスの相対移動は、Wine+Xvfbでは届かないため未確認
+
+### 実機での指摘と修正（2026-09-29）
+
+メニューを開けることは実機で確認できた。指摘された 2 点を直した。
+
+- **チェックボックスと文字の高さがずれる**：egui は、フォントの ascent・descent・line gap から行の高さを決め、ascent の位置に基準線を置き、行をチェックボックスの中央に合わせる。
+  游ゴシックは line gap が大きいので、文字が行の上のほうに寄り、チェックボックスより高く描かれていた。
+  日本語フォントを読み込むときに、egui と同じ値（skrifa の metrics）から「行の中央」と「文字の中央（基準線から 0.38 em 上）」の差を求め、`FontTweak::y_offset_factor` で文字を下げる（`render/src/font_metrics.rs`）。
+  Wine で line gap の大きいフォント（IPA ゴシックの hhea を 0.88／−0.12／0.72 em に変えたもの）を使うと実機と同じずれが出て、修正後は中央に揃うことを確かめた。egui 内蔵のフォントでは差がほぼ 0（0.02 em）になる
+- **メニューのカーソルの速度に Windows の設定が反映されない**：ゲームは、カーソルを捕まえている間、Windows のポインターの速度も加速もかかっていない生の移動量（raw input）を読む。自前のカーソルはこれで動かしていたので、デスクトップと速さが違った。
+  メニューを開くたびに `SPI_GETMOUSESPEED`（1〜20）と `SPI_GETMOUSE`（「ポインターの精度を高める」）、加速の曲線（`HKCU\Control Panel\Mouse` の `SmoothMouseXCurve`／`SmoothMouseYCurve`）を読み、移動量に掛ける（`render/src/pointer.rs`、`hook-win/src/pointer.rs`）。
+  計算は SDL3 の `SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE` と同じ（精度を高めるがオフなら速度ごとの倍率、オンなら 1 回の移動量に応じた曲線。Windows 本来の計算の近似）
+  - ゲームがすでに Windows の速度のかかった移動量を読んでいるときは掛けない：GLFW 3.3 以降で `GLFW_RAW_MOUSE_MOTION` がオフ（Minecraft の「Raw Input」がオフ）のとき、SDL3 でヒント `SDL_MOUSE_RELATIVE_MODE_WARP` か `SDL_MOUSE_RELATIVE_SYSTEM_SCALE` がオンのとき。
+    `glfwRawMouseMotionSupported` のない GLFW（LWJGL 3.1.6 の 3.3.0 の開発版）は、捕まえたカーソルでは常に raw input を使う

@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{c_int, c_uint, c_void};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use reminedog_render::{Key, PointerButton, Route};
@@ -33,6 +34,7 @@ const MOD_CONTROL: c_int = 0x2;
 const MOD_ALT: c_int = 0x4;
 const CURSOR: c_int = 0x0003_3001;
 const CURSOR_DISABLED: c_int = 0x0003_4003;
+const RAW_MOUSE_MOTION: c_int = 0x0003_3005;
 
 /// The game's callbacks of one window.
 #[derive(Default, Clone, Copy)]
@@ -51,6 +53,9 @@ unsafe impl Send for GameCallbacks {}
 
 static GAME: Mutex<Option<HashMap<usize, GameCallbacks>>> = Mutex::new(None);
 static GET_INPUT_MODE: OnceLock<GetInputModeFn> = OnceLock::new();
+/// GLFW 3.3 and later: raw input is the GLFW_RAW_MOUSE_MOTION input mode, which Minecraft's
+/// "Raw Input" setting switches.
+static RAW_MOTION_OPTIONAL: AtomicBool = AtomicBool::new(false);
 
 fn game_callbacks(window: *mut c_void) -> GameCallbacks {
     let game = GAME.lock().unwrap_or_else(|e| e.into_inner());
@@ -78,6 +83,19 @@ fn captured(window: *mut c_void) -> bool {
     GET_INPUT_MODE.get().is_some_and(|get| {
         // SAFETY: a window GLFW passed us, on its event thread.
         unsafe { get(window, CURSOR) == CURSOR_DISABLED }
+    })
+}
+
+/// Whether a captured cursor reports raw mouse counts rather than the system pointer's
+/// motion. GLFW builds without `glfwRawMouseMotionSupported` (the 3.3 pre-release in
+/// LWJGL 3.1.6, as Minecraft 1.13 ships) always use raw input for a disabled cursor.
+pub fn raw_motion(window: *mut c_void) -> bool {
+    if !RAW_MOTION_OPTIONAL.load(Ordering::Relaxed) {
+        return true;
+    }
+    GET_INPUT_MODE.get().is_none_or(|get| {
+        // SAFETY: a window GLFW passed us; the mode exists in this GLFW version.
+        unsafe { get(window, RAW_MOUSE_MOTION) != 0 }
     })
 }
 
@@ -140,6 +158,10 @@ pub fn install(module: HMODULE) {
         let _ =
             GET_INPUT_MODE.set(unsafe { std::mem::transmute::<*const c_void, GetInputModeFn>(f) });
     }
+    RAW_MOTION_OPTIONAL.store(
+        export(module, c"glfwRawMouseMotionSupported").is_some(),
+        Ordering::Relaxed,
+    );
     macro_rules! hook {
         ($name:literal, $detour:ident, $original:ident) => {
             match export(module, $name) {

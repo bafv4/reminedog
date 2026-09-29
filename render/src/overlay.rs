@@ -8,6 +8,7 @@ use egui::{
 };
 use glow::HasContext as _;
 
+use crate::font_metrics;
 use crate::zoom::Zoom;
 
 /// A font file added as a fallback for glyphs egui's built-in fonts lack (Japanese).
@@ -254,12 +255,19 @@ pub fn gl_summary(gl: &glow::Context) -> String {
 fn font_definitions(fonts: Vec<FontSource>) -> FontDefinitions {
     let mut defs = FontDefinitions::default();
     for font in fonts {
+        // Japanese fonts sit high in egui's rows (above the check boxes) without this.
+        let tweak = font_metrics::centering_tweak(&font.data, font.index);
+        log::debug!(
+            "font {}: glyphs shifted down by {:.3} em",
+            font.name,
+            tweak.y_offset_factor
+        );
         defs.font_data.insert(
             font.name.clone(),
             Arc::new(FontData {
                 font: Cow::Owned(font.data),
                 index: font.index,
-                tweak: Default::default(),
+                tweak,
             }),
         );
         // Proportional text uses this font first: mixing it with egui's own Latin font put

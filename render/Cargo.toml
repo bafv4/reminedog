@@ -11,3 +11,4 @@ egui.workspace = true
 egui_glow.workspace = true
 glow.workspace = true
 log.workspace = true
+skrifa.workspace = true

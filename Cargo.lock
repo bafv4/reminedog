@@ -606,6 +606,7 @@ dependencies = [
  "egui_glow",
  "glow",
  "log",
+ "skrifa",
 ]
 
 [[package]]

@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Instant;
 
 use glow::HasContext as _;
-use reminedog_render::{FrameInput, FrameParams, Overlay, StatusLine, gl_summary};
+use reminedog_render::{FrameInput, FrameParams, Overlay, PointerSpeed, StatusLine, gl_summary};
 
 use crate::agent::{self, Globals};
 use crate::fonts;
 use crate::input;
+use crate::pointer;
 use crate::wgl::{self, OwnContext, Wgl};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
@@ -42,6 +43,10 @@ pub trait WindowSystem: Sync {
     /// DPI scale of the window.
     fn content_scale(&self, window: *mut c_void) -> f32;
     fn hwnd(&self, window: *mut c_void) -> Option<HWND>;
+    /// Whether the game gets raw mouse counts while it captures the cursor, untouched by
+    /// the system's pointer speed and acceleration (the overlay then applies them to its
+    /// own cursor), rather than the motion of the system's pointer.
+    fn raw_motion(&self, window: *mut c_void) -> bool;
 }
 
 /// Draws the overlay into the back buffer right before the window system presents it.
@@ -83,6 +88,16 @@ pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
         input::router().set_enabled(false);
     }
     *state = next;
+}
+
+/// How relative motion should move the overlay's cursor while the game captures the mouse.
+fn pointer_speed(ws: &dyn WindowSystem, window: *mut c_void) -> PointerSpeed {
+    if ws.raw_motion(window) {
+        pointer::system_speed()
+    } else {
+        log::debug!("the game reads the system pointer's motion; no pointer speed applied");
+        PointerSpeed::RAW
+    }
 }
 
 /// The window's device context. GLFW's and SDL's window classes have CS_OWNDC, so this is
@@ -148,6 +163,8 @@ struct Runtime {
     cost_ms: f64,
     failures: u32,
     gl_errors_logged: u32,
+    /// The UI was open in the last frame.
+    ui_was_open: bool,
 }
 
 // SAFETY: the GL handles and objects are only used inside the swap detour while STATE is
@@ -203,6 +220,7 @@ impl Runtime {
             }
         };
         log::info!("overlay: initialized");
+        input::router().set_pointer_speed(pointer_speed(ws, window));
 
         let status = vec![
             StatusLine::new(
@@ -224,6 +242,7 @@ impl Runtime {
             cost_ms: 0.0,
             failures: 0,
             gl_errors_logged: 0,
+            ui_was_open: false,
         }))
     }
 
@@ -254,6 +273,13 @@ impl Runtime {
         let scale = ws.content_scale(window) * agent.options.ui_scale.unwrap_or(1.0);
 
         let started = Instant::now();
+        // The pointer settings may change while the game runs; read them whenever the UI
+        // opens (a few events right after Ctrl+I may still use the previous ones).
+        let ui_open = input::router().ui_open();
+        if ui_open && !self.ui_was_open {
+            input::router().set_pointer_speed(pointer_speed(ws, window));
+        }
+        self.ui_was_open = ui_open;
         {
             let _current = self.context.make_current(wgl).map_err(FrameError::Failed)?;
             let input = {

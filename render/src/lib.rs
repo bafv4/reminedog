@@ -4,8 +4,10 @@
 //! [`Overlay::render`] and switches back before the real buffer swap, so nothing here
 //! ever touches the game's GL state.
 
+mod font_metrics;
 mod input;
 mod overlay;
+mod pointer;
 mod zoom;
 
 pub use egui::{Key, Modifiers, PointerButton};
@@ -13,3 +15,4 @@ pub use input::{InputRouter, Route};
 pub use overlay::{
     FontSource, FrameInput, FrameOutput, FrameParams, Overlay, OverlayError, StatusLine, gl_summary,
 };
+pub use pointer::{PointerSpeed, WINDOWS_DEFAULT_CURVE, parse_windows_curve};

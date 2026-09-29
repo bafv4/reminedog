@@ -8,7 +8,8 @@
 //   --readback  after the last swap, print "PIXEL x y r g b" (front buffer) and
 //               "PIXEL_BACK x y r g b" (back buffer) for a few window coordinates
 //   --seconds=N   run for N seconds at about 60 fps instead of a frame count (for input tests)
-//   --capture     grab the cursor like Minecraft in game (GLFW_CURSOR_DISABLED)
+//   --capture     grab the cursor like Minecraft in game (GLFW_CURSOR_DISABLED), with raw
+//                 mouse motion where supported (Minecraft's "Raw Input" setting, on by default)
 //   --screenshot  after the last swap, save the back buffer as smoke-screenshot.png in the
 //                 current directory (diagnostic: what an overlay drew, where the driver keeps
 //                 the back buffer after a swap, as Wine + llvmpipe does)
@@ -154,6 +155,9 @@ public final class Smoke {
         glfwSetScrollCallback(window, (w, dx, dy) -> scrolls++);
         if (capture) {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            if (glfwRawMouseMotionSupported()) {
+                glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+            }
         }
 
         // The agent swaps GL contexts inside the swap; make sure ours is current afterwards.

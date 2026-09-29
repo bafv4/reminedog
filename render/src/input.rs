@@ -5,6 +5,7 @@
 //! drop or forward each one as told. While the UI is open everything goes to egui except
 //! releases (keys, mouse buttons), which the game still gets so nothing stays held down.
 
+use crate::pointer::PointerSpeed;
 use egui::{Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, pos2, vec2};
 
 /// What to do with an input event.
@@ -44,6 +45,8 @@ pub struct InputRouter {
     /// difference to the last position it saw, so positions forwarded afterwards have this
     /// subtracted; otherwise the view would jump when the UI closes.
     offset: (f64, f64),
+    /// Applied to relative motion that moves the overlay's own cursor.
+    pointer_speed: PointerSpeed,
 }
 
 impl Default for InputRouter {
@@ -67,6 +70,7 @@ impl InputRouter {
             last_cursor: None,
             last_captured: false,
             offset: (0.0, 0.0),
+            pointer_speed: PointerSpeed::RAW,
         }
     }
 
@@ -110,6 +114,13 @@ impl InputRouter {
     /// one: the UI is open while the cursor is captured.
     pub fn software_cursor(&self) -> Option<Pos2> {
         (self.ui_open && self.last_captured).then(|| self.pointer_points())
+    }
+
+    /// How relative motion moves the overlay's own cursor: the system's pointer speed when
+    /// the game reads raw mouse counts, [`PointerSpeed::RAW`] when the counts already went
+    /// through the system's pointer ballistics.
+    pub fn set_pointer_speed(&mut self, speed: PointerSpeed) {
+        self.pointer_speed = speed;
     }
 
     /// egui events collected since the last call.
@@ -308,6 +319,7 @@ impl InputRouter {
     }
 
     fn move_pointer(&mut self, dx: f32, dy: f32) {
+        let (dx, dy) = self.pointer_speed.apply(dx, dy);
         let [w, h] = self.screen_px;
         let x = (self.pointer.x + dx).clamp(0.0, (w - 1.0).max(0.0));
         let y = (self.pointer.y + dy).clamp(0.0, (h - 1.0).max(0.0));
@@ -535,5 +547,35 @@ mod tests {
         ctrl_i(&mut r);
         assert_eq!(r.cursor_motion(10.0, -20.0, 0.0, 0.0, true), Route::Consume);
         assert_eq!(r.software_cursor(), Some(pos2(410.0, 280.0)));
+    }
+
+    #[test]
+    fn pointer_speed_scales_captured_motion_only() {
+        let mut r = router();
+        r.set_pointer_speed(PointerSpeed::Linear(0.5));
+        ctrl_i(&mut r);
+        r.cursor_motion(10.0, -20.0, 0.0, 0.0, true);
+        assert_eq!(r.software_cursor(), Some(pos2(405.0, 290.0)));
+        // A free cursor is the system's own pointer, already at the system's speed.
+        r.cursor_motion(0.0, 0.0, 100.0, 50.0, false);
+        r.take_events();
+        r.cursor_motion(10.0, 10.0, 110.0, 60.0, false);
+        assert_eq!(
+            r.take_events(),
+            vec![Event::PointerMoved(pos2(110.0, 60.0))]
+        );
+    }
+
+    #[test]
+    fn pointer_speed_does_not_change_the_camera_correction() {
+        let mut r = router();
+        r.set_pointer_speed(PointerSpeed::Linear(2.0));
+        r.cursor_position(100.0, 100.0, true);
+        ctrl_i(&mut r);
+        r.cursor_position(110.0, 100.0, true);
+        assert_eq!(r.software_cursor(), Some(pos2(420.0, 300.0)));
+        ctrl_i(&mut r);
+        // The game still sees no motion for what the UI took.
+        assert_eq!(r.cursor_position(111.0, 100.0, true), Some((101.0, 100.0)));
     }
 }
