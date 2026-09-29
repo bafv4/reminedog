@@ -20,6 +20,7 @@ use crate::tall::TallZoom;
 use crate::wgl::{self, OwnContext, Wgl};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
+use windows_sys::Win32::UI::WindowsAndMessaging::IsIconic;
 
 /// Settings changed in the menu are saved after this long without further changes (or
 /// when the menu closes), so dragging a slider does not write the file every frame.
@@ -66,6 +67,15 @@ pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
         return;
     };
     if !agent.options.overlay || window.is_null() {
+        return;
+    }
+    // A minimized window has nothing to draw on, and GetDC hands out a new temporary DC on
+    // every call instead of the window's own one; skip the frame and keep the overlay.
+    // SAFETY: a valid window handle.
+    if ws
+        .hwnd(window)
+        .is_some_and(|hwnd| unsafe { IsIconic(hwnd) } != 0)
+    {
         return;
     }
     // Contended means another thread is swapping another window; poisoned means a panic
@@ -297,6 +307,12 @@ impl Runtime {
             ));
         }
         if hdc != self.context.hdc() {
+            log::debug!(
+                "device context {:?} -> {hdc:?} (hwnd {:?}, current {:?})",
+                self.context.hdc(),
+                ws.hwnd(window),
+                wgl.current()
+            );
             return Err(FrameError::DrawableChanged);
         }
         let (width, height) = ws.framebuffer_size(window);
