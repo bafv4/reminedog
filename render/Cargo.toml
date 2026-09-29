@@ -1,0 +1,13 @@
+[package]
+name = "reminedog-render"
+description = "Overlay rendering with glow + egui_glow (zoom and UI)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+egui.workspace = true
+egui_glow.workspace = true
+glow.workspace = true
+log.workspace = true
