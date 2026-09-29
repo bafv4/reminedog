@@ -197,3 +197,16 @@ MinHook は即値の長さを差し引いて変位の位置を求めるので問
 - つまり描画はOpenGL。コンテキストは非表示の補助ウィンドウで作り、ゲームのウィンドウで使っている
 - 対応：描画部分（`hook-win/src/frame.rs`）をウィンドウのライブラリに依存しない形（`WindowSystem` トレイト）にし、GLFWとSDL3の両方から呼ぶ。SDL3では `SDL_GL_SwapWindow` をフックし、HWNDは `SDL.window.win32.hwnd` プロパティ、大きさは `SDL_GetWindowSizeInPixels`、倍率は `SDL_GetWindowDisplayScale`、非表示の判定は `SDL_GetWindowFlags` で取る
 - `ci/smoke/SmokeSdl.java` は26.3と同じ手順（非表示の補助ウィンドウでコンテキストを作り、ゲームのウィンドウで使う）にした。Wineで表示を確認済み
+
+## 追記：プロトタイプ1の実機確認（2026-09-29）
+
+Windows、Prism Launcher、バニラ、NVIDIA GeForce RTX 4060 Ti（ドライバ 591.86）、2560×1440、表示スケール125%で確認した。
+
+| Minecraft | ウィンドウ | ゲームのGL | 自前のGL | 1フレームの処理時間 |
+|---|---|---|---|---|
+| 1.21.11 | GLFW 3.4.0 | 3.3.0 Core Profile | 4.6.0 Compatibility | 0.23 ms |
+| 26.3 | SDL 3.4.14 | 3.3.0 Core Profile | 4.6.0 Compatibility | 0.16 ms |
+
+- どちらもタイトル画面にオーバーレイが表示され、日本語（游ゴシック）も正しく出た。FPS（60、垂直同期）は下がっていない
+- 未検証の前提5（同じHDCに別のコンテキストを作って切り替える方式）は、NVIDIAでは問題なく動いた。AMD・Intelは未確認
+- 数字と英字だけegui内蔵のフォントで描いていたため、日本語と基準線がずれた（「プロトタイプ 1」の「1」が下がる）。日本語フォントがあるときはそれを優先して使うようにした

@@ -172,14 +172,17 @@ fn font_definitions(fonts: Vec<FontSource>) -> FontDefinitions {
                 tweak: Default::default(),
             }),
         );
-        // Appended after egui's own fonts: Latin text keeps egui's look, and anything
-        // those fonts lack (kana, kanji) falls back to this one.
-        for family in [FontFamily::Proportional, FontFamily::Monospace] {
-            defs.families
-                .entry(family)
-                .or_default()
-                .push(font.name.clone());
-        }
+        // Proportional text uses this font first: mixing it with egui's own Latin font put
+        // digits and kana on different baselines ("プロトタイプ 1" with a sunken "1").
+        // Monospace keeps egui's font and only falls back to this one.
+        defs.families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .insert(0, font.name.clone());
+        defs.families
+            .entry(FontFamily::Monospace)
+            .or_default()
+            .push(font.name.clone());
     }
     defs
 }
@@ -268,17 +271,18 @@ mod tests {
     }
 
     #[test]
-    fn fonts_are_appended_as_fallbacks() {
+    fn japanese_font_leads_proportional_and_backs_up_monospace() {
         let defs = font_definitions(vec![FontSource {
             name: "jp".into(),
             data: vec![],
             index: 1,
         }]);
         assert_eq!(defs.font_data["jp"].index, 1);
-        for family in [FontFamily::Proportional, FontFamily::Monospace] {
-            let names = &defs.families[&family];
-            assert_eq!(names.last().map(String::as_str), Some("jp"));
-            assert!(names.len() > 1, "egui's own fonts stay first");
-        }
+        let proportional = &defs.families[&FontFamily::Proportional];
+        assert_eq!(proportional.first().map(String::as_str), Some("jp"));
+        assert!(proportional.len() > 1, "egui's fonts remain as fallbacks");
+        let monospace = &defs.families[&FontFamily::Monospace];
+        assert_eq!(monospace.last().map(String::as_str), Some("jp"));
+        assert!(monospace.len() > 1, "egui's monospace font stays first");
     }
 }
