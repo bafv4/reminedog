@@ -180,3 +180,14 @@ MinHook は即値の長さを差し引いて変位の位置を求めるので問
 - `opengl32.dll` は `glfwCreateWindow` の中で読み込まれる。`glfwTerminate` の後も `glfw.dll` と `opengl32.dll` は解放されない
 - 通知の中でGLFWのエクスポートを調べてフックを入れられる（エクスポート表は `GetProcAddress` を使わず、PEのヘッダーから直接読む）
 - 同じHDCに作った自前のコンテキスト（Compatibility Profile）で egui を描き、ゲームのコンテキスト（Core Profile 3.2）に戻せる。ゲーム側のGLのエラーは増えず、終了時の `glfwFreeCallbacks` でも落ちない
+
+## 追記：Minecraft 26.x はGLFWを使っていない（2026-09-29）
+
+実機（Prism Launcher、Minecraft 26.3、バニラ、Java 25 の `java-runtime-epsilon`）で試したところ、`glfw.dll` は読み込まれず、LWJGL 3.4.3 の `SDL3.dll` が読み込まれた。
+ウィンドウと入力はGLFWからSDL3に替わったとみられる。あわせて `vulkan-1.dll`・`shaderc.dll`・`spirv-cross.dll`・`lwjgl_vma.dll` と、NVIDIAのOpenGLドライバ（`nvoglv64.dll`）も読み込まれている。
+1.21.11 は従来どおりGLFWで起動する。
+
+- 「1.13以降はGLFW」という前提は 26.x では成り立たない。26.x は個別に対応する
+- 描画がOpenGLなら、`SDL_GL_SwapWindow` のフックに付け替えればほぼ同じ方式で描ける。Vulkanなら `vkQueuePresentKHR` をフックしてVulkanで描く必要があり、描画部分の作り直しになる
+- どちらかを確かめるため、いまのエージェントはSDL3を検出すると `SDL_CreateWindow`（フラグ）・`SDL_GL_CreateContext`・`SDL_Vulkan_CreateSurface`・`SDL_GL_SwapWindow` を診断用にフックし、結果をログに出す（`renderer: OpenGL via SDL3` など）。描画はしない
+- 検証用に `ci/smoke/SmokeSdl.java`（SDL3でOpenGLのウィンドウを作る）を追加し、CIとWine（`scripts/wine-smoke.sh --sdl --lwjgl 3.4.3`）で確かめている

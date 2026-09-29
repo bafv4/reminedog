@@ -4,7 +4,7 @@
 #
 # Usage: scripts/wine-smoke.sh [--agent DLL] [--agent-options STR] [--lwjgl VERSION]
 #                              [--frames N] [--legacy] [--readback] [--natives MODE]
-#                              [--jvm-arg ARG]... [--screenshot PNG] [--keep]
+#                              [--jvm-arg ARG]... [--screenshot PNG] [--sdl] [--keep]
 #   --agent DLL          load DLL with -agentpath: (reminedog.dll)
 #   --agent-options STR  options string passed to Agent_OnLoad (-agentpath:DLL=STR)
 #   --lwjgl VERSION      LWJGL version (default 3.3.3; 3.2.2 = Minecraft 1.14-1.18)
@@ -20,6 +20,8 @@
 #   --readback           print pixels read back after the last frame
 #   --jvm-arg ARG        extra JVM argument, e.g. -Dorg.lwjgl.util.Debug=true (repeatable)
 #   --screenshot PNG     save the last frame (back buffer after the swap) to PNG
+#   --sdl                run ci/smoke/SmokeSdl.java (an SDL3 window, like Minecraft 26.x)
+#                        instead of the GLFW one; needs --lwjgl 3.4.0 or later
 #   --keep               keep the run directory (game dir, output) instead of deleting it
 # Environment:
 #   REMINEDOG_WINE_CACHE  cache for the JRE, LWJGL, classes and WINEPREFIX
@@ -67,7 +69,7 @@ wine_session() {
     library-path) args+=("-Djava.library.path=$(winepath -w "$gamedir/natives")") ;;
     *) ;;
   esac
-  args+=("${jvm_args[@]}" -cp "$cp_win" Smoke "${smoke_args[@]}")
+  args+=("${jvm_args[@]}" -cp "$cp_win" "$main_class" "${smoke_args[@]}")
 
   # Keep the host's JVM settings (proxy trust store etc.) away from the Windows JVM.
   unset JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS
@@ -94,6 +96,7 @@ usage() {
 }
 
 agent='' agent_options='' lwjgl=3.3.3 frames=120 natives=extract keep=0 screenshot=''
+main_class=Smoke extra_modules=''
 smoke_flags=() jvm_args=()
 while [ "$#" -gt 0 ]; do
   case $1 in
@@ -112,6 +115,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --legacy | --readback) smoke_flags+=("$1"); shift ;;
     --keep) keep=1; shift ;;
+    --sdl) main_class=SmokeSdl extra_modules=lwjgl-sdl; shift ;;
     -h | --help) usage ;;
     *) echo "wine-smoke: unknown argument $1" >&2; usage ;;
   esac
@@ -139,19 +143,19 @@ if ! flock -n 9; then
 fi
 
 java_exe=$("$repo/scripts/fetch-wine-jre.sh" "$cache")
-jar_list=$("$repo/ci/smoke/fetch-lwjgl.sh" "$lwjgl" "$cache/lwjgl/$lwjgl")
+jar_list=$(LWJGL_EXTRA_MODULES=$extra_modules "$repo/ci/smoke/fetch-lwjgl.sh" "$lwjgl" "$cache/lwjgl/$lwjgl")
 mapfile -t jars <<<"$jar_list"
 
 # Compile with the host JDK; the class files run on any Java 8+ JVM.
-classes=$cache/smoke-classes/$lwjgl
-smoke_src=$repo/ci/smoke/Smoke.java
-if [ ! -f "$classes/Smoke.class" ] || [ "$smoke_src" -nt "$classes/Smoke.class" ]; then
-  echo "wine-smoke: compiling Smoke.java against LWJGL $lwjgl" >&2
+classes=$cache/smoke-classes/$lwjgl-$main_class
+smoke_src=$repo/ci/smoke/$main_class.java
+if [ ! -f "$classes/$main_class.class" ] || [ "$smoke_src" -nt "$classes/$main_class.class" ]; then
+  echo "wine-smoke: compiling $main_class.java against LWJGL $lwjgl" >&2
   rm -rf "$classes"
   mkdir -p "$classes"
   javac --release 8 -Xlint:-options -d "$classes" -cp "$(IFS=:; echo "${jars[*]}")" "$smoke_src" 2>&1 |
     grep -v '^Picked up JAVA_TOOL_OPTIONS' >&2 || true
-  [ -f "$classes/Smoke.class" ] || { echo "wine-smoke: javac failed" >&2; exit 1; }
+  [ -f "$classes/$main_class.class" ] || { echo "wine-smoke: javac failed" >&2; exit 1; }
 fi
 
 run=$(mktemp -d "$cache/run.XXXXXX")
@@ -195,7 +199,7 @@ timeout=${SMOKE_TIMEOUT:-300}
 export WINEPREFIX=$cache/prefix WINEARCH=win64 WINEDEBUG=${WINEDEBUG:--all}
 # No Mono/Gecko install prompts, no menu entries on the host.
 export WINEDLLOVERRIDES="mscoree,mshtml=;winemenubuilder.exe=d${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
-declare -p java_exe classpath agent agent_options natives jvm_args smoke_args gamedir output timeout \
+declare -p java_exe classpath agent agent_options natives jvm_args main_class smoke_args gamedir output timeout \
   >"$run/session.sh"
 
 start=$(date +%s)

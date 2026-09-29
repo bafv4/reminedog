@@ -53,6 +53,18 @@
 | `overlay: first frame rendered` | 1 フレーム目を描けた |
 | `[ERROR]` / `[WARN]` | 問題があった。内容を送ってほしい |
 
+## Minecraft 26.x について
+
+26.x は GLFW ではなく SDL3 でウィンドウを作るため、オーバーレイはまだ出ない。
+代わりに、ゲームが OpenGL と Vulkan のどちらで描いているかをログに記録する。
+26.x で一度起動し、ログの次の行を送ってほしい（26.x 対応の方針を決めるのに使う）。
+
+| 行 | 意味 |
+|---|---|
+| `SDL3 loaded` | SDL3 を検出した |
+| `SDL_CreateWindow(... flags ... [OpenGL])` | ウィンドウの作成時の指定（`OpenGL` か `Vulkan`） |
+| `renderer: OpenGL via SDL3` / `renderer: Vulkan via SDL3` | 実際に作られたもの |
+
 ## テストしたい組み合わせ（できる範囲で）
 
 | Minecraft | Java | LWJGL | 理由 |

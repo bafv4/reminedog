@@ -42,7 +42,7 @@ fetch() {
 }
 
 mkdir -p "$dest"
-for module in lwjgl lwjgl-glfw lwjgl-opengl; do
+for module in lwjgl lwjgl-glfw lwjgl-opengl ${LWJGL_EXTRA_MODULES:-}; do
   for classifier in "" "-natives-windows"; do
     name="$module-$version$classifier.jar"
     out="$dest/$name"

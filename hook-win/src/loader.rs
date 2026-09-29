@@ -124,5 +124,7 @@ fn scan_loaded_modules() {
 fn on_module(module: HMODULE, path: &str) {
     if crate::glfw::is_glfw(module) {
         crate::glfw::attach(module, path);
+    } else if crate::sdl::is_sdl3(module) {
+        crate::sdl::attach(module, path);
     }
 }

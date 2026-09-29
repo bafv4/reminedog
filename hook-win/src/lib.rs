@@ -14,7 +14,9 @@ mod ffi;
 mod fonts;
 mod frame;
 mod glfw;
+mod hook;
 mod loader;
+mod sdl;
 mod wgl;
 
 use std::ffi::{CStr, c_char, c_void};

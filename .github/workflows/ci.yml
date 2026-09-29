@@ -120,16 +120,33 @@ jobs:
           - lwjgl: "3.2.2"
             java: "8"
             hints: --legacy
+            harness: Smoke
+            modules: ""
+            markers: "GLFW hooks installed|overlay: first frame rendered"
           # Minecraft 1.20.5+: Java 21, OpenGL 3.2 core context.
           - lwjgl: "3.3.3"
             java: "21"
             hints: ""
+            harness: Smoke
+            modules: ""
+            markers: "GLFW hooks installed|overlay: first frame rendered"
+          # Minecraft 26.x: Java 25, window opened with SDL3 instead of GLFW. The agent only
+          # probes it for now (no overlay), so check that the probe sees the OpenGL context.
+          - lwjgl: "3.4.3"
+            java: "25"
+            hints: ""
+            harness: SmokeSdl
+            modules: lwjgl-sdl
+            markers: "SDL3 probes installed|renderer: OpenGL via SDL3"
     defaults:
       run:
         shell: bash
     env:
       GALLIUM_DRIVER: llvmpipe
       SMOKE_FRAMES: "180"
+      SMOKE_HARNESS: ${{ matrix.harness }}
+      LWJGL_MODULES: ${{ matrix.modules }}
+      SMOKE_MARKERS: ${{ matrix.markers }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -179,7 +196,7 @@ jobs:
         run: |
           tmp=$(cygpath -u "$RUNNER_TEMP")
           java_bin=$(cygpath -u "$JAVA_HOME")/bin
-          jar_list=$(bash ci/smoke/fetch-lwjgl.sh "$LWJGL_VERSION" "$tmp/lwjgl")
+          jar_list=$(LWJGL_EXTRA_MODULES="$LWJGL_MODULES" bash ci/smoke/fetch-lwjgl.sh "$LWJGL_VERSION" "$tmp/lwjgl")
           mapfile -t jars <<<"$jar_list"
           jar_cp=$(cygpath -w "${jars[@]}" | paste -sd ';' -)
           classes=$(cygpath -w "$tmp/classes")
@@ -187,7 +204,7 @@ jobs:
           # JDK 8's javac has no --release; its own class library is Java 8's anyway.
           if [ "$JAVA_MAJOR" = 8 ]; then release=(-source 8 -target 8); else release=(--release 8); fi
           mkdir -p "$tmp/classes"
-          "$java_bin/javac" "${release[@]}" -Xlint:-options -encoding UTF-8 -cp "$jar_cp" -d "$classes" ci/smoke/Smoke.java
+          "$java_bin/javac" "${release[@]}" -Xlint:-options -encoding UTF-8 -cp "$jar_cp" -d "$classes" "ci/smoke/$SMOKE_HARNESS.java"
 
           # Paths handed to java.exe are Windows paths; SMOKE_ROOT is only used by bash.
           {
@@ -224,7 +241,7 @@ jobs:
           natives=$(cygpath -w "$dir/natives")
           status=0
           "$JAVA" "-Dorg.lwjgl.system.SharedLibraryExtractPath=$natives" -cp "$SMOKE_CP" \
-            Smoke "$SMOKE_FRAMES" --readback ${SMOKE_HINTS:+"$SMOKE_HINTS"} 2>&1 | tee smoke.txt || status=$?
+            "$SMOKE_HARNESS" "$SMOKE_FRAMES" --readback ${SMOKE_HINTS:+"$SMOKE_HINTS"} 2>&1 | tee smoke.txt || status=$?
           fail=0
           [ "$status" -eq 0 ] || { echo "::error::baseline harness exited with $status"; fail=1; }
           grep -qF "SMOKE OK" smoke.txt || { echo "::error::baseline harness did not print 'SMOKE OK'"; fail=1; }
@@ -243,12 +260,13 @@ jobs:
           # --screenshot saves the back buffer after the last swap (smoke-screenshot.png, uploaded
           # below); whether it still shows the overlay depends on the driver's swap method.
           "$JAVA" "-agentpath:$AGENT" "-Dorg.lwjgl.system.SharedLibraryExtractPath=$natives" -cp "$SMOKE_CP" \
-            Smoke "$SMOKE_FRAMES" --readback --screenshot ${SMOKE_HINTS:+"$SMOKE_HINTS"} 2>&1 | tee smoke.txt || status=$?
+            "$SMOKE_HARNESS" "$SMOKE_FRAMES" --readback --screenshot ${SMOKE_HINTS:+"$SMOKE_HINTS"} 2>&1 | tee smoke.txt || status=$?
           fail=0
           [ "$status" -eq 0 ] || { echo "::error::harness with the agent exited with $status"; fail=1; }
           grep -qF "SMOKE OK" smoke.txt || { echo "::error::harness with the agent did not print 'SMOKE OK'"; fail=1; }
           log=reminedog/reminedog.log
-          for marker in "agent loaded" "GLFW hooks installed" "overlay: first frame rendered"; do
+          IFS='|' read -ra markers <<<"agent loaded|$SMOKE_MARKERS"
+          for marker in "${markers[@]}"; do
             grep -qF "$marker" "$log" || { echo "::error::agent log lacks '$marker'"; fail=1; }
           done
           if grep -F "[ERROR]" "$log"; then

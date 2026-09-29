@@ -7,10 +7,10 @@
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::{Mutex, OnceLock};
 
-use minhook::MinHook;
 use windows_sys::Win32::Foundation::{HMODULE, HWND};
 
 use crate::ffi;
+use crate::hook::{self, export};
 
 type SwapBuffersFn = unsafe extern "C" fn(window: *mut c_void);
 type GetFramebufferSizeFn =
@@ -97,13 +97,6 @@ pub fn is_glfw(module: HMODULE) -> bool {
     export(module, c"glfwInit").is_some() && export(module, c"glfwSwapBuffers").is_some()
 }
 
-/// Export lookup that is safe while the module is still being loaded.
-fn export(module: HMODULE, name: &CStr) -> Option<*const c_void> {
-    // SAFETY: `module` comes from the loader (notification or module list), so it is
-    // the base of a mapped PE image.
-    unsafe { ffi::export_address(module, name) }
-}
-
 pub fn attach(module: HMODULE, path: &str) {
     let _guard = ATTACH.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = GLFW.get() {
@@ -147,46 +140,15 @@ fn install(module: HMODULE, path: &str) -> Result<Glfw, String> {
     };
 
     // SAFETY: the address is glfwSwapBuffers and the detour has the same signature.
-    let original = unsafe {
-        detour(
+    unsafe {
+        hook::install(
             "glfwSwapBuffers",
             swap_buffers,
             swap_buffers_detour as *const c_void,
-        )?
-    };
-    // SAFETY: the trampoline behaves like the original glfwSwapBuffers.
-    let original = unsafe { std::mem::transmute::<*const c_void, SwapBuffersFn>(original) };
-    if SWAP_BUFFERS.set(original).is_err() {
-        return Err("glfwSwapBuffers is already detoured".into());
+            &SWAP_BUFFERS,
+        )?;
     }
     Ok(glfw)
-}
-
-/// Patches `target` to jump to `detour` and returns the trampoline that runs the
-/// original. The patch goes live immediately.
-///
-/// # Safety
-/// `target` must be a function whose signature `detour` shares, and nobody may be
-/// executing its first instructions (true while its DLL is still being loaded).
-unsafe fn detour(
-    name: &str,
-    target: *const c_void,
-    detour: *const c_void,
-) -> Result<*const c_void, String> {
-    // SAFETY: guaranteed by the caller; the hex dumps only read code bytes.
-    unsafe {
-        log::debug!("{name} @ {target:p}: {}", ffi::hex_bytes(target, 16));
-        let trampoline = MinHook::create_hook(target.cast_mut(), detour.cast_mut())
-            .map_err(|e| format!("create {name} hook: {e:?}"))?;
-        MinHook::enable_hook(target.cast_mut())
-            .map_err(|e| format!("enable {name} hook: {e:?}"))?;
-        log::debug!("{name} patched: {}", ffi::hex_bytes(target, 16));
-        log::debug!(
-            "{name} trampoline @ {trampoline:p}: {}",
-            ffi::hex_bytes(trampoline, 32)
-        );
-        Ok(trampoline.cast_const())
-    }
 }
 
 unsafe extern "C" fn swap_buffers_detour(window: *mut c_void) {
