@@ -39,6 +39,11 @@ scripts/   Linux 上で Wine を使ってエージェントを動かすスクリ
 
 ## 使い方
 
+必要なもの：Windows 10 / 11 と 64 ビット（x64）版の Java（Minecraft のランチャーが使う Java は通常これ）。
+Arm 版 Windows の arm64 版 Java では読み込めない。
+
+JVM は `-agentpath:` の DLL を読み込めないと起動をやめるので、ゲームが起動しなくなったときは JVM 引数から外す。
+
 1. `reminedog.dll` を日本語を含まない場所に置く（例：`C:\reminedog\reminedog.dll`）
 2. JVM 引数に次を追加する
    - Prism Launcher：インスタンスの「編集」→「設定」→「Java」→「JVM 引数」

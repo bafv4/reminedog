@@ -8,7 +8,7 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::{Mutex, OnceLock};
 
 use minhook::MinHook;
-use windows_sys::Win32::Foundation::HMODULE;
+use windows_sys::Win32::Foundation::{HMODULE, HWND};
 
 use crate::ffi;
 
@@ -19,6 +19,7 @@ type GetWindowContentScaleFn =
     unsafe extern "C" fn(window: *mut c_void, xscale: *mut f32, yscale: *mut f32);
 type GetVersionStringFn = unsafe extern "C" fn() -> *const c_char;
 type GetWindowAttribFn = unsafe extern "C" fn(window: *mut c_void, attrib: c_int) -> c_int;
+type GetWin32WindowFn = unsafe extern "C" fn(window: *mut c_void) -> HWND;
 
 const GLFW_VISIBLE: c_int = 0x0002_0004;
 
@@ -30,6 +31,8 @@ pub struct Glfw {
     get_window_content_scale: Option<GetWindowContentScaleFn>,
     get_version_string: Option<GetVersionStringFn>,
     get_window_attrib: GetWindowAttribFn,
+    /// Native access export; LWJGL's builds have it.
+    get_win32_window: Option<GetWin32WindowFn>,
 }
 
 impl Glfw {
@@ -50,6 +53,14 @@ impl Glfw {
         // SAFETY: as above.
         unsafe { f(window, &mut x, &mut y) };
         if x.is_finite() && x > 0.0 { x } else { 1.0 }
+    }
+
+    /// The window's HWND, if this GLFW exports native access.
+    pub fn win32_window(&self, window: *mut c_void) -> Option<HWND> {
+        let f = self.get_win32_window?;
+        // SAFETY: as above.
+        let hwnd = unsafe { f(window) };
+        (!hwnd.is_null()).then_some(hwnd)
     }
 
     /// Whether the window is shown (mods may create hidden helper windows).
@@ -130,6 +141,8 @@ fn install(module: HMODULE, path: &str) -> Result<Glfw, String> {
             get_window_attrib: std::mem::transmute::<*const c_void, GetWindowAttribFn>(resolve(
                 c"glfwGetWindowAttrib",
             )?),
+            get_win32_window: export(module, c"glfwGetWin32Window")
+                .map(|f| std::mem::transmute::<*const c_void, GetWin32WindowFn>(f)),
         }
     };
 

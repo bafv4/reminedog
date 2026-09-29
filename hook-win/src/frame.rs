@@ -1,8 +1,7 @@
 //! Per-frame work inside the `glfwSwapBuffers` detour.
 
-use std::cell::RefCell;
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use glow::HasContext as _;
@@ -11,7 +10,8 @@ use reminedog_render::{FrameParams, Overlay, StatusLine, gl_summary};
 use crate::agent::{self, Globals};
 use crate::fonts;
 use crate::glfw::{self, Glfw};
-use crate::wgl::{self, OwnContext};
+use crate::wgl::{self, OwnContext, Wgl};
+use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
 
 /// Consecutive failed frames after which the overlay gives up for the session.
 const MAX_FAILURES: u32 = 30;
@@ -24,11 +24,10 @@ enum State {
     Disabled,
 }
 
-thread_local! {
-    // Only the thread that owns the window swaps its buffers, so per-thread state is
-    // enough and needs no locking.
-    static STATE: RefCell<State> = const { RefCell::new(State::Uninit) };
-}
+/// One overlay for the process, following its window across threads: Forge and NeoForge
+/// swap the same window from their early loading-screen thread before Minecraft's render
+/// thread takes it over. Being a static, it is never dropped, so nothing runs at exit.
+static STATE: Mutex<State> = Mutex::new(State::Uninit);
 
 /// Draws the overlay into the back buffer right before GLFW presents it.
 pub fn before_swap(window: *mut c_void) {
@@ -41,27 +40,41 @@ pub fn before_swap(window: *mut c_void) {
     if !agent.options.overlay || window.is_null() {
         return;
     }
-    let _ = STATE.try_with(|cell| {
-        let Ok(mut state) = cell.try_borrow_mut() else {
-            return;
-        };
-        // Disabled while we work: if anything below panics, the overlay stays off
-        // instead of failing again on every frame.
-        *state = match std::mem::replace(&mut *state, State::Disabled) {
-            State::Disabled => State::Disabled,
-            // A hidden helper window (some mods create one) never gets the overlay; wait
-            // for a visible one.
-            State::Uninit if !glfw.is_visible(window) => State::Uninit,
-            State::Uninit => match Runtime::create(glfw, window, agent) {
-                Ok(runtime) => run_frame(runtime, glfw, window, agent),
-                Err(e) => {
-                    log::error!("overlay disabled: {e}");
-                    State::Disabled
-                }
-            },
-            State::Ready(runtime) => run_frame(runtime, glfw, window, agent),
-        };
-    });
+    // Contended means another thread is swapping another window; poisoned means a panic
+    // hit mid-frame (the state was set to Disabled first). Skip the frame either way.
+    let Ok(mut state) = STATE.try_lock() else {
+        return;
+    };
+    // Disabled while we work: if anything below panics, the overlay stays off instead of
+    // failing again on every frame.
+    *state = match std::mem::replace(&mut *state, State::Disabled) {
+        State::Disabled => State::Disabled,
+        // A hidden helper window (some mods create one) never gets the overlay; wait for a
+        // visible one.
+        State::Uninit if !glfw.is_visible(window) => State::Uninit,
+        State::Uninit => match Runtime::create(glfw, window, agent) {
+            Ok(runtime) => run_frame(runtime, glfw, window, agent),
+            Err(e) => {
+                log::error!("overlay disabled: {e}");
+                State::Disabled
+            }
+        },
+        State::Ready(runtime) => run_frame(runtime, glfw, window, agent),
+    };
+}
+
+/// The window's device context. GLFW's window class has CS_OWNDC, so this is the very DC
+/// GLFW created its context on and swaps, whichever context is current right now
+/// (glfwSwapBuffers does not require the window's own context to be current).
+fn window_dc(glfw: &Glfw, wgl: &Wgl, window: *mut c_void) -> HDC {
+    if let Some(hwnd) = glfw.win32_window(window) {
+        // SAFETY: a valid window handle; the DC of a CS_OWNDC window needs no release.
+        let dc = unsafe { GetDC(hwnd) };
+        if !dc.is_null() {
+            return dc;
+        }
+    }
+    wgl.current().0
 }
 
 fn run_frame(
@@ -115,15 +128,26 @@ struct Runtime {
     gl_errors_logged: u32,
 }
 
+// SAFETY: the GL handles and objects are only used inside the swap detour while STATE is
+// locked, with our context made current on the calling thread and released before the
+// lock is; a WGL context may be made current on any thread.
+unsafe impl Send for Runtime {}
+
 impl Runtime {
     fn create(glfw: &Glfw, window: *mut c_void, agent: &Globals) -> Result<Box<Self>, String> {
         let wgl = wgl::get()?;
-        let (hdc, game_context) = wgl.current();
-        if hdc.is_null() || game_context.is_null() {
-            return Err("no GL context is current in glfwSwapBuffers".into());
+        let hdc = window_dc(glfw, wgl, window);
+        if hdc.is_null() {
+            return Err("cannot get the window's device context".into());
         }
+        let (current_dc, game_context) = wgl.current();
         let (width, height) = glfw.framebuffer_size(window);
-        let game_gl = wgl.describe_current();
+        // Describe the game's context only if it is the one current on this window.
+        let game_gl = if current_dc == hdc && !game_context.is_null() {
+            wgl.describe_current()
+        } else {
+            "? (the window's context was not current)".to_owned()
+        };
         log::info!("GLFW {}", glfw.version_string());
         log::info!(
             "window framebuffer {width}x{height}, content scale {:.2}",
@@ -187,9 +211,11 @@ impl Runtime {
             return Ok(());
         }
         let wgl = wgl::get().map_err(FrameError::Failed)?;
-        let (hdc, _) = wgl.current();
+        let hdc = window_dc(glfw, wgl, window);
         if hdc.is_null() {
-            return Err(FrameError::Failed("no GL context is current".into()));
+            return Err(FrameError::Failed(
+                "cannot get the window's device context".into(),
+            ));
         }
         if hdc != self.context.hdc() {
             return Err(FrameError::DrawableChanged);

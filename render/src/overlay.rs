@@ -55,7 +55,6 @@ impl std::error::Error for OverlayError {}
 
 /// egui running on the agent's own GL context, drawing into the default framebuffer.
 pub struct Overlay {
-    gl: Arc<glow::Context>,
     ctx: egui::Context,
     painter: egui_glow::Painter,
     last_time: Option<f64>,
@@ -66,13 +65,12 @@ pub struct Overlay {
 impl Overlay {
     /// Must be called with the agent's GL context current.
     pub fn new(gl: Arc<glow::Context>, fonts: Vec<FontSource>) -> Result<Self, OverlayError> {
-        let painter = egui_glow::Painter::new(gl.clone(), "", None, false)
+        let painter = egui_glow::Painter::new(gl, "", None, false)
             .map_err(|e| OverlayError(format!("egui_glow painter: {e}")))?;
         let ctx = egui::Context::default();
         ctx.set_theme(egui::Theme::Dark);
         ctx.set_fonts(font_definitions(fonts));
         Ok(Self {
-            gl,
             ctx,
             painter,
             last_time: None,
@@ -134,8 +132,8 @@ impl Overlay {
             .ctx
             .tessellate(std::mem::take(&mut output.shapes), output.pixels_per_point);
 
-        // SAFETY: the caller guarantees our context is current on this thread.
-        unsafe { self.gl.bind_framebuffer(glow::FRAMEBUFFER, None) };
+        // Nothing ever binds another framebuffer in our dedicated context, so this paints
+        // into the window's default framebuffer (and needs no GL 3 entry point).
         self.painter.paint_and_update_textures(
             [width, height],
             output.pixels_per_point,

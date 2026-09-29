@@ -32,15 +32,15 @@ pub unsafe extern "system" fn Agent_OnLoad(
     options: *const c_char,
     _reserved: *mut c_void,
 ) -> i32 {
-    let options = if options.is_null() {
-        String::new()
-    } else {
-        // SAFETY: the JVM passes a NUL-terminated string.
-        unsafe { CStr::from_ptr(options) }
-            .to_string_lossy()
-            .into_owned()
-    };
-    ffi::catch("Agent_OnLoad", || agent::on_load(&options));
+    ffi::catch("Agent_OnLoad", || {
+        let options = if options.is_null() {
+            String::new()
+        } else {
+            // SAFETY: the JVM passes a NUL-terminated string.
+            ffi::decode_command_line_text(unsafe { CStr::from_ptr(options) }.to_bytes())
+        };
+        agent::on_load(&options);
+    });
     // Whatever happened, never keep the game from starting.
     JNI_OK
 }

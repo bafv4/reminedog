@@ -159,13 +159,14 @@ jobs:
           archives=("$mesa"/mesa3d-*-release-msvc.7z)
           7z x -y -bso0 -bsp0 "-o$(cygpath -w "$mesa")" "$(cygpath -w "${archives[0]}")"
 
-          shopt -s nullglob
-          dlls=("$mesa"/x64/opengl32.dll "$mesa"/*/x64/opengl32.dll)
-          if [ "${#dlls[@]}" -eq 0 ]; then
+          x64=
+          for candidate in "$mesa"/x64/opengl32.dll "$mesa"/*/x64/opengl32.dll; do
+            if [ -f "$candidate" ]; then x64=$(dirname "$candidate"); break; fi
+          done
+          if [ -z "$x64" ]; then
             echo "::error::x64/opengl32.dll not found in ${archives[0]}"
             exit 1
           fi
-          x64=$(dirname "${dlls[0]}")
           java_bin=$(cygpath -u "$JAVA_HOME")/bin
           for name in opengl32.dll libgallium_wgl.dll libglapi.dll; do
             if [ -f "$x64/$name" ]; then cp -v "$x64/$name" "$java_bin/"; fi
@@ -265,6 +266,11 @@ jobs:
             echo "===== $log"
             cat "$log"
           done
+          # A JVM crash (e.g. in the agent) leaves hs_err_pid*.log in the working directory.
+          for crash in "$SMOKE_ROOT"/*/hs_err_pid*.log; do
+            echo "===== $crash (first 80 lines)"
+            head -n 80 "$crash"
+          done
       - name: Upload smoke logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -274,5 +280,6 @@ jobs:
             ${{ runner.temp }}/smoke/*/reminedog/
             ${{ runner.temp }}/smoke/*/*.txt
             ${{ runner.temp }}/smoke/*/*.png
+            ${{ runner.temp }}/smoke/*/hs_err_pid*.log
           if-no-files-found: ignore
           retention-days: 30

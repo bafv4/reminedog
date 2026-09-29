@@ -1,12 +1,15 @@
 //! Small FFI helpers shared by the modules.
 
 use std::ffi::{CStr, c_void};
+use std::mem::offset_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
 use windows_sys::Win32::Foundation::HMODULE;
+use windows_sys::Win32::Globalization::{CP_ACP, MultiByteToWideChar};
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_NT_HEADERS64, IMAGE_NT_OPTIONAL_HDR64_MAGIC,
+    IMAGE_DATA_DIRECTORY, IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_NT_HEADERS64,
+    IMAGE_NT_OPTIONAL_HDR64_MAGIC, IMAGE_OPTIONAL_HEADER64,
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetProcAddress};
 use windows_sys::Win32::System::SystemServices::{
@@ -37,63 +40,131 @@ pub fn proc_address(module: HMODULE, name: &CStr) -> Option<*const c_void> {
 /// Looks up an export by reading the PE export table directly. Unlike `GetProcAddress`
 /// it never enters the loader, so it is safe on a module that is still being loaded
 /// (inside the DLL notification, before its `DllMain` ran). Forwarded exports count as
-/// missing.
+/// missing. It runs on every DLL the process loads, so every read is bounds-checked and
+/// anything malformed yields `None`.
 ///
 /// # Safety
-/// `module` must be the base address of a mapped 64-bit PE image.
+/// `module` must be null or the base address of a mapped image.
 pub unsafe fn export_address(module: HMODULE, name: &CStr) -> Option<*const c_void> {
-    let base = module as *const u8;
-    if base.is_null() {
-        return None;
-    }
-    let read_u32 = |offset: usize| {
-        // SAFETY: offsets come from the image's own headers (caller guarantees a PE).
-        unsafe { base.add(offset).cast::<u32>().read_unaligned() }
-    };
-    // SAFETY (whole block): every offset is taken from the image's headers and checked
-    // against the export directory's declared counts.
-    unsafe {
-        let dos = base.cast::<IMAGE_DOS_HEADER>().read_unaligned();
-        if dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew <= 0 {
+    // SAFETY: guaranteed by the caller.
+    let (image, export_dir) = unsafe { Image::open(module)? };
+    let (dir_start, dir_size) = (export_dir.VirtualAddress as usize, export_dir.Size as usize);
+    let exports: IMAGE_EXPORT_DIRECTORY = image.read(dir_start)?;
+    let wanted = name.to_bytes();
+    for i in 0..exports.NumberOfNames as usize {
+        let name_rva: u32 = image.read(image_offset(exports.AddressOfNames, i, 4)?)?;
+        let Some(candidate) = image.bytes(name_rva as usize, wanted.len() + 1) else {
+            continue;
+        };
+        if &candidate[..wanted.len()] != wanted || candidate[wanted.len()] != 0 {
+            continue;
+        }
+        let ordinal: u16 = image.read(image_offset(exports.AddressOfNameOrdinals, i, 2)?)?;
+        if u32::from(ordinal) >= exports.NumberOfFunctions {
             return None;
         }
-        let nt = base
-            .add(dos.e_lfanew as usize)
-            .cast::<IMAGE_NT_HEADERS64>()
-            .read_unaligned();
+        let rva: u32 = image.read(image_offset(
+            exports.AddressOfFunctions,
+            usize::from(ordinal),
+            4,
+        )?)?;
+        let rva = rva as usize;
+        let is_forwarder = (dir_start..dir_start.saturating_add(dir_size)).contains(&rva);
+        return (rva != 0 && rva < image.size && !is_forwarder)
+            // SAFETY: `rva` is inside the image.
+            .then(|| unsafe { image.base.add(rva) }.cast());
+    }
+    None
+}
+
+/// `table + index * stride`, without overflow.
+fn image_offset(table: u32, index: usize, stride: usize) -> Option<usize> {
+    index.checked_mul(stride)?.checked_add(table as usize)
+}
+
+/// A mapped PE32+ image whose reads are all checked against its `SizeOfImage`.
+struct Image {
+    base: *const u8,
+    size: usize,
+}
+
+impl Image {
+    /// Validates the headers and returns the image with its export data directory.
+    ///
+    /// # Safety
+    /// `module` must be null or the base address of a mapped image.
+    unsafe fn open(module: HMODULE) -> Option<(Image, IMAGE_DATA_DIRECTORY)> {
+        let base = module as *const u8;
+        if base.is_null() {
+            return None;
+        }
+        // The headers of a mapped image always lie in its first page.
+        let headers = Image { base, size: 4096 };
+        let dos: IMAGE_DOS_HEADER = headers.read(0)?;
+        if dos.e_magic != IMAGE_DOS_SIGNATURE {
+            return None;
+        }
+        let nt: IMAGE_NT_HEADERS64 = headers.read(usize::try_from(dos.e_lfanew).ok()?)?;
+        let optional = &nt.OptionalHeader;
+        // Images may declare fewer than 16 data directories; then the bytes after them
+        // belong to the section table.
+        let directories_end =
+            offset_of!(IMAGE_OPTIONAL_HEADER64, DataDirectory) + size_of::<IMAGE_DATA_DIRECTORY>();
         if nt.Signature != IMAGE_NT_SIGNATURE
-            || nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC
+            || optional.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC
+            || optional.NumberOfRvaAndSizes <= u32::from(IMAGE_DIRECTORY_ENTRY_EXPORT)
+            || usize::from(nt.FileHeader.SizeOfOptionalHeader) < directories_end
         {
             return None;
         }
-        let dir = nt.OptionalHeader.DataDirectory[usize::from(IMAGE_DIRECTORY_ENTRY_EXPORT)];
+        let dir = optional.DataDirectory[usize::from(IMAGE_DIRECTORY_ENTRY_EXPORT)];
         if dir.VirtualAddress == 0 || dir.Size == 0 {
             return None;
         }
-        let exports = base
-            .add(dir.VirtualAddress as usize)
-            .cast::<IMAGE_EXPORT_DIRECTORY>()
-            .read_unaligned();
-        let wanted = name.to_bytes();
-        for i in 0..exports.NumberOfNames as usize {
-            let name_rva = read_u32(exports.AddressOfNames as usize + i * 4) as usize;
-            if CStr::from_ptr(base.add(name_rva).cast()).to_bytes() != wanted {
-                continue;
-            }
-            let ordinal = base
-                .add(exports.AddressOfNameOrdinals as usize + i * 2)
-                .cast::<u16>()
-                .read_unaligned() as usize;
-            if ordinal >= exports.NumberOfFunctions as usize {
-                return None;
-            }
-            let rva = read_u32(exports.AddressOfFunctions as usize + ordinal * 4) as usize;
-            let dir_start = dir.VirtualAddress as usize;
-            let is_forwarder = (dir_start..dir_start + dir.Size as usize).contains(&rva);
-            return (rva != 0 && !is_forwarder).then(|| base.add(rva).cast());
-        }
-        None
+        let image = Image {
+            base,
+            size: optional.SizeOfImage as usize,
+        };
+        Some((image, dir))
     }
+
+    fn read<T: Copy>(&self, offset: usize) -> Option<T> {
+        let end = offset.checked_add(size_of::<T>())?;
+        // SAFETY: [offset, end) lies inside the mapped image.
+        (end <= self.size).then(|| unsafe { self.base.add(offset).cast::<T>().read_unaligned() })
+    }
+
+    fn bytes(&self, offset: usize, len: usize) -> Option<&[u8]> {
+        let end = offset.checked_add(len)?;
+        // SAFETY: [offset, end) lies inside the mapped image, which outlives `self`.
+        (end <= self.size)
+            .then(|| unsafe { std::slice::from_raw_parts(self.base.add(offset), len) })
+    }
+}
+
+/// Decodes text the JVM took from its command line, such as the agent options. The Windows
+/// `java` launcher reads its arguments in the ANSI code page (CP932 on Japanese Windows),
+/// so bytes that are not valid UTF-8 are decoded from that code page. Valid UTF-8 (plain
+/// ASCII, or a system set to use UTF-8) is taken as is.
+pub fn decode_command_line_text(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_owned();
+    }
+    let Ok(len) = i32::try_from(bytes.len()) else {
+        return String::from_utf8_lossy(bytes).into_owned();
+    };
+    // SAFETY: the input is valid for `len` bytes; a null output asks for the size.
+    let wide_len =
+        unsafe { MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0) };
+    if wide_len <= 0 {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let mut wide = vec![0u16; wide_len as usize];
+    // SAFETY: the output buffer holds `wide_len` u16s.
+    let written =
+        unsafe { MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), wide_len) };
+    wide.truncate(written.max(0) as usize);
+    String::from_utf16_lossy(&wide)
 }
 
 /// Full path of a loaded module (`None` = the process executable).
@@ -183,6 +254,37 @@ mod tests {
             unsafe { export_address(std::ptr::null_mut(), c"NtClose") },
             None
         );
+    }
+
+    #[test]
+    fn export_table_lookup_rejects_non_images() {
+        // A buffer that is not a PE image (no MZ signature).
+        let junk = [0u8; 8192];
+        // SAFETY: the buffer is readable for its whole length, which covers every read
+        // the function may do before it rejects the signature.
+        assert_eq!(
+            unsafe { export_address(junk.as_ptr() as HMODULE, c"NtClose") },
+            None
+        );
+    }
+
+    #[test]
+    fn command_line_text_decoding() {
+        assert_eq!(
+            decode_command_line_text(b"gamedir=C:\\x,log=debug"),
+            "gamedir=C:\\x,log=debug"
+        );
+        assert_eq!(decode_command_line_text("日本語".as_bytes()), "日本語");
+        // SAFETY: no preconditions.
+        match unsafe { windows_sys::Win32::Globalization::GetACP() } {
+            1252 => assert_eq!(decode_command_line_text(&[b'x', 0xE9]), "xé"),
+            // "マイクラ" in Shift_JIS.
+            932 => assert_eq!(
+                decode_command_line_text(&[0x83, 0x7D, 0x83, 0x43, 0x83, 0x4E, 0x83, 0x89]),
+                "マイクラ"
+            ),
+            _ => {}
+        }
     }
 
     #[test]
