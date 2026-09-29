@@ -20,6 +20,7 @@
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use glow::HasContext as _;
 use reminedog_render::{ZoomView, middle_row, tall_size};
@@ -67,7 +68,8 @@ static GAME_CONTEXT: AtomicUsize = AtomicUsize::new(0);
 /// The game bound (or blitted to) framebuffer 0 since the last frame, getting ours.
 static REDIRECTED: AtomicBool = AtomicBool::new(false);
 /// The tall size (width << 32 | height) the game should set as its viewport, and whether
-/// it did since the last frame.
+/// it did since the last frame. Only the height is compared: the game may keep a width of
+/// its own (26.3 renders 2560 wide in a window SDL reports as 2561 pixels wide).
 static TALL_VIEWPORT: AtomicU64 = AtomicU64::new(0);
 static TALL_VIEWPORT_SEEN: AtomicBool = AtomicBool::new(false);
 /// For the log while zooming: the game's `glViewport` calls since the last frame, the
@@ -278,7 +280,7 @@ unsafe extern "system" fn blit_named_framebuffer_wrapper(
 unsafe extern "system" fn viewport_wrapper(x: i32, y: i32, width: i32, height: i32) {
     let tall = TALL_VIEWPORT.load(Ordering::Relaxed);
     if tall != 0 {
-        if tall == pack([width, height]) {
+        if tall & 0xffff_ffff == pack([0, height]) {
             TALL_VIEWPORT_SEEN.store(true, Ordering::Relaxed);
         }
         VIEWPORT_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -334,6 +336,9 @@ fn set_size(window: *mut c_void, size: Option<[i32; 2]>, tell: [i32; 2]) {
 /// Frames in a row the game may fail to render at the tall size (the resize is picked up
 /// with a frame of delay on some paths) before the high-resolution zoom is given up.
 const MAX_MISSES: u32 = 3;
+/// ...and for how long. Recreating the render targets at the tall size can stall the game
+/// for several frames, so a frame count alone gives up too early on real hardware.
+const MISS_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Per-window state, used in the swap detour with the game's context current.
 #[derive(Default)]
@@ -341,6 +346,8 @@ pub struct TallZoom {
     game: Option<GameGl>,
     active: Option<Active>,
     misses: u32,
+    /// When the current run of misses began.
+    first_miss: Option<Instant>,
     /// Why the high-resolution zoom is not available, for the menu.
     failure: Option<String>,
 }
@@ -434,22 +441,31 @@ impl TallZoom {
             let factor = active.factor;
             let view = if redirected && tall {
                 self.misses = 0;
+                self.first_miss = None;
                 self.compose();
                 ZoomView::HighRes { factor }
             } else {
                 self.misses += 1;
+                let first_miss = *self.first_miss.get_or_insert_with(Instant::now);
                 if log::log_enabled!(log::Level::Debug) {
                     log::debug!(
-                        "zoom: frame not rendered at the tall size (output redirected: {redirected}, tall viewport: {tall}; {})",
+                        "zoom: frame not rendered at the tall size (output redirected: {redirected}, tall viewport: {tall}, {} frames in {:.0?}; {})",
+                        self.misses,
+                        first_miss.elapsed(),
                         seen()
                     );
                 }
                 fallback
             };
             let resized = REAL_RESIZED.swap(false, Ordering::Relaxed) || real != active.real;
-            if self.misses >= MAX_MISSES {
+            if self.misses >= MAX_MISSES
+                && self
+                    .first_miss
+                    .is_some_and(|first| first.elapsed() >= MISS_TIMEOUT)
+            {
                 log::warn!(
-                    "zoom: the game does not render at the tall size; enlarging pixels instead (last frame: output redirected: {redirected}, tall viewport: {tall}; {})",
+                    "zoom: the game does not render at the tall size; enlarging pixels instead (last frame: output redirected: {redirected}, tall viewport: {tall}; {} frames; {})",
+                    self.misses,
                     seen()
                 );
                 self.failure = Some("ゲームが縦長の解像度で描かなかった".into());
@@ -510,6 +526,7 @@ impl TallZoom {
         game.swap_binding(None, Some(framebuffer));
         set_size(window, Some(tall), tall);
         self.misses = 0;
+        self.first_miss = None;
         self.active = Some(Active {
             window: window as usize,
             real,
