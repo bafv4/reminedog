@@ -1,4 +1,5 @@
-//! Per-frame work inside the `glfwSwapBuffers` detour.
+//! Per-frame work inside the buffer-swap detours (`glfwSwapBuffers` for Minecraft up to
+//! 1.21, `SDL_GL_SwapWindow` for 26.x).
 
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
@@ -9,8 +10,8 @@ use reminedog_render::{FrameParams, Overlay, StatusLine, gl_summary};
 
 use crate::agent::{self, Globals};
 use crate::fonts;
-use crate::glfw::{self, Glfw};
 use crate::wgl::{self, OwnContext, Wgl};
+use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
 
 /// Consecutive failed frames after which the overlay gives up for the session.
@@ -29,12 +30,22 @@ enum State {
 /// thread takes it over. Being a static, it is never dropped, so nothing runs at exit.
 static STATE: Mutex<State> = Mutex::new(State::Uninit);
 
-/// Draws the overlay into the back buffer right before GLFW presents it.
-pub fn before_swap(window: *mut c_void) {
+/// What the overlay needs from the library that owns the game's window (GLFW or SDL3).
+pub trait WindowSystem: Sync {
+    /// Name and version, for the log and the status window.
+    fn describe(&self) -> String;
+    /// Hidden helper windows (mods, Minecraft 26.x's renderer) never get the overlay.
+    fn is_visible(&self, window: *mut c_void) -> bool;
+    /// Drawable size in pixels; call on the thread that swaps the window.
+    fn framebuffer_size(&self, window: *mut c_void) -> (i32, i32);
+    /// DPI scale of the window.
+    fn content_scale(&self, window: *mut c_void) -> f32;
+    fn hwnd(&self, window: *mut c_void) -> Option<HWND>;
+}
+
+/// Draws the overlay into the back buffer right before the window system presents it.
+pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
     let Some(agent) = agent::globals() else {
-        return;
-    };
-    let Some(glfw) = glfw::get() else {
         return;
     };
     if !agent.options.overlay || window.is_null() {
@@ -51,23 +62,23 @@ pub fn before_swap(window: *mut c_void) {
         State::Disabled => State::Disabled,
         // A hidden helper window (some mods create one) never gets the overlay; wait for a
         // visible one.
-        State::Uninit if !glfw.is_visible(window) => State::Uninit,
-        State::Uninit => match Runtime::create(glfw, window, agent) {
-            Ok(runtime) => run_frame(runtime, glfw, window, agent),
+        State::Uninit if !ws.is_visible(window) => State::Uninit,
+        State::Uninit => match Runtime::create(ws, window, agent) {
+            Ok(runtime) => run_frame(runtime, ws, window, agent),
             Err(e) => {
                 log::error!("overlay disabled: {e}");
                 State::Disabled
             }
         },
-        State::Ready(runtime) => run_frame(runtime, glfw, window, agent),
+        State::Ready(runtime) => run_frame(runtime, ws, window, agent),
     };
 }
 
-/// The window's device context. GLFW's window class has CS_OWNDC, so this is the very DC
-/// GLFW created its context on and swaps, whichever context is current right now
-/// (glfwSwapBuffers does not require the window's own context to be current).
-fn window_dc(glfw: &Glfw, wgl: &Wgl, window: *mut c_void) -> HDC {
-    if let Some(hwnd) = glfw.win32_window(window) {
+/// The window's device context. GLFW's and SDL's window classes have CS_OWNDC, so this is
+/// the very DC the game's context renders to and the swap presents, whichever context is
+/// current right now (neither swap function requires the window's own context to be).
+fn window_dc(ws: &dyn WindowSystem, wgl: &Wgl, window: *mut c_void) -> HDC {
+    if let Some(hwnd) = ws.hwnd(window) {
         // SAFETY: a valid window handle; the DC of a CS_OWNDC window needs no release.
         let dc = unsafe { GetDC(hwnd) };
         if !dc.is_null() {
@@ -79,11 +90,11 @@ fn window_dc(glfw: &Glfw, wgl: &Wgl, window: *mut c_void) -> HDC {
 
 fn run_frame(
     mut runtime: Box<Runtime>,
-    glfw: &Glfw,
+    ws: &dyn WindowSystem,
     window: *mut c_void,
     agent: &Globals,
 ) -> State {
-    match runtime.render(glfw, window, agent) {
+    match runtime.render(ws, window, agent) {
         Ok(()) => {
             runtime.failures = 0;
             State::Ready(runtime)
@@ -115,7 +126,7 @@ enum FrameError {
 }
 
 struct Runtime {
-    /// The GLFW window the overlay is drawn on; swaps of other windows are left alone.
+    /// The window the overlay is drawn on; swaps of other windows are left alone.
     window: usize,
     context: OwnContext,
     gl: Arc<glow::Context>,
@@ -134,24 +145,28 @@ struct Runtime {
 unsafe impl Send for Runtime {}
 
 impl Runtime {
-    fn create(glfw: &Glfw, window: *mut c_void, agent: &Globals) -> Result<Box<Self>, String> {
+    fn create(
+        ws: &dyn WindowSystem,
+        window: *mut c_void,
+        agent: &Globals,
+    ) -> Result<Box<Self>, String> {
         let wgl = wgl::get()?;
-        let hdc = window_dc(glfw, wgl, window);
+        let hdc = window_dc(ws, wgl, window);
         if hdc.is_null() {
             return Err("cannot get the window's device context".into());
         }
         let (current_dc, game_context) = wgl.current();
-        let (width, height) = glfw.framebuffer_size(window);
+        let (width, height) = ws.framebuffer_size(window);
         // Describe the game's context only if it is the one current on this window.
         let game_gl = if current_dc == hdc && !game_context.is_null() {
             wgl.describe_current()
         } else {
             "? (the window's context was not current)".to_owned()
         };
-        log::info!("GLFW {}", glfw.version_string());
+        log::info!("window system: {}", ws.describe());
         log::info!(
             "window framebuffer {width}x{height}, content scale {:.2}",
-            glfw.content_scale(window)
+            ws.content_scale(window)
         );
         log::info!("game GL: {game_gl}");
         log::info!("pixel format {}", wgl::describe_pixel_format(hdc));
@@ -183,7 +198,7 @@ impl Runtime {
                 "ビルド",
                 format!("{} ({})", env!("CARGO_PKG_VERSION"), agent::BUILD_ID),
             ),
-            StatusLine::new("GLFW", glfw.version_string()),
+            StatusLine::new("ウィンドウ", ws.describe()),
             StatusLine::new("ゲームのGL", game_gl),
             StatusLine::new("オーバーレイのGL", overlay_gl),
             StatusLine::new("ゲームフォルダ", agent.game_dir.display().to_string()),
@@ -203,7 +218,7 @@ impl Runtime {
 
     fn render(
         &mut self,
-        glfw: &Glfw,
+        ws: &dyn WindowSystem,
         window: *mut c_void,
         agent: &Globals,
     ) -> Result<(), FrameError> {
@@ -211,7 +226,7 @@ impl Runtime {
             return Ok(());
         }
         let wgl = wgl::get().map_err(FrameError::Failed)?;
-        let hdc = window_dc(glfw, wgl, window);
+        let hdc = window_dc(ws, wgl, window);
         if hdc.is_null() {
             return Err(FrameError::Failed(
                 "cannot get the window's device context".into(),
@@ -220,12 +235,12 @@ impl Runtime {
         if hdc != self.context.hdc() {
             return Err(FrameError::DrawableChanged);
         }
-        let (width, height) = glfw.framebuffer_size(window);
+        let (width, height) = ws.framebuffer_size(window);
         if width <= 0 || height <= 0 {
             // Minimized.
             return Ok(());
         }
-        let scale = glfw.content_scale(window) * agent.options.ui_scale.unwrap_or(1.0);
+        let scale = ws.content_scale(window) * agent.options.ui_scale.unwrap_or(1.0);
 
         let started = Instant::now();
         {

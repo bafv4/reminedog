@@ -1,16 +1,18 @@
 //! SDL3, which Minecraft 26.x opens its window with instead of GLFW (LWJGL 3.4).
 //!
-//! The overlay does not support SDL3 yet. For now these detours only record, in the log,
-//! how the game uses it: the window flags and whether it creates an OpenGL context or a
-//! Vulkan surface. That decides how SDL3 support has to be built.
+//! 26.x renders with OpenGL through SDL3 (its "RenderPearl OpenGL" backend), so the overlay
+//! works as with GLFW: `SDL_GL_SwapWindow` is detoured and hands each frame to
+//! [`frame::before_swap`]. The other detours only log how the game uses SDL3 (window
+//! flags, OpenGL context or Vulkan surface), for diagnosing future versions.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use windows_sys::Win32::Foundation::HMODULE;
+use windows_sys::Win32::Foundation::{HMODULE, HWND};
 
 use crate::ffi;
+use crate::frame::{self, WindowSystem};
 use crate::hook::{self, export};
 
 type CreateWindowFn =
@@ -24,6 +26,13 @@ type VulkanCreateSurfaceFn = unsafe extern "C" fn(
     surface: *mut u64,
 ) -> bool;
 type GetVersionFn = unsafe extern "C" fn() -> c_int;
+type GetWindowFlagsFn = unsafe extern "C" fn(window: *mut c_void) -> u64;
+type GetWindowSizeInPixelsFn =
+    unsafe extern "C" fn(window: *mut c_void, w: *mut c_int, h: *mut c_int) -> bool;
+type GetWindowDisplayScaleFn = unsafe extern "C" fn(window: *mut c_void) -> f32;
+type GetWindowPropertiesFn = unsafe extern "C" fn(window: *mut c_void) -> u32;
+type GetPointerPropertyFn =
+    unsafe extern "C" fn(props: u32, name: *const c_char, default: *mut c_void) -> *mut c_void;
 
 const WINDOW_OPENGL: u64 = 0x0000_0002;
 const WINDOW_HIDDEN: u64 = 0x0000_0008;
@@ -33,11 +42,110 @@ static CREATE_WINDOW: OnceLock<CreateWindowFn> = OnceLock::new();
 static GL_CREATE_CONTEXT: OnceLock<GlCreateContextFn> = OnceLock::new();
 static GL_SWAP_WINDOW: OnceLock<GlSwapWindowFn> = OnceLock::new();
 static VULKAN_CREATE_SURFACE: OnceLock<VulkanCreateSurfaceFn> = OnceLock::new();
-static GET_VERSION: OnceLock<GetVersionFn> = OnceLock::new();
+static SDL: OnceLock<Sdl> = OnceLock::new();
 
 static ATTACHED: Mutex<bool> = Mutex::new(false);
 static RENDERER_LOGGED: AtomicBool = AtomicBool::new(false);
 static SWAPS: AtomicU64 = AtomicU64::new(0);
+
+/// SDL3 functions the agent calls itself.
+struct Sdl {
+    get_version: GetVersionFn,
+    get_window_flags: GetWindowFlagsFn,
+    get_window_size_in_pixels: GetWindowSizeInPixelsFn,
+    get_window_display_scale: GetWindowDisplayScaleFn,
+    get_window_properties: GetWindowPropertiesFn,
+    get_pointer_property: GetPointerPropertyFn,
+}
+
+impl Sdl {
+    fn resolve(module: HMODULE) -> Result<Sdl, String> {
+        let get = |name: &CStr| {
+            export(module, name)
+                .ok_or_else(|| format!("SDL3 does not export {}", name.to_string_lossy()))
+        };
+        // SAFETY: SDL3 exports with these C signatures.
+        unsafe {
+            Ok(Sdl {
+                get_version: std::mem::transmute::<*const c_void, GetVersionFn>(get(
+                    c"SDL_GetVersion",
+                )?),
+                get_window_flags: std::mem::transmute::<*const c_void, GetWindowFlagsFn>(get(
+                    c"SDL_GetWindowFlags",
+                )?),
+                get_window_size_in_pixels: std::mem::transmute::<
+                    *const c_void,
+                    GetWindowSizeInPixelsFn,
+                >(get(c"SDL_GetWindowSizeInPixels")?),
+                get_window_display_scale: std::mem::transmute::<
+                    *const c_void,
+                    GetWindowDisplayScaleFn,
+                >(get(c"SDL_GetWindowDisplayScale")?),
+                get_window_properties: std::mem::transmute::<*const c_void, GetWindowPropertiesFn>(
+                    get(c"SDL_GetWindowProperties")?,
+                ),
+                get_pointer_property: std::mem::transmute::<*const c_void, GetPointerPropertyFn>(
+                    get(c"SDL_GetPointerProperty")?,
+                ),
+            })
+        }
+    }
+
+    fn version(&self) -> String {
+        // SAFETY: SDL_GetVersion takes no arguments.
+        let v = unsafe { (self.get_version)() };
+        format!("{}.{}.{}", v / 1_000_000, v / 1000 % 1000, v % 1000)
+    }
+}
+
+// Every call below gets the SDL_Window* SDL itself passed to SDL_GL_SwapWindow, on the
+// thread that swaps it.
+impl WindowSystem for Sdl {
+    fn describe(&self) -> String {
+        format!("SDL {}", self.version())
+    }
+
+    fn is_visible(&self, window: *mut c_void) -> bool {
+        // SAFETY: see above.
+        unsafe { (self.get_window_flags)(window) & WINDOW_HIDDEN == 0 }
+    }
+
+    fn framebuffer_size(&self, window: *mut c_void) -> (i32, i32) {
+        let (mut w, mut h) = (0, 0);
+        // SAFETY: see above.
+        if unsafe { (self.get_window_size_in_pixels)(window, &mut w, &mut h) } {
+            (w, h)
+        } else {
+            (0, 0)
+        }
+    }
+
+    fn content_scale(&self, window: *mut c_void) -> f32 {
+        // SAFETY: see above; 0 means failure.
+        let scale = unsafe { (self.get_window_display_scale)(window) };
+        if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        }
+    }
+
+    fn hwnd(&self, window: *mut c_void) -> Option<HWND> {
+        // SAFETY: see above; the property name is NUL-terminated.
+        let hwnd = unsafe {
+            let props = (self.get_window_properties)(window);
+            if props == 0 {
+                return None;
+            }
+            (self.get_pointer_property)(
+                props,
+                c"SDL.window.win32.hwnd".as_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        (!hwnd.is_null()).then_some(hwnd)
+    }
+}
 
 /// Identifies SDL3 by its exports, like GLFW.
 pub fn is_sdl3(module: HMODULE) -> bool {
@@ -53,14 +161,13 @@ pub fn attach(module: HMODULE, path: &str) {
         return;
     }
     *attached = true;
-    log::info!(
-        "SDL3 loaded: {path}. The overlay does not support SDL3 (Minecraft 26.x) yet; \
-         only recording which graphics API the game uses"
-    );
-    if let Some(f) = export(module, c"SDL_GetVersion") {
-        // SAFETY: SDL_GetVersion has this signature.
-        let _ = GET_VERSION.set(unsafe { std::mem::transmute::<*const c_void, GetVersionFn>(f) });
+    match Sdl::resolve(module) {
+        Ok(sdl) => {
+            let _ = SDL.set(sdl);
+        }
+        Err(e) => log::error!("SDL3 loaded ({path}), but the overlay cannot use it: {e}"),
     }
+    log::info!("SDL3 loaded: {path}");
     // SAFETY (each call): the SDL3 export, its detour and the slot's fn type share one
     // signature, and nothing runs the functions while SDL3 is still being loaded.
     unsafe {
@@ -89,7 +196,7 @@ pub fn attach(module: HMODULE, path: &str) {
             &VULKAN_CREATE_SURFACE,
         );
     }
-    log::info!("SDL3 probes installed");
+    log::info!("SDL3 hooks installed");
 }
 
 /// Detours one SDL3 export; failures are logged, the other probes still go in.
@@ -152,14 +259,7 @@ unsafe extern "C" fn create_window_detour(
                 kinds.push(name);
             }
         }
-        let version = GET_VERSION.get().map_or_else(
-            || "?".to_owned(),
-            // SAFETY: SDL_GetVersion takes no arguments.
-            |f| {
-                let v = unsafe { f() };
-                format!("{}.{}.{}", v / 1_000_000, v / 1000 % 1000, v % 1000)
-            },
-        );
+        let version = SDL.get().map_or_else(|| "?".to_owned(), Sdl::version);
         log::info!(
             "SDL_CreateWindow({title:?}, {w}x{h}, flags 0x{flags:X} [{}]) -> {window:p} (SDL {version})",
             kinds.join(", ")
@@ -187,10 +287,13 @@ unsafe extern "C" fn gl_swap_window_detour(window: *mut c_void) -> bool {
     let Some(original) = GL_SWAP_WINDOW.get() else {
         return false;
     };
-    ffi::catch("SDL_GL_SwapWindow probe", || {
+    ffi::catch("SDL_GL_SwapWindow detour", || {
         let n = SWAPS.fetch_add(1, Ordering::Relaxed) + 1;
-        if matches!(n, 1 | 100 | 1000) {
-            log::info!("SDL_GL_SwapWindow: {n} frames");
+        if n == 1 {
+            log::info!("SDL_GL_SwapWindow: first frame");
+        }
+        if let Some(sdl) = SDL.get() {
+            frame::before_swap(sdl, window);
         }
     });
     // SAFETY: same arguments the caller passed us.

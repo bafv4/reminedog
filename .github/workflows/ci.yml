@@ -130,14 +130,14 @@ jobs:
             harness: Smoke
             modules: ""
             markers: "GLFW hooks installed|overlay: first frame rendered"
-          # Minecraft 26.x: Java 25, window opened with SDL3 instead of GLFW. The agent only
-          # probes it for now (no overlay), so check that the probe sees the OpenGL context.
+          # Minecraft 26.x: Java 25, window opened with SDL3 instead of GLFW; the context is
+          # created on a hidden utility window and used on the game window, as 26.3 does.
           - lwjgl: "3.4.3"
             java: "25"
             hints: ""
             harness: SmokeSdl
             modules: lwjgl-sdl
-            markers: "SDL3 probes installed|renderer: OpenGL via SDL3"
+            markers: "SDL3 hooks installed|renderer: OpenGL via SDL3|overlay: first frame rendered"
     defaults:
       run:
         shell: bash
@@ -204,7 +204,7 @@ jobs:
           # JDK 8's javac has no --release; its own class library is Java 8's anyway.
           if [ "$JAVA_MAJOR" = 8 ]; then release=(-source 8 -target 8); else release=(--release 8); fi
           mkdir -p "$tmp/classes"
-          "$java_bin/javac" "${release[@]}" -Xlint:-options -encoding UTF-8 -cp "$jar_cp" -d "$classes" "ci/smoke/$SMOKE_HARNESS.java"
+          "$java_bin/javac" "${release[@]}" -Xlint:-options -encoding UTF-8 -cp "$jar_cp" -d "$classes" "ci/smoke/$SMOKE_HARNESS.java" ci/smoke/SmokeImage.java
 
           # Paths handed to java.exe are Windows paths; SMOKE_ROOT is only used by bash.
           {

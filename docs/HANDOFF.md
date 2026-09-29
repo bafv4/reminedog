@@ -191,3 +191,9 @@ MinHook は即値の長さを差し引いて変位の位置を求めるので問
 - 描画がOpenGLなら、`SDL_GL_SwapWindow` のフックに付け替えればほぼ同じ方式で描ける。Vulkanなら `vkQueuePresentKHR` をフックしてVulkanで描く必要があり、描画部分の作り直しになる
 - どちらかを確かめるため、いまのエージェントはSDL3を検出すると `SDL_CreateWindow`（フラグ）・`SDL_GL_CreateContext`・`SDL_Vulkan_CreateSurface`・`SDL_GL_SwapWindow` を診断用にフックし、結果をログに出す（`renderer: OpenGL via SDL3` など）。描画はしない
 - 検証用に `ci/smoke/SmokeSdl.java`（SDL3でOpenGLのウィンドウを作る）を追加し、CIとWine（`scripts/wine-smoke.sh --sdl --lwjgl 3.4.3`）で確かめている
+
+### 26.3 の結果と対応（2026-09-29）
+- 実機のログ：`Minecraft - RenderPearl OpenGL Hidden Utility Window` と `... Hidden Test Window`（どちらも OpenGL・非表示）を作り、補助ウィンドウで `SDL_GL_CreateContext` を1回呼ぶ。続いて `Minecraft 26.3`（OpenGL）を作り、毎フレーム `SDL_GL_SwapWindow` を呼ぶ。Vulkanのサーフェスは作られない
+- つまり描画はOpenGL。コンテキストは非表示の補助ウィンドウで作り、ゲームのウィンドウで使っている
+- 対応：描画部分（`hook-win/src/frame.rs`）をウィンドウのライブラリに依存しない形（`WindowSystem` トレイト）にし、GLFWとSDL3の両方から呼ぶ。SDL3では `SDL_GL_SwapWindow` をフックし、HWNDは `SDL.window.win32.hwnd` プロパティ、大きさは `SDL_GetWindowSizeInPixels`、倍率は `SDL_GetWindowDisplayScale`、非表示の判定は `SDL_GetWindowFlags` で取る
+- `ci/smoke/SmokeSdl.java` は26.3と同じ手順（非表示の補助ウィンドウでコンテキストを作り、ゲームのウィンドウで使う）にした。Wineで表示を確認済み

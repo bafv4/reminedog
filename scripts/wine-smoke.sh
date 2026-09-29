@@ -149,11 +149,13 @@ mapfile -t jars <<<"$jar_list"
 # Compile with the host JDK; the class files run on any Java 8+ JVM.
 classes=$cache/smoke-classes/$lwjgl-$main_class
 smoke_src=$repo/ci/smoke/$main_class.java
-if [ ! -f "$classes/$main_class.class" ] || [ "$smoke_src" -nt "$classes/$main_class.class" ]; then
+if [ ! -f "$classes/$main_class.class" ] || [ "$smoke_src" -nt "$classes/$main_class.class" ] ||
+  [ "$repo/ci/smoke/SmokeImage.java" -nt "$classes/$main_class.class" ]; then
   echo "wine-smoke: compiling $main_class.java against LWJGL $lwjgl" >&2
   rm -rf "$classes"
   mkdir -p "$classes"
-  javac --release 8 -Xlint:-options -d "$classes" -cp "$(IFS=:; echo "${jars[*]}")" "$smoke_src" 2>&1 |
+  javac --release 8 -Xlint:-options -d "$classes" -cp "$(IFS=:; echo "${jars[*]}")" "$smoke_src" \
+    "$repo/ci/smoke/SmokeImage.java" 2>&1 |
     grep -v '^Picked up JAVA_TOOL_OPTIONS' >&2 || true
   [ -f "$classes/$main_class.class" ] || { echo "wine-smoke: javac failed" >&2; exit 1; }
 fi

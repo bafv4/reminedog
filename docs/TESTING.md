@@ -55,15 +55,16 @@
 
 ## Minecraft 26.x について
 
-26.x は GLFW ではなく SDL3 でウィンドウを作るため、オーバーレイはまだ出ない。
-代わりに、ゲームが OpenGL と Vulkan のどちらで描いているかをログに記録する。
-26.x で一度起動し、ログの次の行を送ってほしい（26.x 対応の方針を決めるのに使う）。
+26.x は GLFW ではなく SDL3 でウィンドウを作り、OpenGL で描いている。reminedog は SDL3 の `SDL_GL_SwapWindow` をフックして、1.21 以前と同じようにオーバーレイを描く。
+上の確認項目は 26.x でも同じ。ログには次の行が出る。
 
 | 行 | 意味 |
 |---|---|
-| `SDL3 loaded` | SDL3 を検出した |
-| `SDL_CreateWindow(... flags ... [OpenGL])` | ウィンドウの作成時の指定（`OpenGL` か `Vulkan`） |
-| `renderer: OpenGL via SDL3` / `renderer: Vulkan via SDL3` | 実際に作られたもの |
+| `SDL3 loaded` / `SDL3 hooks installed` | SDL3 を検出し、フックできた |
+| `SDL_CreateWindow(... [OpenGL, hidden])` | 描画用の非表示の補助ウィンドウ。ここにはオーバーレイを出さない |
+| `SDL_CreateWindow("Minecraft 26.x", ... [OpenGL])` | ゲームのウィンドウ |
+| `renderer: OpenGL via SDL3` | OpenGL のコンテキストが作られた（Vulkan なら `Vulkan via SDL3` と出る。その場合はまだ描けない） |
+| `window system: SDL 3.x.x` | オーバーレイが SDL3 のウィンドウに付いた |
 
 ## テストしたい組み合わせ（できる範囲で）
 

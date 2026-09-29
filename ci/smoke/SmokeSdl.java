@@ -1,8 +1,10 @@
 // SDL3 counterpart of Smoke.java: Minecraft 26.x opens its window with SDL3 (LWJGL 3.4)
-// instead of GLFW. Opens an OpenGL 3.2 core window with SDL3 and swaps frames, so the
-// agent's SDL3 detection can be smoke-tested. Java 8 source: javac --release 8.
+// instead of GLFW. Follows what 26.3 does: it creates its OpenGL context on a hidden
+// utility window, then creates the visible game window and makes that context current on
+// it. Java 8 source: javac --release 8.
 //
-// Usage: java -cp <lwjgl jars incl. lwjgl-sdl>;<classes> SmokeSdl [FRAMES]
+// Usage: java -cp <lwjgl jars incl. lwjgl-sdl>;<classes> SmokeSdl [FRAMES] [--screenshot]
+//   --screenshot  save the back buffer after the last swap as smoke-screenshot.png
 // Prints "SMOKE OK frames=N" and exits 0, or "SMOKE FAIL: <reason>" and exits 1.
 
 import org.lwjgl.Version;
@@ -43,9 +45,14 @@ public final class SmokeSdl {
 
     private static void run(String[] args) {
         int frames = 120;
+        boolean screenshot = false;
         for (String arg : args) {
+            if (arg.equals("--screenshot")) {
+                screenshot = true;
+                continue;
+            }
             if (arg.startsWith("--")) {
-                continue; // Smoke.java's flags; not supported here
+                continue; // Smoke.java's other flags; not supported here
             }
             try {
                 frames = Integer.parseInt(arg);
@@ -63,15 +70,23 @@ public final class SmokeSdl {
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-        long window = SDL_CreateWindow("reminedog smoke (SDL3)", 854, 480, SDL_WINDOW_OPENGL);
-        if (window == 0) {
-            throw new Fail("SDL_CreateWindow failed: " + SDL_GetError());
+        long utility = SDL_CreateWindow("reminedog smoke (SDL3) hidden utility window", 320, 480,
+            SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+        if (utility == 0) {
+            throw new Fail("SDL_CreateWindow (utility) failed: " + SDL_GetError());
         }
-        long context = SDL_GL_CreateContext(window);
+        long context = SDL_GL_CreateContext(utility);
         if (context == 0) {
             throw new Fail("SDL_GL_CreateContext failed: " + SDL_GetError());
         }
-        SDL_GL_MakeCurrent(window, context);
+        long window = SDL_CreateWindow("reminedog smoke (SDL3)", 854, 480,
+            SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+        if (window == 0) {
+            throw new Fail("SDL_CreateWindow failed: " + SDL_GetError());
+        }
+        if (!SDL_GL_MakeCurrent(window, context)) {
+            throw new Fail("SDL_GL_MakeCurrent failed: " + SDL_GetError());
+        }
         SDL_GL_SetSwapInterval(0);
         GL.createCapabilities();
         System.out.println("GL_VERSION " + glGetString(GL_VERSION));
@@ -96,8 +111,12 @@ public final class SmokeSdl {
         } finally {
             event.free();
         }
+        if (screenshot) {
+            SmokeImage.saveBackBuffer(854, 480, "smoke-screenshot.png");
+        }
         SDL_GL_DestroyContext(context);
         SDL_DestroyWindow(window);
+        SDL_DestroyWindow(utility);
         SDL_Quit();
         System.out.println("SMOKE OK frames=" + frames);
     }
