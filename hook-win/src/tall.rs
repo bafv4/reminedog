@@ -70,6 +70,11 @@ static REDIRECTED: AtomicBool = AtomicBool::new(false);
 /// it did since the last frame.
 static TALL_VIEWPORT: AtomicU64 = AtomicU64::new(0);
 static TALL_VIEWPORT_SEEN: AtomicBool = AtomicBool::new(false);
+/// For the log while zooming: the game's `glViewport` calls since the last frame, the
+/// tallest of them (height << 32 | width), and how often it asked for the window's size.
+static VIEWPORT_CALLS: AtomicU32 = AtomicU32::new(0);
+static VIEWPORT_TALLEST: AtomicU64 = AtomicU64::new(0);
+static SIZE_QUERIES: AtomicU32 = AtomicU32::new(0);
 
 /// The size the game is told while zooming, and the window it applies to.
 static SIZE_OVERRIDE: Mutex<Option<(usize, [i32; 2])>> = Mutex::new(None);
@@ -272,8 +277,12 @@ unsafe extern "system" fn blit_named_framebuffer_wrapper(
 
 unsafe extern "system" fn viewport_wrapper(x: i32, y: i32, width: i32, height: i32) {
     let tall = TALL_VIEWPORT.load(Ordering::Relaxed);
-    if tall != 0 && tall == pack([width, height]) {
-        TALL_VIEWPORT_SEEN.store(true, Ordering::Relaxed);
+    if tall != 0 {
+        if tall == pack([width, height]) {
+            TALL_VIEWPORT_SEEN.store(true, Ordering::Relaxed);
+        }
+        VIEWPORT_CALLS.fetch_add(1, Ordering::Relaxed);
+        VIEWPORT_TALLEST.fetch_max(pack([height, width]), Ordering::Relaxed);
     }
     if let Some(real) = VIEWPORT.get() {
         // SAFETY: the caller's arguments.
@@ -288,7 +297,11 @@ fn pack([w, h]: [i32; 2]) -> u64 {
 /// The size to report to the game for `window` instead of the real one, while zooming.
 pub fn size_override(window: *mut c_void) -> Option<[i32; 2]> {
     let current = *SIZE_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
-    current.and_then(|(w, size)| (w == window as usize).then_some(size))
+    let size = current.and_then(|(w, size)| (w == window as usize).then_some(size));
+    if size.is_some() {
+        SIZE_QUERIES.fetch_add(1, Ordering::Relaxed);
+    }
+    size
 }
 
 /// The window system reports a real resize of `window`. Returns true if the game must not
@@ -400,6 +413,24 @@ impl TallZoom {
             let redirected = REDIRECTED.swap(false, Ordering::Relaxed);
             let tall = TALL_VIEWPORT_SEEN.swap(false, Ordering::Relaxed)
                 || !VIEWPORT_WRAPPED.load(Ordering::Relaxed);
+            let viewport_calls = VIEWPORT_CALLS.swap(0, Ordering::Relaxed);
+            let tallest = VIEWPORT_TALLEST.swap(0, Ordering::Relaxed);
+            let size_queries = SIZE_QUERIES.swap(0, Ordering::Relaxed);
+            let seen = || {
+                let (h, w) = (tallest >> 32, tallest & 0xffff_ffff);
+                let mut current = [0; 4];
+                if let Some(game) = &self.game {
+                    // SAFETY: the game's context is current; a query changes no state.
+                    unsafe {
+                        game.gl
+                            .get_parameter_i32_slice(glow::VIEWPORT, &mut current)
+                    };
+                }
+                format!(
+                    "glViewport calls: {viewport_calls}, tallest {w}x{h}, viewport now {}x{}, size queries: {size_queries}",
+                    current[2], current[3]
+                )
+            };
             let factor = active.factor;
             let view = if redirected && tall {
                 self.misses = 0;
@@ -407,15 +438,19 @@ impl TallZoom {
                 ZoomView::HighRes { factor }
             } else {
                 self.misses += 1;
-                log::debug!(
-                    "zoom: frame not rendered at the tall size (output redirected: {redirected}, tall viewport: {tall})"
-                );
+                if log::log_enabled!(log::Level::Debug) {
+                    log::debug!(
+                        "zoom: frame not rendered at the tall size (output redirected: {redirected}, tall viewport: {tall}; {})",
+                        seen()
+                    );
+                }
                 fallback
             };
             let resized = REAL_RESIZED.swap(false, Ordering::Relaxed) || real != active.real;
             if self.misses >= MAX_MISSES {
                 log::warn!(
-                    "zoom: the game does not render at the tall size; enlarging pixels instead"
+                    "zoom: the game does not render at the tall size; enlarging pixels instead (last frame: output redirected: {redirected}, tall viewport: {tall}; {})",
+                    seen()
                 );
                 self.failure = Some("ゲームが縦長の解像度で描かなかった".into());
             }
@@ -466,6 +501,9 @@ impl TallZoom {
         REDIRECTED.store(false, Ordering::Relaxed);
         TALL_VIEWPORT.store(pack(tall), Ordering::Relaxed);
         TALL_VIEWPORT_SEEN.store(false, Ordering::Relaxed);
+        VIEWPORT_CALLS.store(0, Ordering::Relaxed);
+        VIEWPORT_TALLEST.store(0, Ordering::Relaxed);
+        SIZE_QUERIES.store(0, Ordering::Relaxed);
         REDIRECT.store(id, Ordering::Relaxed);
         // "0" means ours from now on; if 0 is bound right now (the game's view of it is
         // cached), bind ours in its place.
