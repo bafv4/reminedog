@@ -1,0 +1,278 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Mesa release (pal1000/mesa-dist-win tag) for the smoke test. Pin it with the repository
+  # variable MESA_TAG (e.g. "25.2.3") if a new release breaks the runner.
+  MESA_TAG: ${{ vars.MESA_TAG || 'latest' }}
+
+jobs:
+  linux:
+    name: Linux (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+      # hook-win is empty off Windows; lint its real code for the GNU Windows target too
+      # (MinGW gcc builds the C sources of its minhook dependency).
+      - name: Install MinGW-w64
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+      - name: Add Windows GNU target
+        run: rustup target add x86_64-pc-windows-gnu
+      - name: Clippy (hook-win, x86_64-pc-windows-gnu)
+        run: cargo clippy -p reminedog-hook-win --target x86_64-pc-windows-gnu -- -D warnings
+
+  windows:
+    name: Windows (MSVC build)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Build agent DLL
+        env:
+          REMINEDOG_BUILD_ID: ${{ github.sha }}
+        run: cargo build --release -p reminedog-hook-win
+
+      - name: Check DLL exports and CRT linkage
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          $dll = 'target\release\reminedog.dll'
+
+          $exports = & $dumpbin /nologo /exports $dll
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin /exports failed ($LASTEXITCODE)" }
+          $exports
+          if (-not ($exports -match '\sAgent_OnLoad(\s|$)')) { throw "$dll does not export Agent_OnLoad" }
+
+          # Java 8 ships no vcruntime140.dll, so the CRT must be linked statically (.cargo/config.toml).
+          $deps = & $dumpbin /nologo /dependents $dll
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin /dependents failed ($LASTEXITCODE)" }
+          $deps
+          $crt = $deps -match '^\s*(vcruntime|msvcp|ucrtbase|api-ms-win-crt-)'
+          if ($crt) { throw "$dll imports the dynamic CRT: $(($crt | ForEach-Object Trim) -join ', ')" }
+
+      - name: Stage artifact
+        run: |
+          $dist = Join-Path $env:RUNNER_TEMP dist
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item target\release\reminedog.dll $dist  # required; fails the step if missing
+          foreach ($optional in 'target\release\reminedog.pdb', 'README.md', 'docs') {
+            if (Test-Path $optional) { Copy-Item $optional $dist -Recurse }
+          }
+          Get-ChildItem $dist -Recurse -File | ForEach-Object FullName
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reminedog-windows-x64
+          path: ${{ runner.temp }}/dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  # Load the DLL into real Windows JVMs running an LWJGL/GLFW window like Minecraft's,
+  # rendered by Mesa llvmpipe (the runners have no GPU).
+  smoke-windows:
+    name: Smoke (LWJGL ${{ matrix.lwjgl }}, Java ${{ matrix.java }})
+    needs: windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Minecraft 1.14-1.16: Java 8, default window hints (compatibility context).
+          - lwjgl: "3.2.2"
+            java: "8"
+            hints: --legacy
+          # Minecraft 1.20.5+: Java 21, OpenGL 3.2 core context.
+          - lwjgl: "3.3.3"
+            java: "21"
+            hints: ""
+    defaults:
+      run:
+        shell: bash
+    env:
+      GALLIUM_DRIVER: llvmpipe
+      SMOKE_FRAMES: "180"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: reminedog-windows-x64
+          path: ${{ runner.temp }}/agent
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+
+      # GLFW (and the agent) load "opengl32.dll" by name, so a copy next to java.exe wins
+      # over the system's GDI software renderer.
+      - name: Install Mesa llvmpipe next to java.exe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          repo=pal1000/mesa-dist-win
+          tag=$MESA_TAG
+          if [ "$tag" = latest ]; then
+            tag=$(gh release view --repo "$repo" --json tagName --jq .tagName)
+          fi
+          echo "Mesa release: $tag"
+          mesa=$(cygpath -u "$RUNNER_TEMP")/mesa
+          mkdir -p "$mesa"
+          gh release download "$tag" --repo "$repo" --pattern 'mesa3d-*-release-msvc.7z' --dir "$(cygpath -w "$mesa")"
+          archives=("$mesa"/mesa3d-*-release-msvc.7z)
+          7z x -y -bso0 -bsp0 "-o$(cygpath -w "$mesa")" "$(cygpath -w "${archives[0]}")"
+
+          shopt -s nullglob
+          dlls=("$mesa"/x64/opengl32.dll "$mesa"/*/x64/opengl32.dll)
+          if [ "${#dlls[@]}" -eq 0 ]; then
+            echo "::error::x64/opengl32.dll not found in ${archives[0]}"
+            exit 1
+          fi
+          x64=$(dirname "${dlls[0]}")
+          java_bin=$(cygpath -u "$JAVA_HOME")/bin
+          for name in opengl32.dll libgallium_wgl.dll libglapi.dll; do
+            if [ -f "$x64/$name" ]; then cp -v "$x64/$name" "$java_bin/"; fi
+          done
+
+      - name: Fetch LWJGL and compile the harness
+        env:
+          LWJGL_VERSION: ${{ matrix.lwjgl }}
+          JAVA_MAJOR: ${{ matrix.java }}
+        run: |
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          java_bin=$(cygpath -u "$JAVA_HOME")/bin
+          jar_list=$(bash ci/smoke/fetch-lwjgl.sh "$LWJGL_VERSION" "$tmp/lwjgl")
+          mapfile -t jars <<<"$jar_list"
+          jar_cp=$(cygpath -w "${jars[@]}" | paste -sd ';' -)
+          classes=$(cygpath -w "$tmp/classes")
+
+          # JDK 8's javac has no --release; its own class library is Java 8's anyway.
+          if [ "$JAVA_MAJOR" = 8 ]; then release=(-source 8 -target 8); else release=(--release 8); fi
+          mkdir -p "$tmp/classes"
+          "$java_bin/javac" "${release[@]}" -Xlint:-options -encoding UTF-8 -cp "$jar_cp" -d "$classes" ci/smoke/Smoke.java
+
+          # Paths handed to java.exe are Windows paths; SMOKE_ROOT is only used by bash.
+          {
+            printf 'JAVA=%s\n' "$java_bin/java"
+            printf 'AGENT=%s\n' "$(cygpath -w "$tmp/agent/reminedog.dll")"
+            printf 'SMOKE_CP=%s\n' "$jar_cp;$classes"
+            printf 'SMOKE_ROOT=%s\n' "$tmp/smoke"
+          } >>"$GITHUB_ENV"
+
+      - name: "Step A: JVM starts with the agent (java -version)"
+        timeout-minutes: 5
+        run: |
+          dir=$SMOKE_ROOT/version
+          mkdir -p "$dir" && cd "$dir"
+          status=0
+          "$JAVA" "-agentpath:$AGENT" -version 2>&1 | tee java.txt || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::java -version with the agent exited with $status"
+            exit 1
+          fi
+          if ! grep -qF "agent loaded" reminedog/reminedog.log; then
+            echo "::error::the agent did not write 'agent loaded' to $dir/reminedog/reminedog.log"
+            exit 1
+          fi
+
+      # Same run without the agent, so a failure below can be told apart from a runner problem.
+      - name: "Step B (baseline): harness without the agent"
+        timeout-minutes: 5
+        env:
+          SMOKE_HINTS: ${{ matrix.hints }}
+        run: |
+          dir=$SMOKE_ROOT/baseline
+          mkdir -p "$dir" && cd "$dir"
+          natives=$(cygpath -w "$dir/natives")
+          status=0
+          "$JAVA" "-Dorg.lwjgl.system.SharedLibraryExtractPath=$natives" -cp "$SMOKE_CP" \
+            Smoke "$SMOKE_FRAMES" --readback ${SMOKE_HINTS:+"$SMOKE_HINTS"} 2>&1 | tee smoke.txt || status=$?
+          fail=0
+          [ "$status" -eq 0 ] || { echo "::error::baseline harness exited with $status"; fail=1; }
+          grep -qF "SMOKE OK" smoke.txt || { echo "::error::baseline harness did not print 'SMOKE OK'"; fail=1; }
+          grep -qF "GL_RENDERER llvmpipe" smoke.txt || { echo "::error::baseline is not rendering with Mesa llvmpipe"; fail=1; }
+          exit "$fail"
+
+      - name: "Step B: harness with the agent"
+        timeout-minutes: 5
+        env:
+          SMOKE_HINTS: ${{ matrix.hints }}
+        run: |
+          dir=$SMOKE_ROOT/agent
+          mkdir -p "$dir" && cd "$dir"
+          natives=$(cygpath -w "$dir/natives")
+          status=0
+          # --screenshot saves the back buffer after the last swap (smoke-screenshot.png, uploaded
+          # below); whether it still shows the overlay depends on the driver's swap method.
+          "$JAVA" "-agentpath:$AGENT" "-Dorg.lwjgl.system.SharedLibraryExtractPath=$natives" -cp "$SMOKE_CP" \
+            Smoke "$SMOKE_FRAMES" --readback --screenshot ${SMOKE_HINTS:+"$SMOKE_HINTS"} 2>&1 | tee smoke.txt || status=$?
+          fail=0
+          [ "$status" -eq 0 ] || { echo "::error::harness with the agent exited with $status"; fail=1; }
+          grep -qF "SMOKE OK" smoke.txt || { echo "::error::harness with the agent did not print 'SMOKE OK'"; fail=1; }
+          log=reminedog/reminedog.log
+          for marker in "agent loaded" "GLFW hooks installed" "overlay: first frame rendered"; do
+            grep -qF "$marker" "$log" || { echo "::error::agent log lacks '$marker'"; fail=1; }
+          done
+          if grep -F "[ERROR]" "$log"; then
+            echo "::error::agent log has [ERROR] lines"
+            fail=1
+          fi
+          exit "$fail"
+
+      - name: Show agent logs
+        if: always()
+        run: |
+          [ -n "${SMOKE_ROOT:-}" ] || exit 0
+          shopt -s nullglob
+          for log in "$SMOKE_ROOT"/*/reminedog/*.log; do
+            echo "===== $log"
+            cat "$log"
+          done
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs-lwjgl${{ matrix.lwjgl }}-java${{ matrix.java }}
+          path: |
+            ${{ runner.temp }}/smoke/*/reminedog/
+            ${{ runner.temp }}/smoke/*/*.txt
+            ${{ runner.temp }}/smoke/*/*.png
+          if-no-files-found: ignore
+          retention-days: 30
