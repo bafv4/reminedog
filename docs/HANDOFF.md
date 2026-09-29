@@ -165,7 +165,9 @@ IATフックではなくインラインのデトアにする。LWJGLは関数の
 
 ### フックのクレートは MinHook にした
 `retour` 0.3.1 は、RIP相対のアドレスの後ろに即値が続く命令を正しく移せない（変位を「命令の最後の4バイト」とみなして書き換える。`retour/src/arch/x86/trampoline/mod.rs` の `instruction_bytes.len() - 4`）。
-GLFWの関数はどれも `_GLFW_REQUIRE_INIT()` で始まり、先頭が `cmp dword [rip+_glfw.initialized], 0`（`83 3d <disp32> 00`）になる。このため `retour` でフックすると、元の関数を呼んだ瞬間に不正なアドレスを読んで落ちる（Wine上で再現を確認）。
+GLFWのAPI関数の多くは、最初の数バイトの中で初期化済みかを調べる `cmp dword [rip+_glfw.initialized], 0`（`83 3d <disp32> 00`）を実行する。
+`glfwSwapBuffers` では先頭の命令そのもので、`glfwSetKeyCallback`・`glfwSetCharModsCallback`・`glfwGetKey` などでは `sub rsp,28h` の直後（+4バイト）にある（LWJGL 3.1.6／3.2.2／3.3.3 の glfw.dll で確認）。
+どちらもフックで書き換える先頭5バイトにかかるため、トランポリンに移される。このため `retour` でフックすると、元の関数を呼んだ瞬間に不正なアドレスを読んで落ちる（Wine上で再現を確認）。
 MinHook は即値の長さを差し引いて変位の位置を求めるので問題ない。Windows では `minhook` クレートを使う。Linux対応のときは別の方法（`retour` の修正版など）を検討する。
 
 ### Wine上で確かめたこと（`scripts/wine-smoke.sh`）

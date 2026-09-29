@@ -6,7 +6,7 @@
 ## 準備
 
 1. `reminedog.dll` を入手する（[README](../README.md#dll-の入手)）
-2. 日本語を含まない場所に置く（例：`C:\reminedog\reminedog.dll`）
+2. パスに日本語も空白（スペース）も含まない場所に置く（例：`C:\reminedog\reminedog.dll`。`C:\Program Files` は不可）
 3. 確かめたいインスタンスの JVM 引数に `-agentpath:C:\reminedog\reminedog.dll` を追加する
 
 ## 確認すること
@@ -34,7 +34,8 @@
 - 上のチェックの結果（スクリーンショットがあると助かる）
 - ゲームフォルダの `reminedog/reminedog.log`
   - Prism Launcher：インスタンスのフォルダの中の `minecraft`（または `.minecraft`）
-  - 公式ランチャー：`%APPDATA%\.minecraft`
+  - 公式ランチャー：起動構成の「ゲームディレクトリ」。空欄なら `%APPDATA%\.minecraft`
+  - 分からないときは、オーバーレイの「ゲームフォルダ」の行を見る
 
 ログにはトークンなどの秘密の情報は書き出していない（コマンドラインは記録しない）。
 ただし、ゲームフォルダや読み込んだ DLL のパスにはユーザー名が含まれることがある。

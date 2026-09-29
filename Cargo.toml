@@ -18,8 +18,9 @@ egui_glow = { version = "0.36", default-features = false }
 glow = "0.17"
 log = { version = "0.4", features = ["std"] }
 regex = "1"
-# retour 0.3 mis-relocates RIP-relative instructions followed by an immediate, which is
-# exactly how every GLFW function starts (cmp [rip+_glfw.initialized], 0); MinHook does not.
+# retour 0.3 mis-relocates RIP-relative instructions followed by an immediate. GLFW's init
+# check (cmp [rip+_glfw.initialized], 0) sits in the first bytes of most of its API functions
+# (the very first instruction of glfwSwapBuffers), inside the patched prologue. MinHook is fine.
 minhook = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
