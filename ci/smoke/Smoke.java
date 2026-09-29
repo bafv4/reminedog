@@ -10,6 +10,8 @@
 //   --seconds=N   run for N seconds at about 60 fps instead of a frame count (for input tests)
 //   --capture     grab the cursor like Minecraft in game (GLFW_CURSOR_DISABLED), with raw
 //                 mouse motion where supported (Minecraft's "Raw Input" setting, on by default)
+//   --mc          render like Minecraft: into its own framebuffer at the size the framebuffer
+//                 size callback reports, then copied into the window
 //   --screenshot  after the last swap, save the back buffer as smoke-screenshot.png in the
 //                 current directory (diagnostic: what an overlay drew, where the driver keeps
 //                 the back buffer after a swap, as Wine + llvmpipe does)
@@ -72,13 +74,15 @@ public final class Smoke {
 
     private static void run(String[] args) {
         int frames = 120;
-        boolean legacy = false, readback = false, screenshot = false, capture = false;
+        boolean legacy = false, readback = false, screenshot = false, capture = false, mc = false;
         double seconds = 0;
         for (String arg : args) {
             if (arg.startsWith("--seconds=")) {
                 seconds = Double.parseDouble(arg.substring("--seconds=".length()));
             } else if (arg.equals("--capture")) {
                 capture = true;
+            } else if (arg.equals("--mc")) {
+                mc = true;
             } else if (arg.equals("--legacy")) {
                 legacy = true;
             } else if (arg.equals("--readback")) {
@@ -153,6 +157,18 @@ public final class Smoke {
         glfwSetMouseButtonCallback(window, (w, button, action, mods) -> buttons++);
         glfwSetCursorPosCallback(window, (w, x, y) -> cursorMoves++);
         glfwSetScrollCallback(window, (w, dx, dy) -> scrolls++);
+        final int[] fbSize = new int[2];
+        {
+            int[] w = new int[1], h = new int[1];
+            glfwGetFramebufferSize(window, w, h);
+            fbSize[0] = w[0];
+            fbSize[1] = h[0];
+        }
+        glfwSetFramebufferSizeCallback(window, (w, width, height) -> {
+            fbSize[0] = width;
+            fbSize[1] = height;
+        });
+        SmokeImage.MainTarget mainTarget = mc ? new SmokeImage.MainTarget() : null;
         if (capture) {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
             if (glfwRawMouseMotionSupported()) {
@@ -174,9 +190,14 @@ public final class Smoke {
             if (seconds > 0) {
                 sleep(15);
             }
-            glClearColor(CLEAR_R, CLEAR_G, CLEAR_B, 1f);
-            glClear(GL_COLOR_BUFFER_BIT);
-            SmokeImage.drawPattern(854, 480);
+            if (mainTarget != null) {
+                mainTarget.render(fbSize[0], fbSize[1]);
+                mainTarget.present();
+            } else {
+                glClearColor(CLEAR_R, CLEAR_G, CLEAR_B, 1f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                SmokeImage.drawPattern(854, 480);
+            }
             glfwSwapBuffers(window);
             glfwPollEvents();
             if (wglContext != 0 && WGL.wglGetCurrentContext() != wglContext) {

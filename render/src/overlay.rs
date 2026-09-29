@@ -8,7 +8,12 @@ use egui::{
 };
 use glow::HasContext as _;
 
+use reminedog_core::Settings;
+use reminedog_core::settings::ZOOM_FACTOR_RANGE;
+
 use crate::font_metrics;
+use crate::hotkey::Hotkey;
+use crate::input::Captured;
 use crate::zoom::Zoom;
 
 /// A font file added as a fallback for glyphs egui's built-in fonts lack (Japanese).
@@ -47,15 +52,31 @@ pub struct FrameParams<'a> {
     pub input: FrameInput,
 }
 
+/// How the zoom shows this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ZoomView {
+    #[default]
+    Off,
+    /// The overlay enlarges the centre of the game's normal frame.
+    Magnify,
+    /// The game rendered a taller frame and the platform hook already put its centre on
+    /// the screen, enlarged `factor` times.
+    HighRes { factor: f32 },
+}
+
 /// This frame's input state, from [`crate::InputRouter`].
 #[derive(Default)]
 pub struct FrameInput {
     pub events: Vec<egui::Event>,
     pub modifiers: Modifiers,
     pub ui_open: bool,
-    pub zoom: bool,
+    pub zoom: ZoomView,
     /// Where to draw the overlay's own cursor (points), when the game hides the real one.
     pub software_cursor: Option<Pos2>,
+    /// The key captured after [`FrameOutput::start_capture`].
+    pub captured: Option<Captured>,
+    /// Why the high-resolution zoom cannot be used, shown in the menu.
+    pub high_res_note: Option<String>,
 }
 
 /// What the platform hook has to act on after a frame.
@@ -63,6 +84,25 @@ pub struct FrameInput {
 pub struct FrameOutput {
     /// The UI's close button was clicked.
     pub close_ui: bool,
+    /// Capture the next key for a hotkey ([`crate::InputRouter::start_capture`]).
+    pub start_capture: bool,
+    pub cancel_capture: bool,
+    /// The settings changed: apply the hotkeys and save.
+    pub settings: Option<Settings>,
+}
+
+/// The two hotkeys in `settings`; unreadable ones fall back to the defaults.
+pub fn hotkeys(settings: &Settings) -> (Hotkey, Hotkey) {
+    let parse = |text: &str, default: Hotkey, what: &str| {
+        Hotkey::parse(text).unwrap_or_else(|| {
+            log::warn!("settings: unknown {what} key {text:?}; using {default}");
+            default
+        })
+    };
+    (
+        parse(&settings.menu_key, Hotkey::DEFAULT_MENU, "menu"),
+        parse(&settings.zoom_key, Hotkey::DEFAULT_ZOOM, "zoom"),
+    )
 }
 
 #[derive(Debug)]
@@ -79,23 +119,100 @@ impl std::error::Error for OverlayError {}
 /// How long the hotkey hint shows after the first frame, in seconds.
 const HINT_SECONDS: f64 = 10.0;
 
-/// Settings changed from the UI. Not saved yet.
-struct Settings {
-    zoom_factor: f32,
-    zoom_smooth: bool,
-    show_status: bool,
-    test_text: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Menu,
+    Zoom,
 }
 
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            zoom_factor: 4.0,
-            zoom_smooth: true,
-            show_status: false,
-            test_text: String::new(),
+impl Action {
+    fn name(self) -> &'static str {
+        match self {
+            Action::Menu => "メニューを開く",
+            Action::Zoom => "ズーム",
         }
     }
+}
+
+/// The settings and the menu's own state.
+struct UiState {
+    settings: Settings,
+    menu_key: Hotkey,
+    zoom_key: Hotkey,
+    test_text: String,
+    /// Waiting for a key for this hotkey.
+    capturing: Option<Action>,
+    /// Why the last captured key was not taken.
+    key_note: Option<String>,
+}
+
+impl UiState {
+    fn new(settings: Settings) -> Self {
+        let (menu_key, zoom_key) = hotkeys(&settings);
+        Self {
+            settings,
+            menu_key,
+            zoom_key,
+            test_text: String::new(),
+            capturing: None,
+            key_note: None,
+        }
+    }
+
+    fn hotkey(&self, action: Action) -> Hotkey {
+        match action {
+            Action::Menu => self.menu_key,
+            Action::Zoom => self.zoom_key,
+        }
+    }
+
+    fn set_hotkey(&mut self, action: Action, hotkey: Hotkey) {
+        match action {
+            Action::Menu => {
+                self.menu_key = hotkey;
+                self.settings.menu_key = hotkey.to_string();
+            }
+            Action::Zoom => {
+                self.zoom_key = hotkey;
+                self.settings.zoom_key = hotkey.to_string();
+            }
+        }
+    }
+
+    /// Assigns a captured key unless it would make the zoom unreachable: the menu hotkey is
+    /// checked first and matches with extra modifiers held.
+    fn assign(&mut self, action: Action, hotkey: Hotkey) {
+        let (menu, zoom) = match action {
+            Action::Menu => (hotkey, self.zoom_key),
+            Action::Zoom => (self.menu_key, hotkey),
+        };
+        let shadowed = menu.trigger == zoom.trigger
+            && (!menu.ctrl || zoom.ctrl)
+            && (!menu.shift || zoom.shift)
+            && (!menu.alt || zoom.alt);
+        if shadowed {
+            let other = match action {
+                Action::Menu => Action::Zoom,
+                Action::Zoom => Action::Menu,
+            };
+            self.key_note = Some(format!(
+                "{} は「{}」と重なるので使えない",
+                hotkey.label(),
+                other.name()
+            ));
+            return;
+        }
+        self.key_note = None;
+        self.set_hotkey(action, hotkey);
+    }
+}
+
+/// What the menu asked for this frame.
+#[derive(Default)]
+struct MenuActions {
+    close: bool,
+    capture: Option<Action>,
+    cancel_capture: bool,
 }
 
 /// egui running on the agent's own GL context, drawing into the default framebuffer.
@@ -103,7 +220,7 @@ pub struct Overlay {
     ctx: egui::Context,
     painter: egui_glow::Painter,
     zoom: Zoom,
-    settings: Settings,
+    state: UiState,
     first_time: Option<f64>,
     last_time: Option<f64>,
     frames: u64,
@@ -112,7 +229,11 @@ pub struct Overlay {
 
 impl Overlay {
     /// Must be called with the agent's GL context current.
-    pub fn new(gl: Arc<glow::Context>, fonts: Vec<FontSource>) -> Result<Self, OverlayError> {
+    pub fn new(
+        gl: Arc<glow::Context>,
+        fonts: Vec<FontSource>,
+        settings: Settings,
+    ) -> Result<Self, OverlayError> {
         let zoom = Zoom::new(&gl);
         let painter = egui_glow::Painter::new(gl, "", None, false)
             .map_err(|e| OverlayError(format!("egui_glow painter: {e}")))?;
@@ -123,7 +244,7 @@ impl Overlay {
             ctx,
             painter,
             zoom,
-            settings: Settings::default(),
+            state: UiState::new(settings),
             first_time: None,
             last_time: None,
             frames: 0,
@@ -158,14 +279,25 @@ impl Overlay {
         self.fps.tick(params.time);
 
         let input = params.input;
-        if input.zoom {
+        let state = &mut self.state;
+        let before = state.settings.clone();
+        if let Some(captured) = input.captured {
+            match (captured, state.capturing.take()) {
+                (Captured::Hotkey(hotkey), Some(action)) => state.assign(action, hotkey),
+                (Captured::Cancelled, _) | (_, None) => {}
+            }
+        }
+        if !input.ui_open {
+            state.capturing = None;
+        }
+        if input.zoom == ZoomView::Magnify {
             // SAFETY: the caller guarantees our context is current on the game's drawable.
             unsafe {
                 self.zoom.draw(
                     self.painter.gl(),
                     [width, height],
-                    self.settings.zoom_factor,
-                    self.settings.zoom_smooth,
+                    state.settings.zoom_factor,
+                    state.settings.zoom_smooth,
                 );
             }
         }
@@ -195,22 +327,24 @@ impl Overlay {
             ppp,
         };
         let show_hint = !input.ui_open && params.time - first_time < HINT_SECONDS;
-        let settings = &mut self.settings;
-        let mut out = FrameOutput::default();
+        let high_res_note = input.high_res_note.as_deref();
+        let mut actions = MenuActions::default();
         let mut output = self.ctx.run_ui(raw, |ui| {
             if input.ui_open {
                 // Dim the game so it is clear the overlay has the input.
                 ui.painter()
                     .rect_filled(ui.max_rect(), 0.0, Color32::from_black_alpha(90));
-                out.close_ui = main_window(ui.ctx(), settings, &info, params.status);
-            } else if settings.show_status {
+                actions = main_window(ui.ctx(), state, &info, params.status, high_res_note);
+            } else if state.settings.show_status {
                 status_window(ui.ctx(), &info, params.status);
             }
-            if input.zoom {
-                zoom_badge(ui.ctx(), settings.zoom_factor);
+            match input.zoom {
+                ZoomView::Off => {}
+                ZoomView::Magnify => zoom_badge(ui.ctx(), state.settings.zoom_factor),
+                ZoomView::HighRes { factor } => zoom_badge(ui.ctx(), factor),
             }
             if show_hint {
-                hint(ui.ctx());
+                hint(ui.ctx(), state.menu_key);
             }
             if let Some(pos) = input.software_cursor {
                 draw_cursor(ui.ctx(), pos);
@@ -228,6 +362,19 @@ impl Overlay {
             &primitives,
             &mut output.textures_delta,
         );
+        let mut out = FrameOutput {
+            close_ui: actions.close,
+            cancel_capture: actions.cancel_capture,
+            ..Default::default()
+        };
+        if let Some(action) = actions.capture {
+            state.capturing = Some(action);
+            state.key_note = None;
+            out.start_capture = true;
+        }
+        if state.settings != before {
+            out.settings = Some(state.settings.clone());
+        }
         out
     }
 
@@ -326,13 +473,15 @@ fn status_window(ctx: &egui::Context, info: &FrameInfo, status: &[StatusLine]) {
         .show(ctx, |ui| status_grid(ui, info, status));
 }
 
-/// The menu opened with Ctrl+I. Returns true when its close button was clicked.
+/// The menu.
 fn main_window(
     ctx: &egui::Context,
-    settings: &mut Settings,
+    state: &mut UiState,
     info: &FrameInfo,
     status: &[StatusLine],
-) -> bool {
+    high_res_note: Option<&str>,
+) -> MenuActions {
+    let mut actions = MenuActions::default();
     let mut open = true;
     egui::Window::new("reminedog")
         .id(egui::Id::new("reminedog-main"))
@@ -340,18 +489,77 @@ fn main_window(
         .default_pos([40.0, 40.0])
         .resizable(false)
         .show(ctx, |ui| {
-            ui.label("Ctrl+I か Esc で閉じる");
+            ui.label(format!("{} か Esc で閉じる", state.menu_key.label()));
             ui.separator();
 
             ui.label(RichText::new("ズーム").strong());
-            ui.label("ゲーム中に Z を押している間、画面の中央を拡大する");
-            ui.add(egui::Slider::new(&mut settings.zoom_factor, 1.5..=8.0).text("倍率"));
-            ui.checkbox(&mut settings.zoom_smooth, "なめらかに拡大する");
+            ui.label(format!(
+                "ゲーム中に {} を押している間、画面の中央を拡大する",
+                state.zoom_key.label()
+            ));
+            let (lo, hi) = ZOOM_FACTOR_RANGE;
+            ui.add(egui::Slider::new(&mut state.settings.zoom_factor, lo..=hi).text("倍率"));
+            ui.checkbox(&mut state.settings.zoom_high_res, "高精細にする")
+                .on_hover_text(
+                    "ゲームに縦長の解像度で描かせ、細かいところまで拡大する。\n\
+                     倍率に比例して重くなる",
+                );
+            if let Some(note) = high_res_note.filter(|_| state.settings.zoom_high_res) {
+                ui.label(RichText::new(note).weak());
+            }
+            // Used when high resolution is off or not available.
+            ui.add_enabled_ui(
+                !state.settings.zoom_high_res || high_res_note.is_some(),
+                |ui| {
+                    ui.checkbox(&mut state.settings.zoom_smooth, "なめらかに拡大する")
+                        .on_hover_text("高精細でないときの拡大のしかた");
+                },
+            );
+            ui.separator();
+
+            ui.label(RichText::new("キー").strong());
+            egui::Grid::new("reminedog-keys")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    for action in [Action::Menu, Action::Zoom] {
+                        ui.label(action.name());
+                        let waiting = state.capturing == Some(action);
+                        let text = if waiting {
+                            "キーを押す…".to_owned()
+                        } else {
+                            state.hotkey(action).label()
+                        };
+                        if ui.add(egui::Button::new(text).selected(waiting)).clicked() {
+                            if waiting {
+                                state.capturing = None;
+                                actions.cancel_capture = true;
+                            } else {
+                                actions.capture = Some(action);
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+            if state.capturing.is_some() {
+                ui.label(
+                    RichText::new("割り当てるキーかマウスのボタンを押す（Esc で取り消し）").weak(),
+                );
+            } else if let Some(note) = &state.key_note {
+                ui.label(RichText::new(note).color(ui.visuals().warn_fg_color));
+            }
+            if ui.button("キーを元に戻す").clicked() {
+                state.capturing = None;
+                actions.cancel_capture = true;
+                state.key_note = None;
+                state.set_hotkey(Action::Menu, Hotkey::DEFAULT_MENU);
+                state.set_hotkey(Action::Zoom, Hotkey::DEFAULT_ZOOM);
+            }
             ui.separator();
 
             ui.label(RichText::new("入力のテスト").strong());
             ui.add(
-                egui::TextEdit::singleline(&mut settings.test_text)
+                egui::TextEdit::singleline(&mut state.test_text)
                     .hint_text("日本語を入力できるか試す"),
             );
             ui.separator();
@@ -360,11 +568,12 @@ fn main_window(
                 .id_salt("reminedog-status-section")
                 .show(ui, |ui| status_grid(ui, info, status));
             ui.checkbox(
-                &mut settings.show_status,
+                &mut state.settings.show_status,
                 "メニューを閉じても状態を表示する",
             );
         });
-    !open
+    actions.close = !open;
+    actions
 }
 
 fn zoom_badge(ctx: &egui::Context, factor: f32) {
@@ -378,13 +587,13 @@ fn zoom_badge(ctx: &egui::Context, factor: f32) {
         });
 }
 
-fn hint(ctx: &egui::Context) {
+fn hint(ctx: &egui::Context, menu_key: Hotkey) {
     egui::Area::new(egui::Id::new("reminedog-hint"))
         .anchor(egui::Align2::LEFT_TOP, [12.0, 12.0])
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame::popup(&ctx.global_style()).show(ui, |ui| {
-                ui.label("reminedog：Ctrl+I でメニューを開く");
+                ui.label(format!("reminedog：{} でメニューを開く", menu_key.label()));
             });
         });
 }
@@ -464,5 +673,46 @@ mod tests {
         let monospace = &defs.families[&FontFamily::Monospace];
         assert_eq!(monospace.last().map(String::as_str), Some("jp"));
         assert!(monospace.len() > 1, "egui's monospace font stays first");
+    }
+
+    fn state() -> UiState {
+        UiState::new(Settings::default())
+    }
+
+    #[test]
+    fn assigning_a_hotkey_updates_the_settings() {
+        let mut state = state();
+        state.assign(Action::Zoom, Hotkey::parse("C").unwrap());
+        assert_eq!(state.settings.zoom_key, "C");
+        assert_eq!(state.zoom_key, Hotkey::parse("C").unwrap());
+        assert_eq!(state.key_note, None);
+    }
+
+    #[test]
+    fn a_hotkey_that_would_hide_the_zoom_is_refused() {
+        let mut state = state();
+        // The menu on plain Z would swallow every zoom press.
+        state.assign(Action::Menu, Hotkey::parse("Z").unwrap());
+        assert_eq!(state.settings.menu_key, "Ctrl+I");
+        assert!(state.key_note.is_some());
+        // Same for the zoom on the menu's own key.
+        state.assign(Action::Zoom, Hotkey::parse("Ctrl+I").unwrap());
+        assert_eq!(state.settings.zoom_key, "Z");
+        // Plain I for the zoom is fine: Ctrl+I opens the menu, I zooms.
+        state.assign(Action::Zoom, Hotkey::parse("I").unwrap());
+        assert_eq!(state.settings.zoom_key, "I");
+        assert_eq!(state.key_note, None);
+    }
+
+    #[test]
+    fn unreadable_hotkeys_fall_back_to_the_defaults() {
+        let settings = Settings {
+            menu_key: "Nope".into(),
+            zoom_key: "Mouse4".into(),
+            ..Settings::default()
+        };
+        let (menu, zoom) = hotkeys(&settings);
+        assert_eq!(menu, Hotkey::DEFAULT_MENU);
+        assert_eq!(zoom.to_string(), "Mouse4");
     }
 }

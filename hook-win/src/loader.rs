@@ -1,4 +1,4 @@
-//! Watches DLL loads so GLFW can be detoured the moment LWJGL loads it.
+//! Watches DLL loads so GLFW, SDL3 and opengl32 can be detoured the moment they load.
 //!
 //! `LdrRegisterDllNotification` reports every load, whichever API triggered it
 //! (`LoadLibraryA/W/ExA/ExW`, static imports), after the image is mapped and before
@@ -122,7 +122,9 @@ fn scan_loaded_modules() {
 }
 
 fn on_module(module: HMODULE, path: &str) {
-    if crate::glfw::is_glfw(module) {
+    if crate::tall::is_opengl32(path) {
+        crate::tall::attach(module);
+    } else if crate::glfw::is_glfw(module) {
         crate::glfw::attach(module, path);
     } else if crate::sdl::is_sdl3(module) {
         crate::sdl::attach(module, path);

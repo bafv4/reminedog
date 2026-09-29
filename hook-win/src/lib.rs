@@ -21,6 +21,7 @@ mod loader;
 mod pointer;
 mod sdl;
 mod sdl_input;
+mod tall;
 mod wgl;
 
 use std::ffi::{CStr, c_char, c_void};

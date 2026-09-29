@@ -72,6 +72,10 @@ impl WindowSystem for Glfw {
         crate::glfw_input::raw_motion(window)
     }
 
+    fn captured(&self, window: *mut c_void) -> bool {
+        crate::glfw_input::captured(window)
+    }
+
     fn describe(&self) -> String {
         match self.get_version_string {
             // SAFETY: returns a static NUL-terminated string; safe to call any time.
@@ -84,6 +88,8 @@ impl WindowSystem for Glfw {
 static GLFW: OnceLock<Glfw> = OnceLock::new();
 /// Trampoline to the original glfwSwapBuffers.
 static SWAP_BUFFERS: OnceLock<SwapBuffersFn> = OnceLock::new();
+/// Trampoline to the original glfwGetFramebufferSize (the overlay needs the real size).
+static GET_FRAMEBUFFER_SIZE: OnceLock<GetFramebufferSizeFn> = OnceLock::new();
 /// Serializes `attach`; the loader lock already does, but don't rely on it.
 static ATTACH: Mutex<()> = Mutex::new(());
 
@@ -116,13 +122,29 @@ fn install(module: HMODULE, path: &str) -> Result<Glfw, String> {
         export(module, name).ok_or_else(|| format!("{} not exported", name.to_string_lossy()))
     };
     let swap_buffers = resolve(c"glfwSwapBuffers")?;
+    let get_framebuffer_size = resolve(c"glfwGetFramebufferSize")?;
+    // SAFETY: the export and the detour share glfwGetFramebufferSize's signature. Without
+    // it the zoom can only enlarge pixels, so a failure is not fatal.
+    if let Err(e) = unsafe {
+        hook::install(
+            "glfwGetFramebufferSize",
+            get_framebuffer_size,
+            get_framebuffer_size_detour as *const c_void,
+            &GET_FRAMEBUFFER_SIZE,
+        )
+    } {
+        log::warn!("no high-resolution zoom: {e}");
+    }
     // SAFETY: exported GLFW functions with these C signatures.
     let glfw = unsafe {
         Glfw {
             path: path.to_owned(),
-            get_framebuffer_size: std::mem::transmute::<*const c_void, GetFramebufferSizeFn>(
-                resolve(c"glfwGetFramebufferSize")?,
-            ),
+            get_framebuffer_size: match GET_FRAMEBUFFER_SIZE.get() {
+                Some(&original) => original,
+                None => {
+                    std::mem::transmute::<*const c_void, GetFramebufferSizeFn>(get_framebuffer_size)
+                }
+            },
             get_window_content_scale: export(module, c"glfwGetWindowContentScale")
                 .map(|f| std::mem::transmute::<*const c_void, GetWindowContentScaleFn>(f)),
             get_version_string: export(module, c"glfwGetVersionString")
@@ -157,5 +179,32 @@ unsafe extern "C" fn swap_buffers_detour(window: *mut c_void) {
     if let Some(original) = SWAP_BUFFERS.get() {
         // SAFETY: same arguments GLFW's caller passed us.
         unsafe { original(window) };
+    }
+    // Starting or ending the zoom: the game resizes right away, between two frames.
+    if let Some((window, [w, h])) = crate::tall::take_pending() {
+        crate::glfw_input::send_framebuffer_size(window, w, h);
+    }
+}
+
+/// Reports the tall size to the game while zooming.
+unsafe extern "C" fn get_framebuffer_size_detour(
+    window: *mut c_void,
+    width: *mut c_int,
+    height: *mut c_int,
+) {
+    if let Some(original) = GET_FRAMEBUFFER_SIZE.get() {
+        // SAFETY: the caller's arguments.
+        unsafe { original(window, width, height) };
+    }
+    if let Some([w, h]) = crate::tall::size_override(window) {
+        // SAFETY: GLFW allows either pointer to be null.
+        unsafe {
+            if !width.is_null() {
+                *width = w;
+            }
+            if !height.is_null() {
+                *height = h;
+            }
+        }
     }
 }

@@ -8,6 +8,8 @@
 //   --screenshot  save the back buffer after the last swap as smoke-screenshot.png
 //   --seconds=N   run for N seconds at about 60 fps instead of a frame count (input tests)
 //   --capture     relative mouse mode, as Minecraft uses in game
+//   --mc          render like Minecraft: into its own framebuffer at the pixel size the
+//                 window events report, then copied into the window
 // Prints "SMOKE OK frames=N" and exits 0, or "SMOKE FAIL: <reason>" and exits 1.
 
 import org.lwjgl.Version;
@@ -49,7 +51,7 @@ public final class SmokeSdl {
 
     private static void run(String[] args) {
         int frames = 120;
-        boolean screenshot = false, capture = false;
+        boolean screenshot = false, capture = false, mc = false;
         double seconds = 0;
         for (String arg : args) {
             if (arg.startsWith("--seconds=")) {
@@ -58,6 +60,10 @@ public final class SmokeSdl {
             }
             if (arg.equals("--capture")) {
                 capture = true;
+                continue;
+            }
+            if (arg.equals("--mc")) {
+                mc = true;
                 continue;
             }
             if (arg.equals("--screenshot")) {
@@ -108,6 +114,15 @@ public final class SmokeSdl {
         System.out.println("GL_VERSION " + glGetString(GL_VERSION));
         System.out.println("GL_RENDERER " + glGetString(GL_RENDERER));
 
+        int[] fbW = new int[1], fbH = new int[1];
+        {
+            java.nio.IntBuffer w = org.lwjgl.BufferUtils.createIntBuffer(1);
+            java.nio.IntBuffer h = org.lwjgl.BufferUtils.createIntBuffer(1);
+            SDL_GetWindowSizeInPixels(window, w, h);
+            fbW[0] = w.get(0);
+            fbH[0] = h.get(0);
+        }
+        SmokeImage.MainTarget mainTarget = mc ? new SmokeImage.MainTarget() : null;
         int keys = 0, texts = 0, buttons = 0, motions = 0, wheels = 0;
         StringBuilder typed = new StringBuilder();
         long until = System.nanoTime() + (long) (seconds * 1e9);
@@ -122,9 +137,14 @@ public final class SmokeSdl {
                         Thread.currentThread().interrupt();
                     }
                 }
-                glClearColor(0.2f, 0.4f, 0.6f, 1f);
-                glClear(GL_COLOR_BUFFER_BIT);
-                SmokeImage.drawPattern(854, 480);
+                if (mainTarget != null) {
+                    mainTarget.render(fbW[0], fbH[0]);
+                    mainTarget.present();
+                } else {
+                    glClearColor(0.2f, 0.4f, 0.6f, 1f);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    SmokeImage.drawPattern(854, 480);
+                }
                 if (!SDL_GL_SwapWindow(window)) {
                     throw new Fail("frame " + frame + ": SDL_GL_SwapWindow failed: " + SDL_GetError());
                 }
@@ -147,6 +167,10 @@ public final class SmokeSdl {
                             break;
                         case SDL_EVENT_MOUSE_WHEEL:
                             wheels++;
+                            break;
+                        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+                            fbW[0] = event.window().data1();
+                            fbH[0] = event.window().data2();
                             break;
                         default:
                             break;

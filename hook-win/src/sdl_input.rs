@@ -6,21 +6,23 @@
 //! keyboard-state polling); those functions are only logged the first time they are
 //! used, so a log shows whether the filter covers the game.
 
+use std::collections::VecDeque;
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use reminedog_render::{Key, Modifiers, PointerButton, Route};
 use windows_sys::Win32::Foundation::HMODULE;
 
 use crate::ffi;
 use crate::hook::{self, export};
-use crate::input::{self, router};
+use crate::input::{self, FUNCTION_KEYS, router};
 
 type PollEventFn = unsafe extern "C" fn(event: *mut u8) -> bool;
 type GetWindowFromIdFn = unsafe extern "C" fn(id: u32) -> *mut c_void;
 type WindowBoolFn = unsafe extern "C" fn(window: *mut c_void) -> bool;
 type GetWindowPixelDensityFn = unsafe extern "C" fn(window: *mut c_void) -> f32;
+type GetWindowIdFn = unsafe extern "C" fn(window: *mut c_void) -> u32;
 
 // Probes.
 type PeepEventsFn = unsafe extern "C" fn(*mut u8, c_int, c_int, u32, u32) -> c_int;
@@ -33,6 +35,8 @@ type AddEventWatchFn = unsafe extern "C" fn(*const c_void, *mut c_void) -> bool;
 type SetEventFilterFn = unsafe extern "C" fn(*const c_void, *mut c_void);
 
 // Event types and SDL_Event field offsets (SDL 3.4, checked against LWJGL 3.4.3's layouts).
+const EVENT_WINDOW_RESIZED: u32 = 0x206;
+const EVENT_WINDOW_PIXEL_SIZE_CHANGED: u32 = 0x207;
 const EVENT_WINDOW_FOCUS_LOST: u32 = 0x20F;
 const EVENT_KEY_DOWN: u32 = 0x300;
 const EVENT_KEY_UP: u32 = 0x301;
@@ -43,6 +47,10 @@ const EVENT_MOUSE_BUTTON_DOWN: u32 = 0x401;
 const EVENT_MOUSE_BUTTON_UP: u32 = 0x402;
 const EVENT_MOUSE_WHEEL: u32 = 0x403;
 const OFF_WINDOW_ID: usize = 16;
+const OFF_WINDOW_DATA1: usize = 20;
+const OFF_WINDOW_DATA2: usize = 24;
+/// sizeof(SDL_Event).
+const EVENT_SIZE: usize = 128;
 const OFF_KEY: usize = 28;
 const OFF_KEY_MOD: usize = 32;
 const OFF_KEY_DOWN: usize = 36;
@@ -69,6 +77,7 @@ struct Api {
     start_text_input: WindowBoolFn,
     stop_text_input: WindowBoolFn,
     text_input_active: WindowBoolFn,
+    get_window_id: Option<GetWindowIdFn>,
 }
 
 static API: OnceLock<Api> = OnceLock::new();
@@ -77,6 +86,8 @@ static POLL_EVENT: OnceLock<PollEventFn> = OnceLock::new();
 static LAST_WINDOW: AtomicUsize = AtomicUsize::new(0);
 /// We switched SDL text input on for the UI and must switch it off again.
 static TEXT_INPUT_OURS: AtomicBool = AtomicBool::new(false);
+/// Events made up by the agent (the zoom's resizes), handed out before SDL's own.
+static INJECTED: Mutex<VecDeque<[u8; EVENT_SIZE]>> = Mutex::new(VecDeque::new());
 
 static PEEP_EVENTS: OnceLock<PeepEventsFn> = OnceLock::new();
 static WAIT_EVENT: OnceLock<WaitEventFn> = OnceLock::new();
@@ -112,6 +123,8 @@ pub fn install(module: HMODULE) {
                 text_input_active: std::mem::transmute::<*const c_void, WindowBoolFn>(get(
                     c"SDL_TextInputActive",
                 )?),
+                get_window_id: get(c"SDL_GetWindowID")
+                    .map(|f| std::mem::transmute::<*const c_void, GetWindowIdFn>(f)),
             })
         }
     })();
@@ -174,6 +187,18 @@ unsafe extern "C" fn poll_event_detour(event: *mut u8) -> bool {
     let Some(original) = POLL_EVENT.get() else {
         return false;
     };
+    ffi::catch("SDL resize for the zoom", queue_zoom_resize);
+    {
+        let mut injected = INJECTED.lock().unwrap_or_else(|e| e.into_inner());
+        if !injected.is_empty() {
+            if !event.is_null() {
+                let made_up = injected.pop_front().expect("checked");
+                // SAFETY: the caller's buffer holds a whole SDL_Event.
+                unsafe { std::ptr::copy_nonoverlapping(made_up.as_ptr(), event, EVENT_SIZE) };
+            }
+            return true;
+        }
+    }
     loop {
         // SAFETY: the caller's event buffer (or null to only peek).
         let has_event = unsafe { original(event) };
@@ -205,6 +230,14 @@ unsafe fn route_event(event: *const u8) -> Route {
         let read_u32 = |off: usize| event.add(off).cast::<u32>().read_unaligned();
         let read_f32 = |off: usize| event.add(off).cast::<f32>().read_unaligned();
         let kind = read_u32(0);
+        if kind == EVENT_WINDOW_PIXEL_SIZE_CHANGED {
+            let window = (api.get_window_from_id)(read_u32(OFF_WINDOW_ID));
+            return if crate::tall::real_resize(window) {
+                Route::Consume
+            } else {
+                Route::Forward
+            };
+        }
         if !matches!(
             kind,
             EVENT_KEY_DOWN
@@ -269,7 +302,7 @@ unsafe fn route_event(event: *const u8) -> Route {
                     5 => PointerButton::Extra2,
                     _ => return Route::Forward,
                 };
-                router().button(button, *event.add(OFF_BUTTON_DOWN) != 0)
+                router().button(button, *event.add(OFF_BUTTON_DOWN) != 0, captured)
             }
             EVENT_MOUSE_WHEEL => {
                 // Direction 1 = flipped (natural scrolling).
@@ -287,6 +320,60 @@ unsafe fn route_event(event: *const u8) -> Route {
             _ => Route::Forward,
         }
     }
+}
+
+/// Tells the game the size the zoom wants, the way SDL reports a resize: the new size in
+/// pixels, then the window size (the same on displays without scaling; Minecraft may read
+/// either).
+fn queue_zoom_resize() {
+    let Some((window, [w, h])) = crate::tall::take_pending() else {
+        return;
+    };
+    let Some(api) = API.get() else {
+        return;
+    };
+    let Some(get_id) = api.get_window_id else {
+        return;
+    };
+    // SAFETY: a window SDL passed to SDL_GL_SwapWindow.
+    let id = unsafe { get_id(window) };
+    let (window_w, window_h) = window_size_for(api, window, [w, h]);
+    let event = |kind: u32, w: i32, h: i32| {
+        let mut e = [0u8; EVENT_SIZE];
+        e[..4].copy_from_slice(&kind.to_ne_bytes());
+        e[OFF_WINDOW_ID..OFF_WINDOW_ID + 4].copy_from_slice(&id.to_ne_bytes());
+        e[OFF_WINDOW_DATA1..OFF_WINDOW_DATA1 + 4].copy_from_slice(&w.to_ne_bytes());
+        e[OFF_WINDOW_DATA2..OFF_WINDOW_DATA2 + 4].copy_from_slice(&h.to_ne_bytes());
+        e
+    };
+    log::debug!("SDL3: telling the game the window is {w}x{h} pixels");
+    let mut injected = INJECTED.lock().unwrap_or_else(|e| e.into_inner());
+    injected.push_back(event(EVENT_WINDOW_PIXEL_SIZE_CHANGED, w, h));
+    injected.push_back(event(EVENT_WINDOW_RESIZED, window_w, window_h));
+}
+
+/// The window size (in SDL's window coordinates) matching `pixels`, scaled like the real
+/// window's size is to its pixel size.
+fn window_size_for(api: &Api, window: *mut c_void, [w, h]: [i32; 2]) -> (i32, i32) {
+    // SAFETY: as above.
+    let density = unsafe { (api.get_pixel_density)(window) };
+    let density = if density.is_finite() && density > 0.0 {
+        density
+    } else {
+        1.0
+    };
+    (
+        (w as f32 / density).round() as i32,
+        (h as f32 / density).round() as i32,
+    )
+}
+
+/// Whether the game has the mouse in relative mode on `window` (it is being played).
+pub fn captured(window: *mut c_void) -> bool {
+    API.get().is_some_and(|api| {
+        // SAFETY: a window SDL passed us, on its thread.
+        unsafe { (api.get_relative_mouse_mode)(window) }
+    })
 }
 
 /// SDL3 only sends text (and runs the IME) while text input is on; switch it on for the
@@ -324,7 +411,8 @@ fn modifiers(mods: u16) -> Modifiers {
     )
 }
 
-/// egui's name for an SDL3 keycode (the keys a text field or the hotkeys need).
+/// egui's name for an SDL3 keycode (the keys a text field or a hotkey can use). Keycodes
+/// follow the keyboard layout.
 fn egui_key(key: u32) -> Option<Key> {
     const LETTERS: [Key; 26] = [
         Key::A,
@@ -384,6 +472,23 @@ fn egui_key(key: u32) -> Option<Key> {
         0x4000_0050 => Key::ArrowLeft,
         0x4000_0051 => Key::ArrowDown,
         0x4000_0052 => Key::ArrowUp,
+        0x4000_003A..=0x4000_0045 => FUNCTION_KEYS[(key - 0x4000_003A) as usize], // F1-F12
+        0x4000_0068..=0x4000_0073 => FUNCTION_KEYS[(key - 0x4000_0068 + 12) as usize], // F13-F24
+        0x27 => Key::Quote,
+        0x2C => Key::Comma,
+        0x2D | 0x4000_0056 => Key::Minus,  // keypad -
+        0x2E | 0x4000_0063 => Key::Period, // keypad .
+        0x2F | 0x4000_0054 => Key::Slash,  // keypad /
+        0x3A => Key::Colon,
+        0x3B => Key::Semicolon,
+        0x3D => Key::Equals,
+        0x5B => Key::OpenBracket,
+        0x5C => Key::Backslash,
+        0x5D => Key::CloseBracket,
+        0x60 => Key::Backtick,
+        0x4000_0057 => Key::Plus, // keypad +
+        0x4000_0059..=0x4000_0061 => DIGITS[(key - 0x4000_0059 + 1) as usize], // keypad 1-9
+        0x4000_0062 => Key::Num0, // keypad 0
         _ => return None,
     })
 }

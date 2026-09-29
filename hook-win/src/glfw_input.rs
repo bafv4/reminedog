@@ -16,7 +16,7 @@ use windows_sys::Win32::Foundation::HMODULE;
 
 use crate::ffi;
 use crate::hook::{self, export};
-use crate::input::{self, router};
+use crate::input::{self, FUNCTION_KEYS, router};
 
 type KeyFn = unsafe extern "C" fn(*mut c_void, c_int, c_int, c_int, c_int);
 type CharFn = unsafe extern "C" fn(*mut c_void, c_uint);
@@ -25,6 +25,7 @@ type MouseButtonFn = unsafe extern "C" fn(*mut c_void, c_int, c_int, c_int);
 type CursorPosFn = unsafe extern "C" fn(*mut c_void, f64, f64);
 type ScrollFn = unsafe extern "C" fn(*mut c_void, f64, f64);
 type FocusFn = unsafe extern "C" fn(*mut c_void, c_int);
+type FramebufferSizeFn = unsafe extern "C" fn(*mut c_void, c_int, c_int);
 type GetInputModeFn = unsafe extern "C" fn(*mut c_void, c_int) -> c_int;
 
 const PRESS: c_int = 1;
@@ -46,6 +47,7 @@ struct GameCallbacks {
     cursor_pos: Option<CursorPosFn>,
     scroll: Option<ScrollFn>,
     focus: Option<FocusFn>,
+    framebuffer_size: Option<FramebufferSizeFn>,
 }
 
 // SAFETY: plain function pointers.
@@ -79,7 +81,7 @@ fn replace_game_callback<T>(
 }
 
 /// Whether the game has grabbed the cursor (it is being played, not showing a menu).
-fn captured(window: *mut c_void) -> bool {
+pub fn captured(window: *mut c_void) -> bool {
     GET_INPUT_MODE.get().is_some_and(|get| {
         // SAFETY: a window GLFW passed us, on its event thread.
         unsafe { get(window, CURSOR) == CURSOR_DISABLED }
@@ -150,6 +152,13 @@ setter!(
     scroll_wrapper
 );
 setter!(set_focus_detour, SET_FOCUS, focus, FocusFn, focus_wrapper);
+setter!(
+    set_framebuffer_size_detour,
+    SET_FRAMEBUFFER_SIZE,
+    framebuffer_size,
+    FramebufferSizeFn,
+    framebuffer_size_wrapper
+);
 
 /// Detours the callback setters. Failures only cost the overlay its input.
 pub fn install(module: HMODULE) {
@@ -198,6 +207,11 @@ pub fn install(module: HMODULE) {
     );
     hook!(c"glfwSetScrollCallback", set_scroll_detour, SET_SCROLL);
     hook!(c"glfwSetWindowFocusCallback", set_focus_detour, SET_FOCUS);
+    hook!(
+        c"glfwSetFramebufferSizeCallback",
+        set_framebuffer_size_detour,
+        SET_FRAMEBUFFER_SIZE
+    );
 }
 
 fn modifiers(mods: c_int) -> reminedog_render::Modifiers {
@@ -275,7 +289,7 @@ unsafe extern "C" fn mouse_button_wrapper(
             4 => PointerButton::Extra2,
             _ => return Route::Forward,
         };
-        router().button(button, action == PRESS)
+        router().button(button, action == PRESS, captured(window))
     });
     if route != Some(Route::Consume)
         && let Some(game) = game_callbacks(window).mouse_button
@@ -318,7 +332,26 @@ unsafe extern "C" fn focus_wrapper(window: *mut c_void, focused: c_int) {
     }
 }
 
-/// egui's name for a GLFW key code (the keys a text field or the hotkeys need).
+/// While the game renders at the zoom's tall size, a real resize is held back until the
+/// zoom ends (the game is then told the new size).
+unsafe extern "C" fn framebuffer_size_wrapper(window: *mut c_void, width: c_int, height: c_int) {
+    let held = ffi::catch("GLFW framebuffer size", || crate::tall::real_resize(window));
+    if held != Some(true) {
+        send_framebuffer_size(window, width, height);
+    }
+}
+
+/// Calls the game's framebuffer size callback, as GLFW does on a resize.
+pub fn send_framebuffer_size(window: *mut c_void, width: c_int, height: c_int) {
+    if let Some(game) = game_callbacks(window).framebuffer_size {
+        log::debug!("framebuffer size {width}x{height} to the game");
+        // SAFETY: a window GLFW passed us, on the thread that handles its events.
+        unsafe { game(window, width, height) };
+    }
+}
+
+/// egui's name for a GLFW key code (the keys a text field or a hotkey can use). GLFW key
+/// codes name positions on a US keyboard.
 fn egui_key(key: c_int) -> Option<Key> {
     const LETTERS: [Key; 26] = [
         Key::A,
@@ -378,6 +411,20 @@ fn egui_key(key: c_int) -> Option<Key> {
         267 => Key::PageDown,
         268 => Key::Home,
         269 => Key::End,
+        290..=314 => FUNCTION_KEYS[(key - 290) as usize],
+        39 => Key::Quote,
+        44 => Key::Comma,
+        45 | 333 => Key::Minus,  // keypad -
+        46 | 330 => Key::Period, // keypad .
+        47 | 331 => Key::Slash,  // keypad /
+        59 => Key::Semicolon,
+        61 | 336 => Key::Equals, // keypad =
+        91 => Key::OpenBracket,
+        92 => Key::Backslash,
+        93 => Key::CloseBracket,
+        96 => Key::Backtick,
+        320..=329 => DIGITS[(key - 320) as usize], // keypad digits
+        334 => Key::Plus,                          // keypad +
         _ => return None,
     })
 }

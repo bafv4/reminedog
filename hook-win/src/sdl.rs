@@ -42,6 +42,8 @@ const WINDOW_VULKAN: u64 = 0x1000_0000;
 static CREATE_WINDOW: OnceLock<CreateWindowFn> = OnceLock::new();
 static GL_CREATE_CONTEXT: OnceLock<GlCreateContextFn> = OnceLock::new();
 static GL_SWAP_WINDOW: OnceLock<GlSwapWindowFn> = OnceLock::new();
+/// Trampoline to the original SDL_GetWindowSizeInPixels (the overlay needs the real size).
+static GET_WINDOW_SIZE_IN_PIXELS: OnceLock<GetWindowSizeInPixelsFn> = OnceLock::new();
 static VULKAN_CREATE_SURFACE: OnceLock<VulkanCreateSurfaceFn> = OnceLock::new();
 static SDL: OnceLock<Sdl> = OnceLock::new();
 
@@ -127,10 +129,18 @@ impl WindowSystem for Sdl {
         }
     }
 
+    fn captured(&self, window: *mut c_void) -> bool {
+        crate::sdl_input::captured(window)
+    }
+
     fn framebuffer_size(&self, window: *mut c_void) -> (i32, i32) {
         let (mut w, mut h) = (0, 0);
+        let get = GET_WINDOW_SIZE_IN_PIXELS
+            .get()
+            .copied()
+            .unwrap_or(self.get_window_size_in_pixels);
         // SAFETY: see above.
-        if unsafe { (self.get_window_size_in_pixels)(window, &mut w, &mut h) } {
+        if unsafe { get(window, &mut w, &mut h) } {
             (w, h)
         } else {
             (0, 0)
@@ -205,6 +215,12 @@ pub fn attach(module: HMODULE, path: &str) {
             c"SDL_GL_SwapWindow",
             gl_swap_window_detour as *const c_void,
             &GL_SWAP_WINDOW,
+        );
+        probe(
+            module,
+            c"SDL_GetWindowSizeInPixels",
+            get_window_size_in_pixels_detour as *const c_void,
+            &GET_WINDOW_SIZE_IN_PIXELS,
         );
         probe(
             module,
@@ -316,6 +332,31 @@ unsafe extern "C" fn gl_swap_window_detour(window: *mut c_void) -> bool {
     });
     // SAFETY: same arguments the caller passed us.
     unsafe { original(window) }
+}
+
+/// Reports the zoom's tall size to the game while zooming.
+unsafe extern "C" fn get_window_size_in_pixels_detour(
+    window: *mut c_void,
+    w: *mut c_int,
+    h: *mut c_int,
+) -> bool {
+    let Some(original) = GET_WINDOW_SIZE_IN_PIXELS.get() else {
+        return false;
+    };
+    // SAFETY: the caller's arguments.
+    let ok = unsafe { original(window, w, h) };
+    if ok && let Some([tall_w, tall_h]) = crate::tall::size_override(window) {
+        // SAFETY: SDL allows either pointer to be null.
+        unsafe {
+            if !w.is_null() {
+                *w = tall_w;
+            }
+            if !h.is_null() {
+                *h = tall_h;
+            }
+        }
+    }
+    ok
 }
 
 unsafe extern "C" fn vulkan_create_surface_detour(

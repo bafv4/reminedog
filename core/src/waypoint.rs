@@ -306,14 +306,14 @@ fn normalize_name(name: &str, id: u64) -> String {
     }
 }
 
-fn tmp_path(path: &Path) -> PathBuf {
+pub(crate) fn tmp_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".tmp");
     PathBuf::from(name)
 }
 
 /// `<stem>.corrupt-<unix>.json` next to `path`, with `-<n>` added if that already exists.
-fn backup_path(path: &Path, unix: u64) -> PathBuf {
+pub(crate) fn backup_path(path: &Path, unix: u64) -> PathBuf {
     let stem = path.file_stem().unwrap_or_default();
     let candidate = |suffix: &str| {
         let mut name = OsString::from(stem);
@@ -329,7 +329,7 @@ fn backup_path(path: &Path, unix: u64) -> PathBuf {
     backup
 }
 
-fn write_synced(path: &Path, data: &[u8]) -> io::Result<()> {
+pub(crate) fn write_synced(path: &Path, data: &[u8]) -> io::Result<()> {
     let mut file = File::create(path)?;
     file.write_all(data)?;
     file.flush()?;
@@ -337,7 +337,7 @@ fn write_synced(path: &Path, data: &[u8]) -> io::Result<()> {
 }
 
 /// Makes the rename durable on Unix; Windows has no equivalent for directories.
-fn sync_parent_dir(path: &Path) {
+pub(crate) fn sync_parent_dir(path: &Path) {
     #[cfg(unix)]
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         let _ = File::open(dir).and_then(|d| d.sync_all());
@@ -346,7 +346,7 @@ fn sync_parent_dir(path: &Path) {
     let _ = path;
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())

@@ -6,6 +6,31 @@
 
 use glow::HasContext as _;
 
+/// For the high-resolution zoom: the size the game should render at so that the middle
+/// `real`-sized part of its frame shows the view enlarged `factor` times, and the factor
+/// actually reached. Minecraft's field of view is vertical, so a frame `factor` times
+/// taller at the same width packs `factor` times more pixels into every degree, in both
+/// directions. `max_dim` is the largest texture the GPU takes.
+pub fn tall_size(real: [u32; 2], factor: f32, max_dim: u32) -> Option<([u32; 2], f32)> {
+    let [w, h] = real;
+    if w == 0
+        || h == 0
+        || w > max_dim
+        || factor.partial_cmp(&1.0) != Some(std::cmp::Ordering::Greater)
+    {
+        return None;
+    }
+    let tall = (f64::from(h) * f64::from(factor))
+        .round()
+        .min(f64::from(max_dim)) as u32;
+    (tall > h).then(|| ([w, tall], tall as f32 / h as f32))
+}
+
+/// First row of the middle `real_h` rows of a `tall_h`-row frame.
+pub fn middle_row(tall_h: u32, real_h: u32) -> u32 {
+    tall_h.saturating_sub(real_h) / 2
+}
+
 pub struct Zoom {
     target: Option<Target>,
     supported: bool,
@@ -171,5 +196,35 @@ impl Zoom {
                 gl.delete_texture(target.texture);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tall_size_multiplies_the_height() {
+        assert_eq!(
+            tall_size([2560, 1440], 4.0, 16384),
+            Some(([2560, 5760], 4.0))
+        );
+        assert_eq!(middle_row(5760, 1440), 2160);
+    }
+
+    #[test]
+    fn tall_size_is_capped_by_the_gpu() {
+        let ([w, h], factor) = tall_size([2560, 1440], 16.0, 16384).unwrap();
+        assert_eq!([w, h], [2560, 16384]);
+        assert!((factor - 16384.0 / 1440.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn nothing_to_gain() {
+        assert_eq!(tall_size([2560, 1440], 1.0, 16384), None);
+        assert_eq!(tall_size([2560, 1440], f32::NAN, 16384), None);
+        assert_eq!(tall_size([2560, 16384], 2.0, 16384), None);
+        assert_eq!(tall_size([0, 1440], 2.0, 16384), None);
+        assert_eq!(tall_size([20000, 100], 2.0, 16384), None);
     }
 }

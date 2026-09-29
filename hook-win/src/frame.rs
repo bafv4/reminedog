@@ -2,19 +2,28 @@
 //! 1.21, `SDL_GL_SwapWindow` for 26.x).
 
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, TryLockError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use glow::HasContext as _;
-use reminedog_render::{FrameInput, FrameParams, Overlay, PointerSpeed, StatusLine, gl_summary};
+use reminedog_core::{Settings, settings_path};
+use reminedog_render::{
+    FrameInput, FrameParams, Overlay, PointerSpeed, StatusLine, ZoomView, gl_summary, hotkeys,
+};
 
 use crate::agent::{self, Globals};
 use crate::fonts;
 use crate::input;
 use crate::pointer;
+use crate::tall::TallZoom;
 use crate::wgl::{self, OwnContext, Wgl};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
+
+/// Settings changed in the menu are saved after this long without further changes (or
+/// when the menu closes), so dragging a slider does not write the file every frame.
+const SAVE_DELAY: Duration = Duration::from_secs(1);
 
 /// Consecutive failed frames after which the overlay gives up for the session.
 const MAX_FAILURES: u32 = 30;
@@ -47,6 +56,8 @@ pub trait WindowSystem: Sync {
     /// the system's pointer speed and acceleration (the overlay then applies them to its
     /// own cursor), rather than the motion of the system's pointer.
     fn raw_motion(&self, window: *mut c_void) -> bool;
+    /// Whether the game has grabbed the cursor (it is being played, not showing a menu).
+    fn captured(&self, window: *mut c_void) -> bool;
 }
 
 /// Draws the overlay into the back buffer right before the window system presents it.
@@ -165,6 +176,11 @@ struct Runtime {
     gl_errors_logged: u32,
     /// The UI was open in the last frame.
     ui_was_open: bool,
+    settings: Settings,
+    settings_path: PathBuf,
+    /// When the settings last changed, if not saved since.
+    unsaved: Option<Instant>,
+    tall: TallZoom,
 }
 
 // SAFETY: the GL handles and objects are only used inside the swap detour while STATE is
@@ -199,6 +215,15 @@ impl Runtime {
         log::info!("game GL: {game_gl}");
         log::info!("pixel format {}", wgl::describe_pixel_format(hdc));
 
+        let settings_path = settings_path(&agent.game_dir);
+        let settings = Settings::load(&settings_path);
+        log::info!(
+            "settings: {} (menu {}, zoom {})",
+            settings_path.display(),
+            settings.menu_key,
+            settings.zoom_key
+        );
+
         let context = OwnContext::create(wgl, hdc)?;
         let created = (|| {
             let _current = context.make_current(wgl)?;
@@ -208,8 +233,8 @@ impl Runtime {
             });
             let overlay_gl = gl_summary(&gl);
             log::info!("overlay GL: {overlay_gl}");
-            let overlay =
-                Overlay::new(gl.clone(), fonts::load_japanese()).map_err(|e| e.to_string())?;
+            let overlay = Overlay::new(gl.clone(), fonts::load_japanese(), settings.clone())
+                .map_err(|e| e.to_string())?;
             Ok::<_, String>((gl, overlay, overlay_gl))
         })();
         let (gl, overlay, overlay_gl) = match created {
@@ -220,7 +245,12 @@ impl Runtime {
             }
         };
         log::info!("overlay: initialized");
-        input::router().set_pointer_speed(pointer_speed(ws, window));
+        {
+            let (menu, zoom) = hotkeys(&settings);
+            let mut router = input::router();
+            router.set_hotkeys(menu, zoom);
+            router.set_pointer_speed(pointer_speed(ws, window));
+        }
 
         let status = vec![
             StatusLine::new(
@@ -243,6 +273,10 @@ impl Runtime {
             failures: 0,
             gl_errors_logged: 0,
             ui_was_open: false,
+            settings,
+            settings_path,
+            unsaved: None,
+            tall: TallZoom::default(),
         }))
     }
 
@@ -280,6 +314,25 @@ impl Runtime {
             input::router().set_pointer_speed(pointer_speed(ws, window));
         }
         self.ui_was_open = ui_open;
+
+        // The zoom works in the game's context, which is current at the swap. It ends when
+        // the game shows a menu (the inventory opened with the zoom key held).
+        let want_zoom = input::router().zoom_active() && ws.captured(window);
+        let zoom = self.tall.frame(
+            window,
+            [width, height],
+            want_zoom && self.settings.zoom_high_res,
+            self.settings.zoom_factor,
+        );
+        let zoom = if want_zoom && zoom == ZoomView::Off {
+            ZoomView::Magnify
+        } else {
+            zoom
+        };
+        let high_res_note = self
+            .tall
+            .failure()
+            .map(|reason| format!("高精細は使えない：{reason}"));
         {
             let _current = self.context.make_current(wgl).map_err(FrameError::Failed)?;
             let input = {
@@ -290,8 +343,10 @@ impl Runtime {
                     events: router.take_events(),
                     modifiers: router.modifiers(),
                     ui_open: router.ui_open(),
-                    zoom: router.zoom_active(),
+                    zoom,
                     software_cursor: router.software_cursor(),
+                    captured: router.take_captured(),
+                    high_res_note,
                 }
             };
             let output = self.overlay.render(FrameParams {
@@ -301,11 +356,29 @@ impl Runtime {
                 status: &self.status,
                 input,
             });
-            if output.close_ui {
-                input::router().set_ui_open(false);
+            {
+                let mut router = input::router();
+                if output.close_ui {
+                    router.set_ui_open(false);
+                }
+                if output.start_capture {
+                    router.start_capture();
+                }
+                if output.cancel_capture {
+                    router.cancel_capture();
+                }
+                if let Some(settings) = &output.settings {
+                    let (menu, zoom) = hotkeys(settings);
+                    router.set_hotkeys(menu, zoom);
+                }
+            }
+            if let Some(settings) = output.settings {
+                self.settings = settings;
+                self.unsaved = Some(Instant::now());
             }
             self.log_gl_errors();
         }
+        self.save_settings_when_due();
         let cost_ms = started.elapsed().as_secs_f64() * 1000.0;
         self.cost_ms = if self.overlay.frames() <= 1 {
             cost_ms
@@ -325,6 +398,29 @@ impl Runtime {
             _ => {}
         }
         Ok(())
+    }
+
+    fn save_settings_when_due(&mut self) {
+        let Some(changed) = self.unsaved else {
+            return;
+        };
+        if changed.elapsed() < SAVE_DELAY && input::router().ui_open() {
+            return;
+        }
+        self.unsaved = None;
+        match self.settings.save(&self.settings_path) {
+            Ok(()) => log::info!(
+                "settings saved (menu {}, zoom {}, ×{:.1}, high resolution {})",
+                self.settings.menu_key,
+                self.settings.zoom_key,
+                self.settings.zoom_factor,
+                self.settings.zoom_high_res
+            ),
+            Err(e) => log::error!(
+                "cannot save settings to {}: {e}",
+                self.settings_path.display()
+            ),
+        }
     }
 
     /// Drains our context's GL error queue (never the game's).

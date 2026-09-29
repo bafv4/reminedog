@@ -123,21 +123,23 @@ jobs:
             harness: Smoke
             modules: ""
             markers: "GLFW hooks installed|overlay: first frame rendered"
-          # Minecraft 1.20.5+: Java 21, OpenGL 3.2 core context.
+          # Minecraft 1.20.5+: Java 21, OpenGL 3.2 core context; rendering into its own
+          # framebuffer and copying it to the window, as Minecraft does (--mc), through the
+          # agent's OpenGL wrappers.
           - lwjgl: "3.3.3"
             java: "21"
-            hints: ""
+            hints: --mc
             harness: Smoke
             modules: ""
-            markers: "GLFW hooks installed|overlay: first frame rendered"
+            markers: "GLFW hooks installed|OpenGL hooks installed|overlay: first frame rendered"
           # Minecraft 26.x: Java 25, window opened with SDL3 instead of GLFW; the context is
           # created on a hidden utility window and used on the game window, as 26.3 does.
           - lwjgl: "3.4.3"
             java: "25"
-            hints: ""
+            hints: --mc
             harness: SmokeSdl
             modules: lwjgl-sdl
-            markers: "SDL3 hooks installed|renderer: OpenGL via SDL3|overlay: first frame rendered"
+            markers: "SDL3 hooks installed|OpenGL hooks installed|renderer: OpenGL via SDL3|overlay: first frame rendered"
     defaults:
       run:
         shell: bash

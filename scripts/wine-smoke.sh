@@ -5,7 +5,8 @@
 # Usage: scripts/wine-smoke.sh [--agent DLL] [--agent-options STR] [--lwjgl VERSION]
 #                              [--frames N] [--legacy] [--readback] [--natives MODE]
 #                              [--jvm-arg ARG]... [--screenshot PNG] [--sdl] [--keep]
-#                              [--seconds N] [--capture] [--xdotool CMDS] [--xdotool-delay S]
+#                              [--seconds N] [--capture] [--mc] [--xdotool CMDS]
+#                              [--xdotool-delay S] [--grab PNG]
 #   --agent DLL          load DLL with -agentpath: (reminedog.dll)
 #   --agent-options STR  options string passed to Agent_OnLoad (-agentpath:DLL=STR)
 #   --lwjgl VERSION      LWJGL version (default 3.3.3; 3.2.2 = Minecraft 1.14-1.18)
@@ -25,8 +26,12 @@
 #                        instead of the GLFW one; needs --lwjgl 3.4.0 or later
 #   --seconds N          run the harness for N seconds (~60 fps) instead of --frames
 #   --capture            grab the cursor as Minecraft does in game
+#   --mc                 render like Minecraft: into an own framebuffer at the size the
+#                        window system reports, then copied into the window
 #   --xdotool CMDS       once the window is up (after --xdotool-delay seconds, default 4),
 #                        focus it and run "xdotool CMDS", e.g. "key ctrl+i sleep 0.5 type abc"
+#   --grab PNG           after the xdotool commands, save what the X screen shows (keys held
+#                        with "keydown" are still down); needs Pillow for python3
 #   --keep               keep the run directory (game dir, output) instead of deleting it
 # Environment:
 #   REMINEDOG_WINE_CACHE  cache for the JRE, LWJGL, classes and WINEPREFIX
@@ -90,6 +95,11 @@ wine_session() {
       read -ra cmds <<<"$xdotool_cmds"
       echo "wine-smoke: xdotool ${cmds[*]}" >>"$output"
       xdotool "${cmds[@]}" >>"$output" 2>&1 || echo "wine-smoke: xdotool failed" >>"$output"
+      if [ -n "$grab" ]; then
+        # What the X server shows right now (keys may still be held down).
+        python3 -c 'import sys; from PIL import ImageGrab; ImageGrab.grab(xdisplay=None).save(sys.argv[1])' \
+          "$grab" >>"$output" 2>&1 || echo "wine-smoke: grab failed (needs python3-pil)" >>"$output"
+      fi
     ) &
   fi
   timeout -k 10 "$timeout" wine "$java_win" "${args[@]}" >>"$output" 2>&1 || status=$?
@@ -113,12 +123,12 @@ usage() {
 
 agent='' agent_options='' lwjgl=3.3.3 frames=120 natives=extract keep=0 screenshot=''
 main_class=Smoke extra_modules=''
-xdotool_cmds='' xdotool_delay=4
+xdotool_cmds='' xdotool_delay=4 grab=
 smoke_flags=() jvm_args=()
 while [ "$#" -gt 0 ]; do
   case $1 in
     --agent | --agent-options | --lwjgl | --frames | --natives | --jvm-arg | --screenshot | \
-      --seconds | --xdotool | --xdotool-delay)
+      --seconds | --xdotool | --xdotool-delay | --grab)
       [ "$#" -ge 2 ] || usage
       case $1 in
         --agent) agent=$2 ;;
@@ -131,10 +141,11 @@ while [ "$#" -gt 0 ]; do
         --seconds) smoke_flags+=("--seconds=$2") ;;
         --xdotool) xdotool_cmds=$2 ;;
         --xdotool-delay) xdotool_delay=$2 ;;
+        --grab) grab=$(cd "$(dirname "$2")" && pwd)/$(basename "$2") ;;
       esac
       shift 2
       ;;
-    --legacy | --readback | --capture) smoke_flags+=("$1"); shift ;;
+    --legacy | --readback | --capture | --mc) smoke_flags+=("$1"); shift ;;
     --keep) keep=1; shift ;;
     --sdl) main_class=SmokeSdl extra_modules=lwjgl-sdl; shift ;;
     -h | --help) usage ;;
@@ -226,7 +237,7 @@ export WINEPREFIX=$cache/prefix WINEARCH=win64 WINEDEBUG=${WINEDEBUG:--all}
 # No Mono/Gecko install prompts, no menu entries on the host.
 export WINEDLLOVERRIDES="mscoree,mshtml=;winemenubuilder.exe=d${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
 declare -p java_exe classpath agent agent_options natives jvm_args main_class smoke_args gamedir output timeout \
-  xdotool_cmds xdotool_delay \
+  xdotool_cmds xdotool_delay grab \
   >"$run/session.sh"
 
 start=$(date +%s)

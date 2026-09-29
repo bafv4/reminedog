@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 egui.workspace = true
+reminedog-core.workspace = true
 egui_glow.workspace = true
 glow.workspace = true
 log.workspace = true
