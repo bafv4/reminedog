@@ -2,7 +2,8 @@
 // reminedog agent (-agentpath:) without the game. Java 8 source: javac --release 8.
 //
 // Usage: java -cp <lwjgl jars>;<classes> Smoke [FRAMES] [--legacy] [--readback] [--screenshot]
-//                                            [--seconds=N] [--capture]
+//                                            [--seconds=N] [--capture] [--mc] [--world=NAME]
+//                                            [--f3c-events] [--f3c-refuse]
 //   FRAMES      frames to render (default 120)
 //   --legacy    default window hints, like Minecraft 1.13-1.16 (else 3.2 core, like 1.17+)
 //   --readback  after the last swap, print "PIXEL x y r g b" (front buffer) and
@@ -15,9 +16,18 @@
 //   --screenshot  after the last swap, save the back buffer as smoke-screenshot.png in the
 //                 current directory (diagnostic: what an overlay drew, where the driver keeps
 //                 the back buffer after a swap, as Wine + llvmpipe does)
+//   --world=NAME  at start, write saves/NAME/session.lock and a logs/latest.log with the
+//                 integrated server's start line into the current directory, as Minecraft
+//                 does when it opens a singleplayer world (so the agent knows the world)
+//   --f3c-events  F3 is held when its key events say so, like Minecraft 1.21.9+ (else when
+//                 glfwGetKey(F3) says so as a key is handled, like 1.16)
+//   --f3c-refuse  F3+C copies nothing, like a world with reduced debug info
 // Every frame it checks that the game's WGL context is still current and that there is no
-// GL error, so an agent that leaks state into the game's context fails the run. Pressing C
-// while F3 is down copies a Minecraft-style location with glfwSetClipboardString.
+// GL error, so an agent that leaks state into the game's context fails the run. The debug
+// keys act like Minecraft's (SmokeImage.DebugKeys): pressing C while F3 is held copies a
+// Minecraft-style location with glfwSetClipboardString ("F3C copied"), and releasing F3
+// without a handled debug key toggles the debug overlay; at the end it prints
+// "F3C STATE overlay=<on|off> modifier=<up|down> copies=N".
 // Prints "SMOKE OK frames=N" and exits 0, or "SMOKE FAIL: <reason>" and exits 1.
 
 import java.nio.ByteBuffer;
@@ -37,11 +47,10 @@ import static org.lwjgl.opengl.GL11.*;
 public final class Smoke {
     // Clear colour, chosen to be exact in 8 bits: RGB 51 102 153.
     private static final float CLEAR_R = 0.2f, CLEAR_G = 0.4f, CLEAR_B = 0.6f;
-    // What Minecraft copies on F3+C (format of 1.13+), so the agent's F3+C capture can be tested.
-    private static final String F3C_TEXT =
-        "/execute in minecraft:overworld run tp @s 12.50 64.00 -7.25 90.00 15.00";
 
     private static int keys, chars, buttons, cursorMoves, scrolls, glfwErrors;
+    // F3 as its key events left it (--f3c-events).
+    private static boolean f3Down;
     private static final StringBuilder typed = new StringBuilder();
     // SMOKE_VERBOSE=1 prints every key event the "game" receives.
     private static final boolean VERBOSE = System.getenv("SMOKE_VERBOSE") != null;
@@ -75,10 +84,18 @@ public final class Smoke {
     private static void run(String[] args) {
         int frames = 120;
         boolean legacy = false, readback = false, screenshot = false, capture = false, mc = false;
+        boolean f3cEvents = false, f3cRefuse = false;
+        String world = null;
         double seconds = 0;
         for (String arg : args) {
             if (arg.startsWith("--seconds=")) {
                 seconds = Double.parseDouble(arg.substring("--seconds=".length()));
+            } else if (arg.startsWith("--world=")) {
+                world = arg.substring("--world=".length());
+            } else if (arg.equals("--f3c-events")) {
+                f3cEvents = true;
+            } else if (arg.equals("--f3c-refuse")) {
+                f3cRefuse = true;
             } else if (arg.equals("--capture")) {
                 capture = true;
             } else if (arg.equals("--mc")) {
@@ -102,6 +119,9 @@ public final class Smoke {
         }
         long t0 = System.nanoTime();
         System.out.println("LWJGL " + Version.getVersion());
+        if (world != null) {
+            SmokeImage.writeWorld(world);
+        }
 
         // Minecraft installs an error callback before glfwInit.
         GLFWErrorCallback errorCallback = GLFWErrorCallback.create((error, description) -> {
@@ -139,15 +159,25 @@ public final class Smoke {
         System.out.println("GL_RENDERER " + glGetString(GL_RENDERER));
         System.out.println("GL_VENDOR " + glGetString(GL_VENDOR));
 
+        final boolean events = f3cEvents;
+        final SmokeImage.DebugKeys debugKeys = new SmokeImage.DebugKeys(f3cRefuse,
+            () -> glfwSetClipboardString(window, SmokeImage.DebugKeys.F3C_TEXT));
         glfwSetKeyCallback(window, (w, key, scancode, action, mods) -> {
             keys++;
             if (VERBOSE) {
                 System.out.printf("KEY %d %d %d%n", key, action, mods);
             }
-            // Minecraft checks F3 with glfwGetKey when C is pressed, then copies the location.
-            if (action == GLFW_PRESS && key == GLFW_KEY_C && glfwGetKey(w, GLFW_KEY_F3) == GLFW_PRESS) {
-                glfwSetClipboardString(w, F3C_TEXT);
-                System.out.println("F3C copied");
+            // Minecraft 1.16 asks glfwGetKey whether F3 is held; 1.21.9+ follows F3's key events.
+            // Both read the crash key's real state with glfwGetKey.
+            boolean f3Held = events ? f3Down : glfwGetKey(w, GLFW_KEY_F3) == GLFW_PRESS;
+            debugKeys.keyEvent(glfwGetKey(w, GLFW_KEY_C) == GLFW_PRESS, f3Held);
+            if (key == GLFW_KEY_F3 && action == GLFW_RELEASE) {
+                debugKeys.modifierReleased();
+            } else if (action != GLFW_RELEASE && f3Held) {
+                debugKeys.debugKey(key == GLFW_KEY_C);
+            }
+            if (key == GLFW_KEY_F3) {
+                f3Down = action != GLFW_RELEASE;
             }
         });
         glfwSetCharModsCallback(window, (w, codepoint, mods) -> {
@@ -220,6 +250,7 @@ public final class Smoke {
         System.out.printf("EVENTS key=%d char=%d button=%d cursor=%d scroll=%d glfw_errors=%d%n",
             keys, chars, buttons, cursorMoves, scrolls, glfwErrors);
         System.out.println("TYPED " + typed);
+        debugKeys.printState(f3cEvents ? f3Down : glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS);
         System.out.printf("TIMING setup_ms=%d loop_ms=%d fps=%.0f%n",
             (t1 - t0) / 1000000, (t2 - t1) / 1000000, frames * 1e9 / Math.max(1, t2 - t1));
 

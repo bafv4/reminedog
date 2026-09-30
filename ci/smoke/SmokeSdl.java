@@ -4,26 +4,46 @@
 // it. Java 8 source: javac --release 8.
 //
 // Usage: java -cp <lwjgl jars incl. lwjgl-sdl>;<classes> SmokeSdl [FRAMES] [--screenshot]
-//                                                                [--seconds=N] [--capture]
+//                                                                [--seconds=N] [--capture] [--mc]
+//                                                                [--world=NAME] [--f3c-refuse]
 //   --screenshot  save the back buffer after the last swap as smoke-screenshot.png
 //   --seconds=N   run for N seconds at about 60 fps instead of a frame count (input tests)
 //   --capture     relative mouse mode, as Minecraft uses in game
 //   --mc          render like Minecraft: into its own framebuffer at the pixel size the
 //                 window events report, then copied into the window
+//   --world=NAME  at start, write saves/NAME/session.lock and a logs/latest.log with the
+//                 integrated server's start line into the current directory, as Minecraft
+//                 does when it opens a singleplayer world (so the agent knows the world)
+//   --f3c-refuse  F3+C copies nothing, like a world with reduced debug info
+// The debug keys act like 26.3's (SmokeImage.DebugKeys): F3 is held when the key events of
+// the game window (by windowID) say so, pressing C then copies a Minecraft-style location
+// with SDL_SetClipboardText ("F3C copied"), and releasing F3 without a handled debug key
+// toggles the debug overlay; at the end it prints
+// "F3C STATE overlay=<on|off> modifier=<up|down> copies=N". SMOKE_VERBOSE=1 prints every key
+// event as "KEY scancode action mod windowID" (action 1 press, 0 release, -1 repeat).
 // Prints "SMOKE OK frames=N" and exits 0, or "SMOKE FAIL: <reason>" and exits 1.
+
+import java.nio.ByteBuffer;
 
 import org.lwjgl.Version;
 import org.lwjgl.opengl.GL;
 import org.lwjgl.sdl.SDL_Event;
+import org.lwjgl.sdl.SDL_KeyboardEvent;
 
 import static org.lwjgl.opengl.GL11.*;
+import static org.lwjgl.sdl.SDLClipboard.SDL_SetClipboardText;
 import static org.lwjgl.sdl.SDLError.SDL_GetError;
 import static org.lwjgl.sdl.SDLEvents.*;
+import static org.lwjgl.sdl.SDLKeyboard.SDL_GetKeyboardState;
 import static org.lwjgl.sdl.SDLMouse.SDL_SetWindowRelativeMouseMode;
 import static org.lwjgl.sdl.SDLInit.*;
+import static org.lwjgl.sdl.SDLScancode.SDL_SCANCODE_C;
+import static org.lwjgl.sdl.SDLScancode.SDL_SCANCODE_F3;
 import static org.lwjgl.sdl.SDLVideo.*;
 
 public final class SmokeSdl {
+    private static final boolean VERBOSE = System.getenv("SMOKE_VERBOSE") != null;
+
     private static final class Fail extends RuntimeException {
         private static final long serialVersionUID = 1L;
 
@@ -51,11 +71,20 @@ public final class SmokeSdl {
 
     private static void run(String[] args) {
         int frames = 120;
-        boolean screenshot = false, capture = false, mc = false;
+        boolean screenshot = false, capture = false, mc = false, f3cRefuse = false;
+        String world = null;
         double seconds = 0;
         for (String arg : args) {
             if (arg.startsWith("--seconds=")) {
                 seconds = Double.parseDouble(arg.substring("--seconds=".length()));
+                continue;
+            }
+            if (arg.startsWith("--world=")) {
+                world = arg.substring("--world=".length());
+                continue;
+            }
+            if (arg.equals("--f3c-refuse")) {
+                f3cRefuse = true;
                 continue;
             }
             if (arg.equals("--capture")) {
@@ -83,6 +112,9 @@ public final class SmokeSdl {
             }
         }
         System.out.println("LWJGL " + Version.getVersion());
+        if (world != null) {
+            SmokeImage.writeWorld(world);
+        }
         if (!SDL_Init(SDL_INIT_VIDEO)) {
             throw new Fail("SDL_Init failed: " + SDL_GetError());
         }
@@ -123,6 +155,13 @@ public final class SmokeSdl {
             fbH[0] = h.get(0);
         }
         SmokeImage.MainTarget mainTarget = mc ? new SmokeImage.MainTarget() : null;
+        int windowId = SDL_GetWindowID(window);
+        SmokeImage.DebugKeys debugKeys = new SmokeImage.DebugKeys(f3cRefuse, () -> {
+            if (!SDL_SetClipboardText(SmokeImage.DebugKeys.F3C_TEXT)) {
+                System.out.println("SDL_SetClipboardText failed: " + SDL_GetError());
+            }
+        });
+        boolean f3Down = false;
         int keys = 0, texts = 0, buttons = 0, motions = 0, wheels = 0;
         StringBuilder typed = new StringBuilder();
         long until = System.nanoTime() + (long) (seconds * 1e9);
@@ -151,9 +190,30 @@ public final class SmokeSdl {
                 while (SDL_PollEvent(event)) {
                     switch (event.type()) {
                         case SDL_EVENT_KEY_DOWN:
-                        case SDL_EVENT_KEY_UP:
+                        case SDL_EVENT_KEY_UP: {
                             keys++;
+                            SDL_KeyboardEvent key = event.key();
+                            boolean down = event.type() == SDL_EVENT_KEY_DOWN;
+                            if (VERBOSE) {
+                                System.out.printf("KEY %d %d %d %d%n", key.scancode(),
+                                    down ? (key.repeat() ? -1 : 1) : 0, key.mod() & 0xFFFF, key.windowID());
+                            }
+                            // 26.3 handles the key events of its own window only (found by
+                            // windowID), follows F3 from them and reads the crash key's real state.
+                            if (key.windowID() != windowId) {
+                                break;
+                            }
+                            debugKeys.keyEvent(keyDown(SDL_SCANCODE_C), f3Down);
+                            if (!down && key.scancode() == SDL_SCANCODE_F3) {
+                                debugKeys.modifierReleased();
+                            } else if (down && f3Down) {
+                                debugKeys.debugKey(key.scancode() == SDL_SCANCODE_C);
+                            }
+                            if (key.scancode() == SDL_SCANCODE_F3) {
+                                f3Down = down;
+                            }
                             break;
+                        }
                         case SDL_EVENT_TEXT_INPUT:
                             texts++;
                             typed.append(event.text().textString());
@@ -188,6 +248,7 @@ public final class SmokeSdl {
         System.out.printf("EVENTS key=%d char=%d button=%d cursor=%d scroll=%d%n",
             keys, texts, buttons, motions, wheels);
         System.out.println("TYPED " + typed);
+        debugKeys.printState(f3Down);
         if (screenshot) {
             SmokeImage.saveBackBuffer(854, 480, "smoke-screenshot.png");
         }
@@ -196,5 +257,11 @@ public final class SmokeSdl {
         SDL_DestroyWindow(utility);
         SDL_Quit();
         System.out.println("SMOKE OK frames=" + frames);
+    }
+
+    // SDL's own keyboard state, which injected events do not change (26.3's isKeyDown).
+    private static boolean keyDown(int scancode) {
+        ByteBuffer state = SDL_GetKeyboardState();
+        return state != null && scancode < state.limit() && state.get(scancode) != 0;
     }
 }

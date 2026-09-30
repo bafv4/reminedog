@@ -1,4 +1,5 @@
-// Screenshot helper shared by the smoke harnesses (Smoke, SmokeSdl). Java 8 source.
+// Helpers shared by the smoke harnesses (Smoke, SmokeSdl): screenshots, the drawn frames,
+// Minecraft's debug keys around F3+C and the files of an open world. Java 8 source.
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -7,6 +8,9 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.zip.CRC32;
 import java.util.zip.DeflaterOutputStream;
 
@@ -158,5 +162,97 @@ final class SmokeImage {
             glClear(GL_COLOR_BUFFER_BIT);
         }
         glDisable(GL_SCISSOR_TEST);
+    }
+
+    // Minecraft's debug keys as far as F3+C goes; 1.16.1, 1.21.11 and 26.3 agree on this part.
+    // The harness decides whether the modifier (F3) is held, as its version does, and feeds
+    // every key event of the game's window in:
+    // - a key pressed or repeated while the modifier is held is a debug key; C copies the
+    //   location ("F3C copied"), unless refused like in a world with reduced debug info
+    //   ("F3C refused": the game then handles C as a normal key press);
+    // - releasing the modifier toggles the debug overlay unless a debug key was handled while
+    //   it was held, so a refused F3+C toggles it;
+    // - the crash key (C) physically down while the modifier is held arms the debug crash
+    //   ("F3C crash armed"; the harness never crashes), which counts as handled; once armed for
+    //   100 ms, debug keys do nothing, so a held F3+C copies once.
+    static final class DebugKeys {
+        // What Minecraft copies on F3+C (format of 1.13+), so the agent's F3+C capture can be tested.
+        static final String F3C_TEXT =
+            "/execute in minecraft:overworld run tp @s 12.50 64.00 -7.25 90.00 15.00";
+
+        private final boolean refuse;
+        private final Runnable copy;
+        private boolean overlay, handled, crashArmed;
+        private long crashArmedAt;
+        private int copies;
+
+        DebugKeys(boolean refuse, Runnable copy) {
+            this.refuse = refuse;
+            this.copy = copy;
+        }
+
+        // First thing for every key event.
+        void keyEvent(boolean crashKeyDown, boolean modifierHeld) {
+            if (!crashKeyDown || !modifierHeld) {
+                crashArmed = false;
+                return;
+            }
+            if (!crashArmed) {
+                crashArmed = true;
+                crashArmedAt = System.nanoTime();
+                System.out.println("F3C crash armed");
+            }
+            handled = true;
+        }
+
+        // A key pressed or repeated while the modifier is held.
+        void debugKey(boolean copyKey) {
+            if (crashArmed && System.nanoTime() - crashArmedAt > 100_000_000L) {
+                handled = true;
+            } else if (copyKey && refuse) {
+                System.out.println("F3C refused");
+            } else if (copyKey) {
+                copy.run();
+                copies++;
+                handled = true;
+                System.out.println("F3C copied");
+            }
+        }
+
+        void modifierReleased() {
+            if (handled) {
+                handled = false;
+                return;
+            }
+            overlay = !overlay;
+            System.out.println("F3C overlay " + (overlay ? "on" : "off"));
+        }
+
+        void printState(boolean modifierDown) {
+            System.out.printf("F3C STATE overlay=%s modifier=%s copies=%d%n",
+                overlay ? "on" : "off", modifierDown ? "down" : "up", copies);
+        }
+    }
+
+    // What Minecraft leaves in its game directory while a singleplayer world is open, which is
+    // how the agent tells the world: saves/<name>/session.lock (the most recently written one is
+    // the open world) and the integrated server's start line in logs/latest.log. Written into
+    // the current directory, the agent's game directory unless its gamedir= option says otherwise.
+    static void writeWorld(String name) {
+        if (name.isEmpty() || name.equals(".") || name.equals("..") || name.contains("/") || name.contains("\\")) {
+            throw new IllegalArgumentException("--world needs a folder name, not '" + name + "'");
+        }
+        try {
+            Path lock = Paths.get("saves", name, "session.lock");
+            Files.createDirectories(lock.getParent());
+            Files.write(lock, "☃".getBytes(StandardCharsets.UTF_8)); // the game writes a snowman
+            Path log = Paths.get("logs", "latest.log");
+            Files.createDirectories(log.getParent());
+            String line = "[00:00:00] [Server thread/INFO]: Starting integrated minecraft server version smoke\n";
+            Files.write(log, line.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            throw new UncheckedIOException("--world=" + name, e);
+        }
+        System.out.println("WORLD " + name);
     }
 }
