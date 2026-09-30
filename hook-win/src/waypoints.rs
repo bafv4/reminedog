@@ -19,7 +19,7 @@ use reminedog_core::{
 };
 use reminedog_render::{
     HotkeyAction, Key, Notice, WaypointCommand, WaypointView, WorldLabel, format_xyz,
-    navigation_text,
+    navigation_text, turn_to,
 };
 
 use crate::f3c::{self, Failure, Job, Outcome, Purpose};
@@ -280,11 +280,13 @@ impl Waypoints {
 
     /// The way from `from` to the destination, if one is selected.
     fn show_way(&mut self, from: &Location) {
-        if let Some(text) = self
-            .destination()
-            .map(|waypoint| navigation_text(&waypoint.name, from, waypoint))
-        {
-            self.notice(text, false, NAVIGATION_SECONDS);
+        if let Some(notice) = self.destination().map(|waypoint| Notice {
+            text: navigation_text(&waypoint.name, from, waypoint),
+            warn: false,
+            seconds: NAVIGATION_SECONDS,
+            arrow: turn_to(from, waypoint),
+        }) {
+            self.pending_notices.push(notice);
         }
     }
 
@@ -380,6 +382,7 @@ impl Waypoints {
             text: text.into(),
             warn,
             seconds,
+            arrow: None,
         });
     }
 
@@ -784,6 +787,7 @@ mod tests {
                 text: "地点 1：北 100 m（正面）".into(),
                 warn: false,
                 seconds: NAVIGATION_SECONDS,
+                arrow: Some(0.0),
             }]
         );
         // The user's own F3+C too.

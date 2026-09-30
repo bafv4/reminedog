@@ -22,6 +22,6 @@ pub use overlay::{
 pub use pointer::{PointerSpeed, WINDOWS_DEFAULT_CURVE, parse_windows_curve};
 pub use waypoints::{
     Notice, WaypointCommand, WaypointView, WorldLabel, cardinal_name, dimension_label,
-    format_distance, format_xyz, navigation_text, row_guidance,
+    format_distance, format_xyz, navigation_text, row_guidance, turn_to,
 };
 pub use zoom::{middle_row, tall_size};

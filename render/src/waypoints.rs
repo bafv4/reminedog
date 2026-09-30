@@ -50,6 +50,8 @@ pub struct Notice {
     /// Shown in the warning colour.
     pub warn: bool,
     pub seconds: f64,
+    /// An arrow before the text, turned this many degrees right of up (see [`turn_to`]).
+    pub arrow: Option<f32>,
 }
 
 /// What the menu asks the platform hook to do with the waypoints.
@@ -76,6 +78,9 @@ const NAME_LIMIT: usize = 64;
 const LIST_HEIGHT: f32 = 220.0;
 /// Closer than this (horizontally, in blocks) the player is at the waypoint.
 const NEAR: f64 = 1.0;
+/// Arrows: on the left of the screen, and beside a line of text (points).
+const ARROW_HUD: f32 = 36.0;
+const ARROW_TEXT: f32 = 16.0;
 
 /// The eight directions in Japanese.
 pub fn cardinal_name(cardinal: Cardinal) -> &'static str {
@@ -180,6 +185,58 @@ pub fn row_guidance(from: &Location, wp: &Waypoint) -> String {
         text.push_str(&converted_text(from, x, z));
     }
     text
+}
+
+/// The turn from where the player looked when the position was taken to a waypoint, in
+/// degrees (positive = right), for an arrow; `None` in another dimension or at the waypoint.
+/// The player's view is only known from F3+C, so the arrow changes only with a new position.
+pub fn turn_to(from: &Location, wp: &Waypoint) -> Option<f32> {
+    match guide(from, &wp.dimension, [wp.x, wp.y, wp.z]) {
+        Guide::Bearing { bearing, .. } if bearing.horizontal_distance >= NEAR => {
+            Some(bearing.relative_yaw)
+        }
+        _ => None,
+    }
+}
+
+/// An arrow's head (a triangle) and shaft (a quad) in a `size` square around `center`,
+/// pointing `turn` degrees clockwise from up. Both are convex and clockwise, as egui fills
+/// them.
+fn arrow_shape(center: egui::Pos2, size: f32, turn: f32) -> ([egui::Pos2; 3], [egui::Pos2; 4]) {
+    let (sin, cos) = turn.to_radians().sin_cos();
+    // Screen y grows downwards, so this rotation turns clockwise on screen.
+    let at = |x: f32, y: f32| center + egui::vec2(x * cos - y * sin, x * sin + y * cos) * size;
+    (
+        [at(0.0, -0.5), at(0.38, -0.02), at(-0.38, -0.02)],
+        [
+            at(-0.13, -0.05),
+            at(0.13, -0.05),
+            at(0.13, 0.5),
+            at(-0.13, 0.5),
+        ],
+    )
+}
+
+/// An arrow in a `size` square of `ui`, turned `turn` degrees right of up.
+fn arrow(ui: &mut egui::Ui, turn: f32, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
+    paint_arrow(ui, rect.center(), size, turn);
+}
+
+fn paint_arrow(ui: &egui::Ui, center: egui::Pos2, size: f32, turn: f32) {
+    let color = ui.visuals().strong_text_color();
+    let (head, shaft) = arrow_shape(center, size, turn);
+    let painter = ui.painter();
+    painter.add(egui::Shape::convex_polygon(
+        shaft.to_vec(),
+        color,
+        egui::Stroke::NONE,
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        head.to_vec(),
+        color,
+        egui::Stroke::NONE,
+    ));
 }
 
 fn round(v: f64) -> i64 {
@@ -309,16 +366,80 @@ pub(crate) fn draw_notices(ctx: &egui::Context, notices: &NoticeList) {
             .show(ctx, |ui| {
                 ui.set_max_width(screen.width() * 0.8);
                 egui::Frame::popup(&ctx.global_style()).show(ui, |ui| {
-                    let text = RichText::new(&shown.notice.text);
-                    ui.label(if shown.notice.warn {
-                        text.color(ui.visuals().warn_fg_color)
-                    } else {
-                        text
+                    ui.horizontal(|ui| {
+                        if let Some(turn) = shown.notice.arrow {
+                            arrow(ui, turn, ARROW_TEXT);
+                        }
+                        let text = RichText::new(&shown.notice.text);
+                        ui.label(if shown.notice.warn {
+                            text.color(ui.visuals().warn_fg_color)
+                        } else {
+                            text
+                        });
                     });
                 });
             })
             .response;
         y += response.rect.height() + GAP;
+    }
+}
+
+/// The destination on the left of the screen while the menu is closed: its name and place,
+/// and the way there from the last known position, with an arrow relative to where the
+/// player looked then.
+pub(crate) fn draw_destination(ctx: &egui::Context, view: &WaypointView, keys: &Hotkeys) {
+    let Some(wp) = view
+        .selected
+        .and_then(|id| view.waypoints.iter().find(|wp| wp.id == id))
+    else {
+        return;
+    };
+    let frame = egui::Frame::window(&ctx.global_style()).fill(egui::Color32::from_black_alpha(160));
+    egui::Area::new(egui::Id::new("reminedog-destination"))
+        .anchor(egui::Align2::LEFT_CENTER, [12.0, 0.0])
+        .interactable(false)
+        .show(ctx, |ui| {
+            // The area keeps its first width; lines must not wrap when they get longer (an
+            // arrow or a longer name comes later).
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            frame.show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let turn = view.location.as_ref().and_then(|from| turn_to(from, wp));
+                    // Room for the arrow, which is drawn once the lines' height is known.
+                    let slot = turn.map(|_| {
+                        ui.allocate_exact_size(egui::vec2(ARROW_HUD, 0.0), egui::Sense::hover())
+                            .0
+                    });
+                    let lines = ui.vertical(|ui| destination_lines(ui, view, wp, keys));
+                    if let (Some(turn), Some(slot)) = (turn, slot) {
+                        let center = egui::pos2(slot.center().x, lines.response.rect.center().y);
+                        paint_arrow(ui, center, ARROW_HUD, turn);
+                    }
+                });
+            });
+        });
+}
+
+fn destination_lines(ui: &mut egui::Ui, view: &WaypointView, wp: &Waypoint, keys: &Hotkeys) {
+    ui.label(RichText::new(format!("目的地：{}", wp.name)).strong());
+    ui.label(format!(
+        "{}・{}",
+        dimension_label(&wp.dimension),
+        format_xyz(wp.x, wp.y, wp.z)
+    ));
+    let Some(from) = &view.location else {
+        ui.label(
+            RichText::new(format!(
+                "現在地が未取得（{} で更新）",
+                keys.navigate.label()
+            ))
+            .weak(),
+        );
+        return;
+    };
+    ui.label(row_guidance(from, wp));
+    if let Some(age) = view.location_age {
+        ui.label(RichText::new(format!("{}の位置と向きから", format_age(age))).weak());
     }
 }
 
@@ -413,6 +534,9 @@ pub(crate) fn waypoint_section(
         return;
     }
     ui.label(RichText::new("名前を押すと目的地になる").weak());
+    if view.location.is_some() {
+        ui.label(RichText::new("矢印は、座標を取ったときに向いていた方向が上").weak());
+    }
     egui::ScrollArea::vertical()
         .id_salt("reminedog-waypoints")
         .max_height(LIST_HEIGHT)
@@ -458,6 +582,9 @@ fn waypoint_row(
     });
     ui.horizontal(|ui| {
         if let Some(from) = &view.location {
+            if let Some(turn) = turn_to(from, wp) {
+                arrow(ui, turn, ARROW_TEXT);
+            }
             ui.label(row_guidance(from, wp));
         }
         if ui.button("名前を変える").clicked() {
@@ -626,6 +753,36 @@ mod tests {
     }
 
     #[test]
+    fn arrows_turn_with_the_way() {
+        // Facing south (yaw 0); the waypoint is north-east, 135 degrees to the left.
+        let from = location(OVERWORLD, 0.0, 64.0, 0.0, 0.0);
+        let turn = turn_to(&from, &waypoint(3, OVERWORLD, 90.0, 76.0, -90.0)).unwrap();
+        assert!((turn + 135.0).abs() < 1e-3, "{turn}");
+        // No arrow at the waypoint or in another dimension.
+        assert_eq!(
+            turn_to(&from, &waypoint(4, OVERWORLD, 0.5, 90.0, 0.0)),
+            None
+        );
+        assert_eq!(
+            turn_to(&from, &waypoint(5, THE_END, 90.0, 76.0, -90.0)),
+            None
+        );
+
+        let center = egui::pos2(100.0, 100.0);
+        let tip = |turn: f32| arrow_shape(center, 20.0, turn).0[0] - center;
+        let close =
+            |v: egui::Vec2, x: f32, y: f32| (v.x - x).abs() < 1e-3 && (v.y - y).abs() < 1e-3;
+        // Up is straight ahead; positive turns right (clockwise on screen, y downwards).
+        assert!(close(tip(0.0), 0.0, -10.0), "{:?}", tip(0.0));
+        assert!(close(tip(90.0), 10.0, 0.0), "{:?}", tip(90.0));
+        assert!(close(tip(-90.0), -10.0, 0.0), "{:?}", tip(-90.0));
+        assert!(close(tip(180.0), 0.0, 10.0), "{:?}", tip(180.0));
+        // The tail stays opposite the tip.
+        let (_, shaft) = arrow_shape(center, 20.0, 90.0);
+        assert!(shaft[2].x < center.x && shaft[3].x < center.x);
+    }
+
+    #[test]
     fn turn_and_height_words() {
         assert_eq!(turn_text(9.9), "正面");
         assert_eq!(turn_text(-9.9), "正面");
@@ -710,6 +867,7 @@ mod tests {
             text: text.to_owned(),
             warn: false,
             seconds,
+            arrow: None,
         }
     }
 

@@ -15,7 +15,8 @@ use crate::font_metrics;
 use crate::hotkey::{Hotkey, Trigger};
 use crate::input::Captured;
 use crate::waypoints::{
-    Notice, NoticeList, WaypointCommand, WaypointMenu, WaypointView, draw_notices, waypoint_section,
+    Notice, NoticeList, WaypointCommand, WaypointMenu, WaypointView, draw_destination,
+    draw_notices, waypoint_section,
 };
 use crate::zoom::Zoom;
 
@@ -541,6 +542,9 @@ impl Overlay {
             }
             if show_hint {
                 hint(ui.ctx(), state.keys.menu);
+            }
+            if !input.ui_open {
+                draw_destination(ui.ctx(), &input.waypoints, &state.keys);
             }
             draw_notices(ui.ctx(), notices);
             if let Some(pos) = input.software_cursor {
