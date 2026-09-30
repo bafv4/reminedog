@@ -17,6 +17,7 @@ use crate::fonts;
 use crate::input;
 use crate::pointer;
 use crate::tall::TallZoom;
+use crate::waypoints;
 use crate::wgl::{self, OwnContext, Wgl};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
@@ -228,10 +229,12 @@ impl Runtime {
         let settings_path = settings_path(&agent.game_dir);
         let settings = Settings::load(&settings_path);
         log::info!(
-            "settings: {} (menu {}, zoom {})",
+            "settings: {} (menu {}, zoom {}, waypoint {}, navigate {})",
             settings_path.display(),
             settings.menu_key,
-            settings.zoom_key
+            settings.zoom_key,
+            settings.waypoint_key,
+            settings.navigate_key
         );
 
         let context = OwnContext::create(wgl, hdc)?;
@@ -332,7 +335,8 @@ impl Runtime {
 
         // The zoom works in the game's context, which is current at the swap. It ends when
         // the game shows a menu (the inventory opened with the zoom key held).
-        let want_zoom = input::router().zoom_active() && ws.captured(window);
+        let playing = ws.captured(window);
+        let want_zoom = input::router().zoom_active() && playing;
         let zoom = self.tall.frame(
             window,
             [width, height],
@@ -348,8 +352,10 @@ impl Runtime {
             .tall
             .failure()
             .map(|reason| format!("高精細は使えない：{reason}"));
-        {
+        let waypoint_commands = {
             let _current = self.context.make_current(wgl).map_err(FrameError::Failed)?;
+            // Takes the router's hotkey actions, so before the router is locked below.
+            let marks = waypoints::before_frame(&agent.game_dir, self.window, playing);
             let input = {
                 let mut router = input::router();
                 router.set_enabled(true);
@@ -362,7 +368,9 @@ impl Runtime {
                     software_cursor: router.software_cursor(),
                     captured: router.take_captured(),
                     high_res_note,
-                    ..Default::default()
+                    waypoints: marks.view,
+                    notices: marks.notices,
+                    reserved_keys: marks.reserved_keys,
                 }
             };
             let output = self.overlay.render(FrameParams {
@@ -392,7 +400,9 @@ impl Runtime {
                 self.unsaved = Some(Instant::now());
             }
             self.log_gl_errors();
-        }
+            output.waypoint_commands
+        };
+        waypoints::after_frame(waypoint_commands, self.window);
         self.save_settings_when_due();
         let cost_ms = started.elapsed().as_secs_f64() * 1000.0;
         self.cost_ms = if self.overlay.frames() <= 1 {
@@ -425,9 +435,11 @@ impl Runtime {
         self.unsaved = None;
         match self.settings.save(&self.settings_path) {
             Ok(()) => log::info!(
-                "settings saved (menu {}, zoom {}, ×{:.1}, high resolution {})",
+                "settings saved (menu {}, zoom {}, waypoint {}, navigate {}, ×{:.1}, high resolution {})",
                 self.settings.menu_key,
                 self.settings.zoom_key,
+                self.settings.waypoint_key,
+                self.settings.navigate_key,
                 self.settings.zoom_factor,
                 self.settings.zoom_high_res
             ),

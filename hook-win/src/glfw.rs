@@ -184,6 +184,8 @@ unsafe extern "C" fn swap_buffers_detour(window: *mut c_void) {
     if let Some((window, [w, h])) = crate::tall::take_pending() {
         crate::glfw_input::send_framebuffer_size(window, w, h);
     }
+    // A waypoint request: F3+C, now that the frame is out and no lock is held.
+    ffi::catch("F3+C", || crate::glfw_input::run_f3c(window));
 }
 
 /// Reports the tall size to the game while zooming.

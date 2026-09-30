@@ -3,13 +3,15 @@
 //! Flow: `Agent_OnLoad` sets up logging and asks the loader to report DLL loads
 //! ([`loader`]). When a GLFW library shows up, [`glfw`] detours `glfwSwapBuffers`;
 //! from then on every frame goes through [`frame::before_swap`], which draws the overlay
-//! with the agent's own GL context ([`wgl`]) and hands the swap back to GLFW.
+//! with the agent's own GL context ([`wgl`]) and hands the swap back to GLFW. Waypoints
+//! ([`waypoints`]) get the player's position by sending the game F3+C ([`f3c`]).
 //!
 //! Everything is Windows-only; on other platforms this crate builds as an empty library
 //! so the workspace still builds.
 #![cfg(windows)]
 
 mod agent;
+mod f3c;
 mod ffi;
 mod fonts;
 mod frame;
@@ -22,6 +24,7 @@ mod pointer;
 mod sdl;
 mod sdl_input;
 mod tall;
+mod waypoints;
 mod wgl;
 
 use std::ffi::{CStr, c_char, c_void};
