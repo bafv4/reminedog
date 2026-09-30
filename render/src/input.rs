@@ -6,6 +6,7 @@
 //! releases (keys, mouse buttons), which the game still gets so nothing stays held down.
 
 use crate::hotkey::{self, Hotkey, Trigger};
+use crate::overlay::Hotkeys;
 use crate::pointer::PointerSpeed;
 use egui::{Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, pos2, vec2};
 
@@ -17,6 +18,16 @@ pub enum Route {
     /// The overlay used it; the game must not see it.
     Consume,
 }
+
+/// A hotkey that asks the platform hook to do something, see [`InputRouter::take_actions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyAction {
+    RecordWaypoint,
+    Navigate,
+}
+
+/// Actions kept until the next frame takes them.
+const MAX_ACTIONS: usize = 4;
 
 /// The outcome of [`InputRouter::start_capture`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,10 +62,16 @@ pub struct InputRouter {
     offset: (f64, f64),
     /// Applied to relative motion that moves the overlay's own cursor.
     pointer_speed: PointerSpeed,
-    /// Toggles the UI.
-    menu_key: Hotkey,
-    /// Zooms while held, in game (cursor captured) with the UI closed.
-    zoom_key: Hotkey,
+    /// `menu` toggles the UI; `zoom` zooms while held and `waypoint` / `navigate` queue an
+    /// action, these three in game (cursor captured) with the UI closed.
+    keys: Hotkeys,
+    /// The waypoint / navigate key was pressed and consumed, so its release is ours too.
+    action_held: [bool; 2],
+    actions: Vec<HotkeyAction>,
+    /// Minecraft's debug modifier (F3 unless rebound in options.txt). While it is held the
+    /// in-game hotkeys go to the game, so its F3+<key> combinations keep working.
+    debug_modifier: Option<Key>,
+    debug_held: bool,
     /// The next key or extra mouse button pressed in the UI becomes a hotkey.
     capturing: bool,
     captured: Option<Captured>,
@@ -82,8 +99,11 @@ impl InputRouter {
             last_captured: false,
             offset: (0.0, 0.0),
             pointer_speed: PointerSpeed::RAW,
-            menu_key: Hotkey::DEFAULT_MENU,
-            zoom_key: Hotkey::DEFAULT_ZOOM,
+            keys: Hotkeys::DEFAULT,
+            action_held: [false; 2],
+            actions: Vec::new(),
+            debug_modifier: Some(Key::F3),
+            debug_held: false,
             capturing: false,
             captured: None,
         }
@@ -94,7 +114,10 @@ impl InputRouter {
         if !enabled {
             self.set_ui_open(false);
             self.zoom_held = false;
+            self.action_held = [false; 2];
+            self.debug_held = false;
             self.events.clear();
+            self.actions.clear();
         }
         self.enabled = enabled;
     }
@@ -138,12 +161,30 @@ impl InputRouter {
         self.pointer_speed = speed;
     }
 
-    pub fn set_hotkeys(&mut self, menu: Hotkey, zoom: Hotkey) {
-        self.menu_key = menu;
-        if zoom != self.zoom_key {
+    pub fn set_hotkeys(&mut self, keys: Hotkeys) {
+        if keys.zoom != self.keys.zoom {
             self.zoom_held = false;
         }
-        self.zoom_key = zoom;
+        if keys.waypoint != self.keys.waypoint {
+            self.action_held[0] = false;
+        }
+        if keys.navigate != self.keys.navigate {
+            self.action_held[1] = false;
+        }
+        self.keys = keys;
+    }
+
+    /// Minecraft's debug modifier key; `None` when it is unbound or has no egui name.
+    pub fn set_debug_modifier(&mut self, key: Option<Key>) {
+        if key != self.debug_modifier {
+            self.debug_modifier = key;
+            self.debug_held = false;
+        }
+    }
+
+    /// The waypoint and navigate hotkeys pressed since the last call, oldest first.
+    pub fn take_actions(&mut self) -> Vec<HotkeyAction> {
+        std::mem::take(&mut self.actions)
     }
 
     /// Takes the next key (with its modifiers) or extra mouse button pressed while the UI
@@ -184,6 +225,7 @@ impl InputRouter {
         self.ui_changed = true;
         log::info!("ui {}", if open { "opened" } else { "closed" });
         self.zoom_held = false;
+        self.action_held = [false; 2];
         self.cancel_capture();
         if open {
             if self.last_captured || self.pointer == Pos2::ZERO {
@@ -207,6 +249,9 @@ impl InputRouter {
         captured: bool,
     ) -> Route {
         self.modifiers = modifiers;
+        if key.is_some() && key == self.debug_modifier {
+            self.debug_held = pressed;
+        }
         if !self.enabled {
             return Route::Forward;
         }
@@ -227,7 +272,7 @@ impl InputRouter {
                 Route::Forward
             };
         }
-        if pressed && self.menu_key.matches_key(key, modifiers) {
+        if pressed && self.keys.menu.matches_key(key, modifiers) {
             if !repeat {
                 self.set_ui_open(!self.ui_open);
             }
@@ -255,16 +300,71 @@ impl InputRouter {
                 Route::Forward
             };
         }
-        if key.is_some_and(|k| self.zoom_key.trigger == Trigger::Key(k)) {
-            return self.zoom_input(pressed, modifiers, captured);
+        let Some(key) = key else {
+            return Route::Forward;
+        };
+        self.game_hotkey(Trigger::Key(key), pressed, repeat, modifiers, captured)
+    }
+
+    /// The in-game hotkeys (UI closed): the waypoint and navigate keys, then the zoom, whose
+    /// match ignores the modifiers. While the debug modifier is held new presses go to the
+    /// game; the releases of keys taken before are still ours.
+    fn game_hotkey(
+        &mut self,
+        trigger: Trigger,
+        pressed: bool,
+        repeat: bool,
+        modifiers: Modifiers,
+        captured: bool,
+    ) -> Route {
+        let actions = [
+            (HotkeyAction::RecordWaypoint, self.keys.waypoint),
+            (HotkeyAction::Navigate, self.keys.navigate),
+        ];
+        for (i, (action, hotkey)) in actions.into_iter().enumerate() {
+            if hotkey.trigger != trigger {
+                continue;
+            }
+            if !pressed {
+                if std::mem::take(&mut self.action_held[i]) {
+                    return Route::Consume;
+                }
+            } else if repeat {
+                if self.action_held[i] {
+                    return Route::Consume;
+                }
+            } else if captured && !self.debug_held && hotkey.modifiers_held(modifiers) {
+                self.action_held[i] = true;
+                if self.actions.len() < MAX_ACTIONS {
+                    self.actions.push(action);
+                } else {
+                    log::debug!("hotkey {action:?} dropped: {MAX_ACTIONS} actions pending");
+                }
+                return Route::Consume;
+            }
+        }
+        // A zoom on the debug modifier itself is not a combination with it.
+        let is_modifier = self
+            .debug_modifier
+            .is_some_and(|k| trigger == Trigger::Key(k));
+        if self.keys.zoom.trigger == trigger && (self.zoom_held || !self.debug_held || is_modifier)
+        {
+            return self.zoom_input(pressed, repeat, modifiers, captured);
         }
         Route::Forward
     }
 
-    /// The zoom hotkey went down or up (UI closed).
-    fn zoom_input(&mut self, pressed: bool, modifiers: Modifiers, captured: bool) -> Route {
+    /// The zoom hotkey went down or up (UI closed). Only a fresh press starts it: a repeat of
+    /// a press the game got (the modifier was held then) must leave the release to the game.
+    fn zoom_input(
+        &mut self,
+        pressed: bool,
+        repeat: bool,
+        modifiers: Modifiers,
+        captured: bool,
+    ) -> Route {
         if pressed {
-            let starts = captured && self.zoom_key.modifiers_held(modifiers);
+            let starts = !repeat && captured && self.keys.zoom.modifiers_held(modifiers);
             if self.zoom_held || starts {
                 self.zoom_held = true;
                 return Route::Consume;
@@ -278,8 +378,8 @@ impl InputRouter {
 
     /// Typed text (after the keyboard layout and IME).
     pub fn text(&mut self, text: &str) -> Route {
-        if self.zoom_held {
-            // The zoom key's own characters (and their auto-repeat).
+        if self.zoom_held || self.action_held.contains(&true) {
+            // The hotkey's own characters (and their auto-repeat).
             return Route::Consume;
         }
         if !self.ui_open || !self.enabled {
@@ -305,15 +405,13 @@ impl InputRouter {
                 )));
                 return Route::Consume;
             }
-        } else if pressed && self.menu_key.matches_button(button, self.modifiers) {
+        } else if pressed && self.keys.menu.matches_button(button, self.modifiers) {
             self.set_ui_open(!self.ui_open);
             return Route::Consume;
         }
         if !self.ui_open {
-            if self.zoom_key.trigger == Trigger::Mouse(button) {
-                return self.zoom_input(pressed, self.modifiers, captured);
-            }
-            return Route::Forward;
+            let modifiers = self.modifiers;
+            return self.game_hotkey(Trigger::Mouse(button), pressed, false, modifiers, captured);
         }
         self.push_event(Event::PointerButton {
             pos: self.pointer_points(),
@@ -387,9 +485,11 @@ impl InputRouter {
         Route::Consume
     }
 
-    /// The window lost focus: the zoom key's release may never arrive.
+    /// The window lost focus: the releases of held keys may never arrive.
     pub fn focus_lost(&mut self) {
         self.zoom_held = false;
+        self.action_held = [false; 2];
+        self.debug_held = false;
     }
 
     fn push_event(&mut self, event: Event) {
@@ -678,7 +778,11 @@ mod tests {
         let mut r = router();
         let menu = Hotkey::parse("F6").unwrap();
         let zoom = Hotkey::parse("C").unwrap();
-        r.set_hotkeys(menu, zoom);
+        r.set_hotkeys(Hotkeys {
+            menu,
+            zoom,
+            ..Hotkeys::DEFAULT
+        });
         assert_eq!(ctrl_i(&mut r), Route::Forward, "Ctrl+I is the game's again");
         assert!(!r.ui_open());
         assert_eq!(r.key(Some(Key::Z), true, false, NONE, true), Route::Forward);
@@ -706,10 +810,10 @@ mod tests {
     #[test]
     fn zoom_on_a_mouse_button() {
         let mut r = router();
-        r.set_hotkeys(
-            Hotkey::DEFAULT_MENU,
-            Hotkey::plain(Trigger::Mouse(PointerButton::Extra1)),
-        );
+        r.set_hotkeys(Hotkeys {
+            zoom: Hotkey::plain(Trigger::Mouse(PointerButton::Extra1)),
+            ..Hotkeys::DEFAULT
+        });
         // Not in game (a menu of the game is open): the game gets the button.
         assert_eq!(r.button(PointerButton::Extra1, true, false), Route::Forward);
         assert!(!r.zoom_active());
@@ -724,10 +828,10 @@ mod tests {
     #[test]
     fn menu_on_a_mouse_button() {
         let mut r = router();
-        r.set_hotkeys(
-            Hotkey::plain(Trigger::Mouse(PointerButton::Middle)),
-            Hotkey::DEFAULT_ZOOM,
-        );
+        r.set_hotkeys(Hotkeys {
+            menu: Hotkey::plain(Trigger::Mouse(PointerButton::Middle)),
+            ..Hotkeys::DEFAULT
+        });
         assert_eq!(r.button(PointerButton::Middle, true, true), Route::Consume);
         assert!(r.ui_open());
         assert_eq!(r.button(PointerButton::Middle, true, true), Route::Consume);
@@ -792,5 +896,254 @@ mod tests {
         r.start_capture();
         assert_eq!(r.key(Some(Key::Z), true, false, NONE, true), Route::Consume);
         assert_eq!(r.take_captured(), None);
+    }
+
+    #[test]
+    fn waypoint_and_navigate_keys_queue_actions_in_game() {
+        let mut r = router();
+        assert_eq!(r.key(Some(Key::J), true, false, NONE, true), Route::Consume);
+        assert_eq!(
+            r.key(Some(Key::J), true, true, NONE, true),
+            Route::Consume,
+            "repeat"
+        );
+        assert_eq!(r.text("j"), Route::Consume, "the key's characters too");
+        assert_eq!(
+            r.key(Some(Key::J), false, false, NONE, true),
+            Route::Consume
+        );
+        // Sprinting with Ctrl held.
+        assert_eq!(r.key(Some(Key::K), true, false, CTRL, true), Route::Consume);
+        r.key(Some(Key::K), false, false, NONE, true);
+        assert_eq!(
+            r.take_actions(),
+            vec![HotkeyAction::RecordWaypoint, HotkeyAction::Navigate]
+        );
+        assert!(r.take_actions().is_empty());
+        assert!(r.take_events().is_empty());
+        assert!(!r.zoom_active());
+    }
+
+    #[test]
+    fn waypoint_keys_are_the_games_outside_play_and_with_the_ui_open() {
+        let mut r = router();
+        // A game screen is open (typing "j" in chat).
+        assert_eq!(
+            r.key(Some(Key::J), true, false, NONE, false),
+            Route::Forward
+        );
+        assert_eq!(
+            r.key(Some(Key::J), true, true, NONE, false),
+            Route::Forward,
+            "repeat"
+        );
+        assert_eq!(r.text("j"), Route::Forward);
+        assert_eq!(
+            r.key(Some(Key::J), false, false, NONE, false),
+            Route::Forward
+        );
+        // Our menu takes presses for egui instead.
+        ctrl_i(&mut r);
+        assert_eq!(r.key(Some(Key::K), true, false, NONE, true), Route::Consume);
+        assert!(r.take_actions().is_empty());
+    }
+
+    #[test]
+    fn a_release_is_consumed_only_after_a_consumed_press() {
+        let mut r = router();
+        // Pressed in a game screen, released in game: the game saw the press.
+        r.key(Some(Key::J), true, false, NONE, false);
+        assert_eq!(
+            r.key(Some(Key::J), false, false, NONE, true),
+            Route::Forward
+        );
+        // Pressed in game, released after a game screen opened: still ours.
+        r.key(Some(Key::J), true, false, NONE, true);
+        assert_eq!(
+            r.key(Some(Key::J), false, false, NONE, false),
+            Route::Consume
+        );
+        // Opening the menu forgets the press (the release goes to the game while it is open).
+        r.key(Some(Key::J), true, false, NONE, true);
+        ctrl_i(&mut r);
+        ctrl_i(&mut r);
+        assert_eq!(
+            r.key(Some(Key::J), false, false, NONE, true),
+            Route::Forward
+        );
+        assert_eq!(r.take_actions().len(), 2);
+    }
+
+    #[test]
+    fn debug_modifier_hands_the_in_game_hotkeys_to_the_game() {
+        let mut r = router();
+        assert_eq!(
+            r.key(Some(Key::F3), true, false, NONE, true),
+            Route::Forward,
+            "the modifier itself is the game's"
+        );
+        for key in [Key::J, Key::K, Key::Z] {
+            assert_eq!(
+                r.key(Some(key), true, false, NONE, true),
+                Route::Forward,
+                "{key:?}"
+            );
+            assert_eq!(
+                r.key(Some(key), false, false, NONE, true),
+                Route::Forward,
+                "{key:?}"
+            );
+        }
+        assert!(r.take_actions().is_empty());
+        assert!(!r.zoom_active());
+        // The menu key still works.
+        assert_eq!(ctrl_i(&mut r), Route::Consume);
+        ctrl_i(&mut r);
+        r.key(Some(Key::F3), false, false, NONE, true);
+        assert_eq!(r.key(Some(Key::J), true, false, NONE, true), Route::Consume);
+        assert_eq!(r.take_actions(), vec![HotkeyAction::RecordWaypoint]);
+    }
+
+    #[test]
+    fn keys_taken_before_the_debug_modifier_are_released_by_us() {
+        let mut r = router();
+        r.key(Some(Key::Z), true, false, NONE, true);
+        r.key(Some(Key::J), true, false, NONE, true);
+        r.key(Some(Key::F3), true, false, NONE, true);
+        assert!(r.zoom_active(), "a zoom already held goes on");
+        assert_eq!(r.key(Some(Key::Z), true, true, NONE, true), Route::Consume);
+        assert_eq!(r.key(Some(Key::J), true, true, NONE, true), Route::Consume);
+        assert_eq!(
+            r.key(Some(Key::Z), false, false, NONE, true),
+            Route::Consume
+        );
+        assert!(!r.zoom_active());
+        assert_eq!(
+            r.key(Some(Key::J), false, false, NONE, true),
+            Route::Consume
+        );
+        // A new zoom press waits for F3's release.
+        assert_eq!(r.key(Some(Key::Z), true, false, NONE, true), Route::Forward);
+        assert!(!r.zoom_active());
+    }
+
+    #[test]
+    fn the_debug_modifier_can_be_rebound_or_unbound() {
+        let mut r = router();
+        r.set_debug_modifier(Some(Key::F6));
+        r.key(Some(Key::F3), true, false, NONE, true);
+        assert_eq!(r.key(Some(Key::J), true, false, NONE, true), Route::Consume);
+        r.key(Some(Key::J), false, false, NONE, true);
+        r.key(Some(Key::F6), true, false, NONE, true);
+        assert_eq!(r.key(Some(Key::J), true, false, NONE, true), Route::Forward);
+        r.key(Some(Key::J), false, false, NONE, true);
+        // Changing the key forgets the held state.
+        r.set_debug_modifier(None);
+        assert_eq!(r.key(Some(Key::K), true, false, NONE, true), Route::Consume);
+        assert_eq!(
+            r.take_actions(),
+            vec![HotkeyAction::RecordWaypoint, HotkeyAction::Navigate]
+        );
+    }
+
+    #[test]
+    fn debug_modifier_state_resets_on_focus_loss_and_disable() {
+        let mut r = router();
+        r.key(Some(Key::F3), true, false, NONE, true);
+        r.focus_lost();
+        assert_eq!(r.key(Some(Key::J), true, false, NONE, true), Route::Consume);
+        r.key(Some(Key::J), false, false, NONE, true);
+        r.key(Some(Key::F3), true, false, NONE, true);
+        r.set_enabled(false);
+        r.set_enabled(true);
+        assert_eq!(r.key(Some(Key::J), true, false, NONE, true), Route::Consume);
+        // Tracked while disabled too.
+        r.set_enabled(false);
+        r.key(Some(Key::F3), true, false, NONE, true);
+        r.set_enabled(true);
+        assert_eq!(r.key(Some(Key::K), true, false, NONE, true), Route::Forward);
+    }
+
+    #[test]
+    fn at_most_four_actions_wait() {
+        let mut r = router();
+        for _ in 0..6 {
+            r.key(Some(Key::J), true, false, NONE, true);
+            r.key(Some(Key::J), false, false, NONE, true);
+        }
+        assert_eq!(r.take_actions().len(), 4);
+        r.key(Some(Key::K), true, false, NONE, true);
+        r.set_enabled(false);
+        assert!(r.take_actions().is_empty(), "disabling drops them");
+    }
+
+    #[test]
+    fn waypoint_hotkeys_with_modifiers_and_mouse_buttons() {
+        let mut r = router();
+        r.set_hotkeys(Hotkeys {
+            waypoint: Hotkey::parse("Shift+Z").unwrap(),
+            navigate: Hotkey::plain(Trigger::Mouse(PointerButton::Extra2)),
+            ..Hotkeys::DEFAULT
+        });
+        // Plain Z still zooms; Shift+Z records.
+        assert_eq!(r.key(Some(Key::Z), true, false, NONE, true), Route::Consume);
+        assert!(r.zoom_active());
+        r.key(Some(Key::Z), false, false, NONE, true);
+        let shift = Modifiers::SHIFT;
+        assert_eq!(
+            r.key(Some(Key::Z), true, false, shift, true),
+            Route::Consume
+        );
+        assert!(!r.zoom_active());
+        // Shift let go first: the release is still ours.
+        assert_eq!(
+            r.key(Some(Key::Z), false, false, NONE, true),
+            Route::Consume
+        );
+        assert_eq!(r.button(PointerButton::Extra2, true, false), Route::Forward);
+        r.button(PointerButton::Extra2, false, false);
+        assert_eq!(r.button(PointerButton::Extra2, true, true), Route::Consume);
+        assert_eq!(r.button(PointerButton::Extra2, false, true), Route::Consume);
+        r.key(Some(Key::F3), true, false, NONE, true);
+        assert_eq!(r.button(PointerButton::Extra2, true, true), Route::Forward);
+        assert_eq!(
+            r.take_actions(),
+            vec![HotkeyAction::RecordWaypoint, HotkeyAction::Navigate]
+        );
+    }
+
+    #[test]
+    fn a_zoom_on_the_debug_modifier_still_zooms() {
+        let mut r = router();
+        r.set_hotkeys(Hotkeys {
+            zoom: Hotkey::plain(Trigger::Key(Key::F3)),
+            ..Hotkeys::DEFAULT
+        });
+        assert_eq!(
+            r.key(Some(Key::F3), true, false, NONE, true),
+            Route::Consume
+        );
+        assert!(r.zoom_active());
+        assert_eq!(
+            r.key(Some(Key::F3), false, false, NONE, true),
+            Route::Consume
+        );
+        assert!(!r.zoom_active());
+    }
+
+    #[test]
+    fn a_repeat_never_starts_the_zoom() {
+        let mut r = router();
+        // Z went to the game while F3 was held; F3 is released before Z.
+        r.key(Some(Key::F3), true, false, NONE, true);
+        assert_eq!(r.key(Some(Key::Z), true, false, NONE, true), Route::Forward);
+        r.key(Some(Key::F3), false, false, NONE, true);
+        assert_eq!(r.key(Some(Key::Z), true, true, NONE, true), Route::Forward);
+        assert!(!r.zoom_active());
+        assert_eq!(
+            r.key(Some(Key::Z), false, false, NONE, true),
+            Route::Forward,
+            "the game gets the release of the press it saw"
+        );
     }
 }

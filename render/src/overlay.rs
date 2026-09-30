@@ -12,8 +12,11 @@ use reminedog_core::Settings;
 use reminedog_core::settings::ZOOM_FACTOR_RANGE;
 
 use crate::font_metrics;
-use crate::hotkey::Hotkey;
+use crate::hotkey::{Hotkey, Trigger};
 use crate::input::Captured;
+use crate::waypoints::{
+    Notice, NoticeList, WaypointCommand, WaypointMenu, WaypointView, draw_notices, waypoint_section,
+};
 use crate::zoom::Zoom;
 
 /// A font file added as a fallback for glyphs egui's built-in fonts lack (Japanese).
@@ -77,6 +80,12 @@ pub struct FrameInput {
     pub captured: Option<Captured>,
     /// Why the high-resolution zoom cannot be used, shown in the menu.
     pub high_res_note: Option<String>,
+    pub waypoints: WaypointView,
+    /// New notices this frame; the overlay keeps them until they expire.
+    pub notices: Vec<Notice>,
+    /// Minecraft's debug modifier, copy-location and crash keys, which the waypoint and
+    /// navigate hotkeys must not take.
+    pub reserved_keys: Vec<egui::Key>,
 }
 
 /// What the platform hook has to act on after a frame.
@@ -89,20 +98,134 @@ pub struct FrameOutput {
     pub cancel_capture: bool,
     /// The settings changed: apply the hotkeys and save.
     pub settings: Option<Settings>,
+    /// Asked for in the menu's waypoint section, in order.
+    pub waypoint_commands: Vec<WaypointCommand>,
 }
 
-/// The two hotkeys in `settings`; unreadable ones fall back to the defaults.
-pub fn hotkeys(settings: &Settings) -> (Hotkey, Hotkey) {
-    let parse = |text: &str, default: Hotkey, what: &str| {
-        Hotkey::parse(text).unwrap_or_else(|| {
-            log::warn!("settings: unknown {what} key {text:?}; using {default}");
-            default
-        })
+/// The user's hotkeys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hotkeys {
+    /// Opens and closes the menu.
+    pub menu: Hotkey,
+    /// Zooms while held.
+    pub zoom: Hotkey,
+    /// Records a waypoint at the player's position.
+    pub waypoint: Hotkey,
+    /// Refreshes the player's position and shows the way to the selected waypoint.
+    pub navigate: Hotkey,
+}
+
+impl Hotkeys {
+    pub const DEFAULT: Hotkeys = Hotkeys {
+        menu: Hotkey::DEFAULT_MENU,
+        zoom: Hotkey::DEFAULT_ZOOM,
+        waypoint: Hotkey::DEFAULT_WAYPOINT,
+        navigate: Hotkey::DEFAULT_NAVIGATE,
     };
-    (
-        parse(&settings.menu_key, Hotkey::DEFAULT_MENU, "menu"),
-        parse(&settings.zoom_key, Hotkey::DEFAULT_ZOOM, "zoom"),
-    )
+
+    fn get(&self, action: Action) -> Hotkey {
+        match action {
+            Action::Menu => self.menu,
+            Action::Zoom => self.zoom,
+            Action::Waypoint => self.waypoint,
+            Action::Navigate => self.navigate,
+        }
+    }
+
+    fn set(&mut self, action: Action, hotkey: Hotkey) {
+        match action {
+            Action::Menu => self.menu = hotkey,
+            Action::Zoom => self.zoom = hotkey,
+            Action::Waypoint => self.waypoint = hotkey,
+            Action::Navigate => self.navigate = hotkey,
+        }
+    }
+}
+
+impl Default for Hotkeys {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The hotkeys in `settings`. Unreadable ones fall back to the defaults, and so does one an
+/// earlier hotkey would hide (see `hides`), which only a hand-edited or older settings file
+/// can have.
+pub fn hotkeys(settings: &Settings) -> Hotkeys {
+    let mut keys = Hotkeys::DEFAULT;
+    for action in Action::ALL {
+        let text = action.setting(settings);
+        let default = action.default_hotkey();
+        let hotkey = Hotkey::parse(text).unwrap_or_else(|| {
+            log::warn!(
+                "settings: unknown {} key {text:?}; using {default}",
+                action.id()
+            );
+            default
+        });
+        let hotkey = if action.uses_f3c() && hotkey.ctrl {
+            log::warn!(
+                "settings: the {} key {hotkey} needs Ctrl, which F3+C cannot be sent with; using {default}",
+                action.id()
+            );
+            default
+        } else {
+            hotkey
+        };
+        keys.set(action, hotkey);
+    }
+    for action in Action::ROUTER_ORDER {
+        let Some(earlier) = hidden_by(&keys, action) else {
+            continue;
+        };
+        let default = action.default_hotkey();
+        log::warn!(
+            "settings: the {} key {} is hidden by the {} key {}; using {default}",
+            action.id(),
+            keys.get(action),
+            earlier.id(),
+            keys.get(earlier)
+        );
+        keys.set(action, default);
+        if let Some(earlier) = hidden_by(&keys, action) {
+            log::warn!(
+                "settings: the {} key {default} is hidden by the {} key {} too",
+                action.id(),
+                earlier.id(),
+                keys.get(earlier)
+            );
+        }
+    }
+    keys
+}
+
+/// Whether `earlier`, which the input router checks first, takes every press of `later`:
+/// the same trigger, and no modifier `later` does not need too (extra modifiers still match).
+/// The zoom is checked last, so its match ignoring modifiers never hides another key.
+fn hides(earlier: Hotkey, later: Hotkey) -> bool {
+    earlier.trigger == later.trigger
+        && (!earlier.ctrl || later.ctrl)
+        && (!earlier.shift || later.shift)
+        && (!earlier.alt || later.alt)
+}
+
+/// The action checked before `action` whose hotkey hides `action`'s.
+fn hidden_by(keys: &Hotkeys, action: Action) -> Option<Action> {
+    Action::ROUTER_ORDER
+        .into_iter()
+        .take_while(|&earlier| earlier != action)
+        .find(|&earlier| hides(keys.get(earlier), keys.get(action)))
+}
+
+/// Another action whose hotkey hides `action`'s, or is hidden by it.
+fn conflict(keys: &Hotkeys, action: Action) -> Option<Action> {
+    hidden_by(keys, action).or_else(|| {
+        Action::ROUTER_ORDER
+            .into_iter()
+            .skip_while(|&earlier| earlier != action)
+            .skip(1)
+            .find(|&later| hides(keys.get(action), keys.get(later)))
+    })
 }
 
 #[derive(Debug)]
@@ -123,78 +246,137 @@ const HINT_SECONDS: f64 = 10.0;
 enum Action {
     Menu,
     Zoom,
+    Waypoint,
+    Navigate,
 }
 
 impl Action {
+    /// As listed in the menu.
+    const ALL: [Action; 4] = [
+        Action::Menu,
+        Action::Zoom,
+        Action::Waypoint,
+        Action::Navigate,
+    ];
+    /// The order in which the input router matches the hotkeys.
+    const ROUTER_ORDER: [Action; 4] = [
+        Action::Menu,
+        Action::Waypoint,
+        Action::Navigate,
+        Action::Zoom,
+    ];
+
     fn name(self) -> &'static str {
         match self {
             Action::Menu => "メニューを開く",
             Action::Zoom => "ズーム",
+            Action::Waypoint => "ウェイポイントを記録",
+            Action::Navigate => "現在地を更新",
         }
+    }
+
+    /// For the log.
+    fn id(self) -> &'static str {
+        match self {
+            Action::Menu => "menu",
+            Action::Zoom => "zoom",
+            Action::Waypoint => "waypoint",
+            Action::Navigate => "navigate",
+        }
+    }
+
+    fn default_hotkey(self) -> Hotkey {
+        Hotkeys::DEFAULT.get(self)
+    }
+
+    fn setting(self, settings: &Settings) -> &str {
+        match self {
+            Action::Menu => &settings.menu_key,
+            Action::Zoom => &settings.zoom_key,
+            Action::Waypoint => &settings.waypoint_key,
+            Action::Navigate => &settings.navigate_key,
+        }
+    }
+
+    fn setting_mut(self, settings: &mut Settings) -> &mut String {
+        match self {
+            Action::Menu => &mut settings.menu_key,
+            Action::Zoom => &mut settings.zoom_key,
+            Action::Waypoint => &mut settings.waypoint_key,
+            Action::Navigate => &mut settings.navigate_key,
+        }
+    }
+
+    /// Records or refreshes the position with F3+C, so it cannot use F3+C's own keys.
+    fn uses_f3c(self) -> bool {
+        matches!(self, Action::Waypoint | Action::Navigate)
     }
 }
 
 /// The settings and the menu's own state.
 struct UiState {
     settings: Settings,
-    menu_key: Hotkey,
-    zoom_key: Hotkey,
-    test_text: String,
+    keys: Hotkeys,
+    /// [`FrameInput::reserved_keys`] of the current frame.
+    reserved_keys: Vec<egui::Key>,
     /// Waiting for a key for this hotkey.
     capturing: Option<Action>,
     /// Why the last captured key was not taken.
     key_note: Option<String>,
+    waypoints: WaypointMenu,
 }
 
 impl UiState {
-    fn new(settings: Settings) -> Self {
-        let (menu_key, zoom_key) = hotkeys(&settings);
+    fn new(mut settings: Settings) -> Self {
+        let keys = hotkeys(&settings);
+        // What the router uses: a key that fell back to its default must not come back when
+        // the key hiding it moves.
+        for action in Action::ALL {
+            *action.setting_mut(&mut settings) = keys.get(action).to_string();
+        }
         Self {
             settings,
-            menu_key,
-            zoom_key,
-            test_text: String::new(),
+            keys,
+            reserved_keys: Vec::new(),
             capturing: None,
             key_note: None,
-        }
-    }
-
-    fn hotkey(&self, action: Action) -> Hotkey {
-        match action {
-            Action::Menu => self.menu_key,
-            Action::Zoom => self.zoom_key,
+            waypoints: WaypointMenu::default(),
         }
     }
 
     fn set_hotkey(&mut self, action: Action, hotkey: Hotkey) {
-        match action {
-            Action::Menu => {
-                self.menu_key = hotkey;
-                self.settings.menu_key = hotkey.to_string();
-            }
-            Action::Zoom => {
-                self.zoom_key = hotkey;
-                self.settings.zoom_key = hotkey.to_string();
-            }
-        }
+        self.keys.set(action, hotkey);
+        *action.setting_mut(&mut self.settings) = hotkey.to_string();
     }
 
-    /// Assigns a captured key unless it would make the zoom unreachable: the menu hotkey is
-    /// checked first and matches with extra modifiers held.
+    /// Assigns a captured key unless another hotkey would become unreachable (the router
+    /// checks them in order and matches with extra modifiers held), or it is one of F3+C's
+    /// keys for an action that sends F3+C.
     fn assign(&mut self, action: Action, hotkey: Hotkey) {
-        let (menu, zoom) = match action {
-            Action::Menu => (hotkey, self.zoom_key),
-            Action::Zoom => (self.menu_key, hotkey),
-        };
-        let shadowed = menu.trigger == zoom.trigger
-            && (!menu.ctrl || zoom.ctrl)
-            && (!menu.shift || zoom.shift)
-            && (!menu.alt || zoom.alt);
-        if shadowed {
-            let other = match action {
-                Action::Menu => Action::Zoom,
-                Action::Zoom => Action::Menu,
-            };
+        if action.uses_f3c()
+            && self
+                .reserved_keys
+                .iter()
+                .any(|&key| hotkey.trigger == Trigger::Key(key))
+        {
+            self.key_note = Some(format!(
+                "{} は F3+C に使うキーなので使えない",
+                Hotkey::plain(hotkey.trigger).label()
+            ));
+            return;
+        }
+        // The key events would reach the game with Ctrl held (Ctrl+drop throws a whole stack).
+        if action.uses_f3c() && hotkey.ctrl {
+            self.key_note = Some(format!(
+                "Ctrl との組み合わせ（{}）は「{}」に使えない",
+                hotkey.label(),
+                action.name()
+            ));
+            return;
+        }
+        let mut keys = self.keys;
+        keys.set(action, hotkey);
+        if let Some(other) = conflict(&keys, action) {
             self.key_note = Some(format!(
                 "{} は「{}」と重なるので使えない",
                 hotkey.label(),
@@ -213,6 +395,7 @@ struct MenuActions {
     close: bool,
     capture: Option<Action>,
     cancel_capture: bool,
+    waypoint_commands: Vec<WaypointCommand>,
 }
 
 /// egui running on the agent's own GL context, drawing into the default framebuffer.
@@ -221,6 +404,7 @@ pub struct Overlay {
     painter: egui_glow::Painter,
     zoom: Zoom,
     state: UiState,
+    notices: NoticeList,
     first_time: Option<f64>,
     last_time: Option<f64>,
     frames: u64,
@@ -245,6 +429,7 @@ impl Overlay {
             painter,
             zoom,
             state: UiState::new(settings),
+            notices: NoticeList::default(),
             first_time: None,
             last_time: None,
             frames: 0,
@@ -281,6 +466,7 @@ impl Overlay {
         let input = params.input;
         let state = &mut self.state;
         let before = state.settings.clone();
+        state.reserved_keys = input.reserved_keys;
         if let Some(captured) = input.captured {
             match (captured, state.capturing.take()) {
                 (Captured::Hotkey(hotkey), Some(action)) => state.assign(action, hotkey),
@@ -290,6 +476,9 @@ impl Overlay {
         if !input.ui_open {
             state.capturing = None;
         }
+        state.waypoints.sync(input.ui_open, &input.waypoints);
+        self.notices.update(input.notices, params.time);
+        let notices = &self.notices;
         if input.zoom == ZoomView::Magnify {
             // SAFETY: the caller guarantees our context is current on the game's drawable.
             unsafe {
@@ -334,7 +523,14 @@ impl Overlay {
                 // Dim the game so it is clear the overlay has the input.
                 ui.painter()
                     .rect_filled(ui.max_rect(), 0.0, Color32::from_black_alpha(90));
-                actions = main_window(ui.ctx(), state, &info, params.status, high_res_note);
+                actions = main_window(
+                    ui.ctx(),
+                    state,
+                    &info,
+                    params.status,
+                    high_res_note,
+                    &input.waypoints,
+                );
             } else if state.settings.show_status {
                 status_window(ui.ctx(), &info, params.status);
             }
@@ -344,8 +540,9 @@ impl Overlay {
                 ZoomView::HighRes { factor } => zoom_badge(ui.ctx(), factor),
             }
             if show_hint {
-                hint(ui.ctx(), state.menu_key);
+                hint(ui.ctx(), state.keys.menu);
             }
+            draw_notices(ui.ctx(), notices);
             if let Some(pos) = input.software_cursor {
                 draw_cursor(ui.ctx(), pos);
             }
@@ -365,6 +562,7 @@ impl Overlay {
         let mut out = FrameOutput {
             close_ui: actions.close,
             cancel_capture: actions.cancel_capture,
+            waypoint_commands: actions.waypoint_commands,
             ..Default::default()
         };
         if let Some(action) = actions.capture {
@@ -480,6 +678,7 @@ fn main_window(
     info: &FrameInfo,
     status: &[StatusLine],
     high_res_note: Option<&str>,
+    waypoints: &WaypointView,
 ) -> MenuActions {
     let mut actions = MenuActions::default();
     let mut open = true;
@@ -489,13 +688,13 @@ fn main_window(
         .default_pos([40.0, 40.0])
         .resizable(false)
         .show(ctx, |ui| {
-            ui.label(format!("{} か Esc で閉じる", state.menu_key.label()));
+            ui.label(format!("{} か Esc で閉じる", state.keys.menu.label()));
             ui.separator();
 
             ui.label(RichText::new("ズーム").strong());
             ui.label(format!(
                 "ゲーム中に {} を押している間、画面の中央を拡大する",
-                state.zoom_key.label()
+                state.keys.zoom.label()
             ));
             let (lo, hi) = ZOOM_FACTOR_RANGE;
             ui.add(egui::Slider::new(&mut state.settings.zoom_factor, lo..=hi).text("倍率"));
@@ -522,13 +721,13 @@ fn main_window(
                 .num_columns(2)
                 .spacing([12.0, 4.0])
                 .show(ui, |ui| {
-                    for action in [Action::Menu, Action::Zoom] {
+                    for action in Action::ALL {
                         ui.label(action.name());
                         let waiting = state.capturing == Some(action);
                         let text = if waiting {
                             "キーを押す…".to_owned()
                         } else {
-                            state.hotkey(action).label()
+                            state.keys.get(action).label()
                         };
                         if ui.add(egui::Button::new(text).selected(waiting)).clicked() {
                             if waiting {
@@ -552,15 +751,18 @@ fn main_window(
                 state.capturing = None;
                 actions.cancel_capture = true;
                 state.key_note = None;
-                state.set_hotkey(Action::Menu, Hotkey::DEFAULT_MENU);
-                state.set_hotkey(Action::Zoom, Hotkey::DEFAULT_ZOOM);
+                for action in Action::ALL {
+                    state.set_hotkey(action, action.default_hotkey());
+                }
             }
             ui.separator();
 
-            ui.label(RichText::new("入力のテスト").strong());
-            ui.add(
-                egui::TextEdit::singleline(&mut state.test_text)
-                    .hint_text("日本語を入力できるか試す"),
+            waypoint_section(
+                ui,
+                &mut state.waypoints,
+                waypoints,
+                &state.keys,
+                &mut actions.waypoint_commands,
             );
             ui.separator();
 
@@ -684,8 +886,13 @@ mod tests {
         let mut state = state();
         state.assign(Action::Zoom, Hotkey::parse("C").unwrap());
         assert_eq!(state.settings.zoom_key, "C");
-        assert_eq!(state.zoom_key, Hotkey::parse("C").unwrap());
+        assert_eq!(state.keys.zoom, Hotkey::parse("C").unwrap());
         assert_eq!(state.key_note, None);
+        state.assign(Action::Waypoint, Hotkey::parse("Mouse4").unwrap());
+        assert_eq!(state.settings.waypoint_key, "Mouse4");
+        state.assign(Action::Navigate, Hotkey::parse("Shift+N").unwrap());
+        assert_eq!(state.settings.navigate_key, "Shift+N");
+        assert_eq!(state.keys.navigate, Hotkey::parse("Shift+N").unwrap());
     }
 
     #[test]
@@ -704,15 +911,151 @@ mod tests {
         assert_eq!(state.key_note, None);
     }
 
+    fn refused(state: &mut UiState, action: Action, text: &str) -> Option<String> {
+        let before = state.keys;
+        state.assign(action, Hotkey::parse(text).unwrap());
+        assert_eq!(state.keys, before, "{action:?} on {text}");
+        state.key_note.take()
+    }
+
+    #[test]
+    fn waypoint_hotkeys_must_not_hide_or_be_hidden() {
+        let mut state = state();
+        // Checked before the zoom: J would take every zoom press, with or without Ctrl.
+        let note = refused(&mut state, Action::Zoom, "J");
+        assert_eq!(
+            note.as_deref(),
+            Some("J は「ウェイポイントを記録」と重なるので使えない")
+        );
+        refused(&mut state, Action::Zoom, "Ctrl+K");
+        refused(&mut state, Action::Waypoint, "Z");
+        refused(&mut state, Action::Navigate, "Z");
+        // The menu comes first (on a key without Ctrl, which these two cannot use).
+        state.assign(Action::Menu, Hotkey::parse("Alt+I").unwrap());
+        let note = refused(&mut state, Action::Waypoint, "Alt+I");
+        assert_eq!(
+            note.as_deref(),
+            Some("Alt+I は「メニューを開く」と重なるので使えない")
+        );
+        refused(&mut state, Action::Navigate, "Alt+Shift+I");
+        state.assign(Action::Menu, Hotkey::DEFAULT_MENU);
+        let note = refused(&mut state, Action::Menu, "K");
+        assert_eq!(
+            note.as_deref(),
+            Some("K は「現在地を更新」と重なるので使えない")
+        );
+        // The waypoint key comes before the navigate key.
+        refused(&mut state, Action::Navigate, "J");
+        refused(&mut state, Action::Waypoint, "K");
+        refused(&mut state, Action::Navigate, "Alt+J");
+        // Needing more modifiers than the earlier key is fine.
+        state.assign(Action::Waypoint, Hotkey::parse("Alt+K").unwrap());
+        assert_eq!(state.key_note, None);
+        assert_eq!(state.settings.waypoint_key, "Alt+K");
+        state.assign(Action::Zoom, Hotkey::parse("J").unwrap());
+        assert_eq!(state.settings.zoom_key, "J");
+        state.assign(Action::Waypoint, Hotkey::parse("Shift+J").unwrap());
+        assert_eq!(state.settings.waypoint_key, "Shift+J");
+        // Mouse buttons follow the same rule.
+        state.assign(Action::Menu, Hotkey::parse("Mouse5").unwrap());
+        refused(&mut state, Action::Navigate, "Mouse5");
+        state.assign(Action::Navigate, Hotkey::parse("Shift+Mouse5").unwrap());
+        assert_eq!(
+            state.key_note.as_deref(),
+            Some("Shift+マウスのボタン5 は「メニューを開く」と重なるので使えない")
+        );
+    }
+
+    #[test]
+    fn f3c_hotkeys_cannot_need_ctrl() {
+        let mut state = state();
+        let note = refused(&mut state, Action::Waypoint, "Ctrl+L");
+        assert_eq!(
+            note.as_deref(),
+            Some("Ctrl との組み合わせ（Ctrl+L）は「ウェイポイントを記録」に使えない")
+        );
+        refused(&mut state, Action::Navigate, "Ctrl+Shift+L");
+        // Other hotkeys may.
+        state.assign(Action::Zoom, Hotkey::parse("Ctrl+L").unwrap());
+        assert_eq!(state.settings.zoom_key, "Ctrl+L");
+        // A saved one falls back to the default.
+        let settings = Settings {
+            waypoint_key: "Ctrl+L".into(),
+            ..Settings::default()
+        };
+        assert_eq!(hotkeys(&settings).waypoint, Hotkey::DEFAULT_WAYPOINT);
+    }
+
+    #[test]
+    fn the_menu_and_the_router_agree_on_fallen_back_keys() {
+        // The zoom on J falls back to Z; moving the waypoint key off J must not bring J back.
+        let mut state = UiState::new(Settings {
+            zoom_key: "J".into(),
+            ..Settings::default()
+        });
+        assert_eq!(state.settings.zoom_key, "Z");
+        state.assign(Action::Waypoint, Hotkey::parse("L").unwrap());
+        assert_eq!(state.key_note, None);
+        assert_eq!(hotkeys(&state.settings), state.keys);
+        assert_eq!(state.keys.zoom, Hotkey::DEFAULT_ZOOM);
+    }
+
+    #[test]
+    fn f3c_keys_are_refused_for_the_waypoint_hotkeys() {
+        let mut state = state();
+        state.reserved_keys = vec![egui::Key::F3, egui::Key::C];
+        let note = refused(&mut state, Action::Waypoint, "Ctrl+C");
+        assert_eq!(note.as_deref(), Some("C は F3+C に使うキーなので使えない"));
+        refused(&mut state, Action::Navigate, "F3");
+        // The zoom may: the router hands its key to the game while F3 is held.
+        state.assign(Action::Zoom, Hotkey::parse("C").unwrap());
+        assert_eq!(state.settings.zoom_key, "C");
+    }
+
     #[test]
     fn unreadable_hotkeys_fall_back_to_the_defaults() {
+        assert_eq!(hotkeys(&Settings::default()), Hotkeys::DEFAULT);
         let settings = Settings {
             menu_key: "Nope".into(),
             zoom_key: "Mouse4".into(),
+            waypoint_key: "".into(),
+            navigate_key: "Shift+L".into(),
             ..Settings::default()
         };
-        let (menu, zoom) = hotkeys(&settings);
-        assert_eq!(menu, Hotkey::DEFAULT_MENU);
-        assert_eq!(zoom.to_string(), "Mouse4");
+        let keys = hotkeys(&settings);
+        assert_eq!(keys.menu, Hotkey::DEFAULT_MENU);
+        assert_eq!(keys.zoom.to_string(), "Mouse4");
+        assert_eq!(keys.waypoint, Hotkey::DEFAULT_WAYPOINT);
+        assert_eq!(keys.navigate.to_string(), "Shift+L");
+    }
+
+    #[test]
+    fn saved_hotkeys_that_would_be_hidden_fall_back_to_the_defaults() {
+        // An older settings file with the zoom on J, now the waypoint key's default.
+        let settings = Settings {
+            zoom_key: "J".into(),
+            ..Settings::default()
+        };
+        assert_eq!(hotkeys(&settings).zoom, Hotkey::DEFAULT_ZOOM);
+        let settings = Settings {
+            menu_key: "Alt+I".into(),
+            waypoint_key: "Alt+I".into(),
+            navigate_key: "J".into(),
+            ..Settings::default()
+        };
+        let keys = hotkeys(&settings);
+        // The waypoint key went back to J, which then hides the navigate key.
+        assert_eq!(keys.waypoint, Hotkey::DEFAULT_WAYPOINT);
+        assert_eq!(keys.navigate, Hotkey::DEFAULT_NAVIGATE);
+        // A menu on J (allowed before there was a waypoint key) hides the default too: the
+        // default is kept (and logged) and the menu shows both on J.
+        let settings = Settings {
+            menu_key: "J".into(),
+            ..Settings::default()
+        };
+        let keys = hotkeys(&settings);
+        assert_eq!(keys.menu.to_string(), "J");
+        assert_eq!(keys.waypoint, Hotkey::DEFAULT_WAYPOINT);
+        assert_eq!(keys.zoom, Hotkey::DEFAULT_ZOOM);
     }
 }

@@ -31,6 +31,8 @@ impl Hotkey {
         alt: false,
     };
     pub const DEFAULT_ZOOM: Hotkey = Hotkey::plain(Trigger::Key(Key::Z));
+    pub const DEFAULT_WAYPOINT: Hotkey = Hotkey::plain(Trigger::Key(Key::J));
+    pub const DEFAULT_NAVIGATE: Hotkey = Hotkey::plain(Trigger::Key(Key::K));
 
     pub const fn plain(trigger: Trigger) -> Self {
         Self {
@@ -182,6 +184,8 @@ mod tests {
         assert_eq!(Hotkey::parse("Ctrl+I"), Some(Hotkey::DEFAULT_MENU));
         assert_eq!(Hotkey::DEFAULT_ZOOM.to_string(), "Z");
         assert_eq!(Hotkey::parse("Z"), Some(Hotkey::DEFAULT_ZOOM));
+        assert_eq!(Hotkey::parse("J"), Some(Hotkey::DEFAULT_WAYPOINT));
+        assert_eq!(Hotkey::parse("K"), Some(Hotkey::DEFAULT_NAVIGATE));
     }
 
     #[test]

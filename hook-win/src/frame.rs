@@ -256,9 +256,8 @@ impl Runtime {
         };
         log::info!("overlay: initialized");
         {
-            let (menu, zoom) = hotkeys(&settings);
             let mut router = input::router();
-            router.set_hotkeys(menu, zoom);
+            router.set_hotkeys(hotkeys(&settings));
             router.set_pointer_speed(pointer_speed(ws, window));
         }
 
@@ -363,6 +362,7 @@ impl Runtime {
                     software_cursor: router.software_cursor(),
                     captured: router.take_captured(),
                     high_res_note,
+                    ..Default::default()
                 }
             };
             let output = self.overlay.render(FrameParams {
@@ -384,8 +384,7 @@ impl Runtime {
                     router.cancel_capture();
                 }
                 if let Some(settings) = &output.settings {
-                    let (menu, zoom) = hotkeys(settings);
-                    router.set_hotkeys(menu, zoom);
+                    router.set_hotkeys(hotkeys(settings));
                 }
             }
             if let Some(settings) = output.settings {

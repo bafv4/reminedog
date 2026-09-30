@@ -9,14 +9,19 @@ mod hotkey;
 mod input;
 mod overlay;
 mod pointer;
+mod waypoints;
 mod zoom;
 
 pub use egui::{Key, Modifiers, PointerButton};
 pub use hotkey::{Hotkey, Trigger};
-pub use input::{Captured, InputRouter, Route};
+pub use input::{Captured, HotkeyAction, InputRouter, Route};
 pub use overlay::{
-    FontSource, FrameInput, FrameOutput, FrameParams, Overlay, OverlayError, StatusLine, ZoomView,
-    gl_summary, hotkeys,
+    FontSource, FrameInput, FrameOutput, FrameParams, Hotkeys, Overlay, OverlayError, StatusLine,
+    ZoomView, gl_summary, hotkeys,
 };
 pub use pointer::{PointerSpeed, WINDOWS_DEFAULT_CURVE, parse_windows_curve};
+pub use waypoints::{
+    Notice, WaypointCommand, WaypointView, WorldLabel, cardinal_name, dimension_label,
+    format_distance, format_xyz, navigation_text, row_guidance,
+};
 pub use zoom::{middle_row, tall_size};
