@@ -121,6 +121,33 @@ pub fn convert_xz(x: f64, z: f64, from_dim: &str, to_dim: &str) -> Option<(f64, 
     }
 }
 
+/// How to reach a waypoint from the player's location.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Guide {
+    /// Same dimension, or converted between the overworld and the nether (`converted` = the
+    /// target's x,z in the player's dimension).
+    Bearing {
+        bearing: Bearing,
+        converted: Option<(f64, f64)>,
+    },
+    /// The waypoint is in a dimension that has no coordinate conversion to the player's.
+    OtherDimension,
+}
+
+/// Where the waypoint at `to` (`[x, y, z]` in `to_dimension`) lies from the player. A waypoint
+/// in the other of the overworld and the nether is converted into the player's dimension
+/// ([`convert_xz`]); Y is not converted.
+pub fn guide(from: &Location, to_dimension: &str, to: [f64; 3]) -> Guide {
+    let here = from.dimension_or_overworld();
+    match convert_xz(to[0], to[2], to_dimension, here) {
+        Some((x, z)) => Guide::Bearing {
+            bearing: bearing(from, [x, to[1], z]),
+            converted: (with_namespace(to_dimension) != with_namespace(here)).then_some((x, z)),
+        },
+        None => Guide::OtherDimension,
+    }
+}
+
 fn with_namespace(id: &str) -> Cow<'_, str> {
     if id.contains(':') {
         Cow::Borrowed(id)
@@ -157,6 +184,7 @@ fn wrap_degrees_f64(a: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::location::THE_END;
 
     fn at(x: f64, y: f64, z: f64, yaw: f32) -> Location {
         Location {
@@ -378,5 +406,96 @@ mod tests {
         assert_eq!(convert_xz(1.0, 2.0, OVERWORLD, "minecraft:the_end"), None);
         assert_eq!(convert_xz(1.0, 2.0, "minecraft:the_end", THE_NETHER), None);
         assert_eq!(convert_xz(1.0, 2.0, "mod:dim", OVERWORLD), None);
+    }
+
+    fn in_dimension(dimension: Option<&str>, x: f64, y: f64, z: f64, yaw: f32) -> Location {
+        Location {
+            dimension: dimension.map(str::to_owned),
+            ..at(x, y, z, yaw)
+        }
+    }
+
+    #[test]
+    fn guide_in_the_same_dimension() {
+        let player = at(0.0, 64.0, 0.0, 0.0);
+        assert_eq!(
+            guide(&player, OVERWORLD, [30.0, 70.0, 40.0]),
+            Guide::Bearing {
+                bearing: bearing(&player, [30.0, 70.0, 40.0]),
+                converted: None,
+            }
+        );
+        // Ids without a namespace, and F3+C's old form without a dimension (the overworld).
+        let old_form = in_dimension(None, 0.0, 64.0, 0.0, 0.0);
+        assert_eq!(
+            guide(&old_form, "overworld", [3.0, 64.0, 4.0]),
+            Guide::Bearing {
+                bearing: bearing(&old_form, [3.0, 64.0, 4.0]),
+                converted: None,
+            }
+        );
+        let end = in_dimension(Some(THE_END), 0.0, 64.0, 0.0, 0.0);
+        assert!(matches!(
+            guide(&end, "the_end", [0.0, 64.0, 5.0]),
+            Guide::Bearing {
+                converted: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn guide_converts_between_overworld_and_nether() {
+        // In the nether, a waypoint at overworld (800, 64, -80) is at (100, -10).
+        let player = in_dimension(Some(THE_NETHER), 100.0, 40.0, 0.0, 0.0);
+        let Guide::Bearing {
+            bearing: b,
+            converted,
+        } = guide(&player, OVERWORLD, [800.0, 64.0, -80.0])
+        else {
+            panic!("expected a bearing");
+        };
+        assert_eq!(converted, Some((100.0, -10.0)));
+        assert_eq!(b, bearing(&player, [100.0, 64.0, -10.0]));
+        assert_eq!(b.horizontal_distance, 10.0);
+        assert_eq!(b.cardinal, Cardinal::N);
+        // Y is not converted.
+        assert_eq!(b.dy, 24.0);
+
+        // In the overworld, a nether waypoint is multiplied by 8.
+        let player = at(0.0, 64.0, 0.0, 0.0);
+        let Guide::Bearing {
+            bearing: b,
+            converted,
+        } = guide(&player, THE_NETHER, [-2.0, 100.0, 1.5])
+        else {
+            panic!("expected a bearing");
+        };
+        assert_eq!(converted, Some((-16.0, 12.0)));
+        assert_eq!(b.horizontal_distance, 20.0);
+        assert_eq!(b.dy, 36.0);
+    }
+
+    #[test]
+    fn guide_to_other_dimensions() {
+        let overworld = at(0.0, 64.0, 0.0, 0.0);
+        assert_eq!(
+            guide(&overworld, THE_END, [0.0, 64.0, 0.0]),
+            Guide::OtherDimension
+        );
+        assert_eq!(
+            guide(&overworld, "mod:dim", [0.0, 64.0, 0.0]),
+            Guide::OtherDimension
+        );
+        let end = in_dimension(Some(THE_END), 0.0, 64.0, 0.0, 0.0);
+        assert_eq!(
+            guide(&end, OVERWORLD, [0.0, 64.0, 0.0]),
+            Guide::OtherDimension
+        );
+        let nether = in_dimension(Some(THE_NETHER), 0.0, 64.0, 0.0, 0.0);
+        assert_eq!(
+            guide(&nether, THE_END, [0.0, 64.0, 0.0]),
+            Guide::OtherDimension
+        );
     }
 }

@@ -29,6 +29,10 @@ pub struct Settings {
     pub zoom_smooth: bool,
     /// Shows the status window while the menu is closed.
     pub show_status: bool,
+    /// Records a waypoint at the player's position (through F3+C).
+    pub waypoint_key: String,
+    /// Refreshes the player's position and shows the way to the selected waypoint.
+    pub navigate_key: String,
 }
 
 impl Default for Settings {
@@ -40,6 +44,8 @@ impl Default for Settings {
             zoom_high_res: true,
             zoom_smooth: true,
             show_status: false,
+            waypoint_key: "J".into(),
+            navigate_key: "K".into(),
         }
     }
 }
@@ -138,6 +144,8 @@ mod tests {
             zoom_high_res: false,
             zoom_smooth: false,
             show_status: true,
+            waypoint_key: "Ctrl+J".into(),
+            navigate_key: "Mouse4".into(),
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
@@ -152,6 +160,9 @@ mod tests {
         let settings = Settings::load(&path);
         assert_eq!(settings.zoom_key, "C");
         assert_eq!(settings.menu_key, "Ctrl+I");
+        // Files from before the waypoint keys existed get their defaults.
+        assert_eq!(settings.waypoint_key, "J");
+        assert_eq!(settings.navigate_key, "K");
     }
 
     #[test]
