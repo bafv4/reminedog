@@ -9,6 +9,8 @@ mod hotkey;
 mod input;
 mod overlay;
 mod pointer;
+mod rebind;
+mod rebinds_ui;
 mod waypoints;
 mod zoom;
 
@@ -20,6 +22,8 @@ pub use overlay::{
     ZoomView, gl_summary, hotkeys,
 };
 pub use pointer::{PointerSpeed, WINDOWS_DEFAULT_CURVE, parse_windows_curve};
+pub use rebind::{Delivery, MAX_REBINDS, Output, Phase, RebindState};
+pub use rebinds_ui::resolve;
 pub use waypoints::{
     Notice, WaypointCommand, WaypointView, WorldLabel, cardinal_name, dimension_label,
     format_distance, format_xyz, navigation_text, row_guidance, turn_to,

@@ -8,12 +8,13 @@ use egui::{
 };
 use glow::HasContext as _;
 
-use reminedog_core::Settings;
 use reminedog_core::settings::ZOOM_FACTOR_RANGE;
+use reminedog_core::{InputId, Settings, input_label};
 
 use crate::font_metrics;
-use crate::hotkey::{Hotkey, Trigger};
+use crate::hotkey::{Hotkey, Trigger, input_trigger};
 use crate::input::Captured;
+use crate::rebinds_ui::{RebindMenu, rebind_section, rule_sources};
 use crate::waypoints::{
     Notice, NoticeList, WaypointCommand, WaypointMenu, WaypointView, draw_destination,
     draw_notices, waypoint_section,
@@ -87,6 +88,14 @@ pub struct FrameInput {
     /// Minecraft's debug modifier, copy-location and crash keys, which the waypoint and
     /// navigate hotkeys must not take.
     pub reserved_keys: Vec<egui::Key>,
+    /// The game's mappings on each key, as `reminedog_core::bindings_by_key` reads them from
+    /// options.txt (mapping ids; labels work too), shown with the rebinding's outputs.
+    pub game_bindings: Vec<(InputId, Vec<String>)>,
+    /// Why some rebinding rules cannot work now (e.g. keys as sources), shown in the menu.
+    pub rebind_note: Option<String>,
+    /// Keys and buttons of the rebinding rules that the game's window library cannot report
+    /// (as a source) or give the game (as an output); the menu notes the rules that use them.
+    pub unsupported_inputs: Vec<InputId>,
 }
 
 /// What the platform hook has to act on after a frame.
@@ -96,6 +105,9 @@ pub struct FrameOutput {
     pub close_ui: bool,
     /// Capture the next key for a hotkey ([`crate::InputRouter::start_capture`]).
     pub start_capture: bool,
+    /// Capture the next key or mouse button for the rebinding
+    /// ([`crate::InputRouter::start_input_capture`]).
+    pub start_input_capture: bool,
     pub cancel_capture: bool,
     /// The settings changed: apply the hotkeys and save.
     pub settings: Option<Settings>,
@@ -124,7 +136,7 @@ impl Hotkeys {
         navigate: Hotkey::DEFAULT_NAVIGATE,
     };
 
-    fn get(&self, action: Action) -> Hotkey {
+    pub(crate) fn get(&self, action: Action) -> Hotkey {
         match action {
             Action::Menu => self.menu,
             Action::Zoom => self.zoom,
@@ -244,7 +256,7 @@ impl std::error::Error for OverlayError {}
 const HINT_SECONDS: f64 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Action {
+pub(crate) enum Action {
     Menu,
     Zoom,
     Waypoint,
@@ -253,7 +265,7 @@ enum Action {
 
 impl Action {
     /// As listed in the menu.
-    const ALL: [Action; 4] = [
+    pub(crate) const ALL: [Action; 4] = [
         Action::Menu,
         Action::Zoom,
         Action::Waypoint,
@@ -267,7 +279,7 @@ impl Action {
         Action::Zoom,
     ];
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Action::Menu => "メニューを開く",
             Action::Zoom => "ズーム",
@@ -277,7 +289,7 @@ impl Action {
     }
 
     /// For the log.
-    fn id(self) -> &'static str {
+    pub(crate) fn id(self) -> &'static str {
         match self {
             Action::Menu => "menu",
             Action::Zoom => "zoom",
@@ -325,6 +337,12 @@ struct UiState {
     /// Why the last captured key was not taken.
     key_note: Option<String>,
     waypoints: WaypointMenu,
+    rebinds: RebindMenu,
+    /// [`FrameInput::game_bindings`], [`FrameInput::rebind_note`] and
+    /// [`FrameInput::unsupported_inputs`] of the current frame.
+    game_bindings: Vec<(InputId, Vec<String>)>,
+    rebind_note: Option<String>,
+    unsupported_inputs: Vec<InputId>,
 }
 
 impl UiState {
@@ -342,6 +360,10 @@ impl UiState {
             capturing: None,
             key_note: None,
             waypoints: WaypointMenu::default(),
+            rebinds: RebindMenu::default(),
+            game_bindings: Vec::new(),
+            rebind_note: None,
+            unsupported_inputs: Vec::new(),
         }
     }
 
@@ -351,8 +373,9 @@ impl UiState {
     }
 
     /// Assigns a captured key unless another hotkey would become unreachable (the router
-    /// checks them in order and matches with extra modifiers held), or it is one of F3+C's
-    /// keys for an action that sends F3+C.
+    /// checks them in order and matches with extra modifiers held), it is one of F3+C's keys
+    /// for an action that sends F3+C, or a rebinding rule's source (the router would take its
+    /// presses for the hotkey before the rule).
     fn assign(&mut self, action: Action, hotkey: Hotkey) {
         if action.uses_f3c()
             && self
@@ -375,6 +398,12 @@ impl UiState {
             ));
             return;
         }
+        if let Some(source) =
+            rule_sources(&self.settings).find(|&id| input_trigger(id) == Some(hotkey.trigger))
+        {
+            self.key_note = Some(format!("{} は置き換えに使っている", input_label(source)));
+            return;
+        }
         let mut keys = self.keys;
         keys.set(action, hotkey);
         if let Some(other) = conflict(&keys, action) {
@@ -388,6 +417,45 @@ impl UiState {
         self.key_note = None;
         self.set_hotkey(action, hotkey);
     }
+
+    /// Puts the hotkeys back to their defaults, but as [`assign`](Self::assign) refuses a
+    /// rebinding rule's source: an action whose default is one keeps its key (with a note),
+    /// and so does one whose default would then hide it or be hidden by it.
+    fn reset_hotkeys(&mut self) {
+        let mut note = None;
+        let mut keep: Vec<Action> = Vec::new();
+        for action in Action::ALL {
+            let default = action.default_hotkey();
+            if let Some(source) =
+                rule_sources(&self.settings).find(|&id| input_trigger(id) == Some(default.trigger))
+            {
+                // Only a key that stays away from its default needs saying so.
+                if self.keys.get(action) != default {
+                    note.get_or_insert_with(|| {
+                        format!("{} は置き換えに使っている", input_label(source))
+                    });
+                }
+                keep.push(action);
+            }
+        }
+        let keys = loop {
+            let mut keys = Hotkeys::DEFAULT;
+            for &action in &keep {
+                keys.set(action, self.keys.get(action));
+            }
+            match Action::ALL
+                .into_iter()
+                .find(|&action| !keep.contains(&action) && conflict(&keys, action).is_some())
+            {
+                Some(action) => keep.push(action),
+                None => break keys,
+            }
+        };
+        for action in Action::ALL {
+            self.set_hotkey(action, keys.get(action));
+        }
+        self.key_note = note;
+    }
 }
 
 /// What the menu asked for this frame.
@@ -395,6 +463,8 @@ impl UiState {
 struct MenuActions {
     close: bool,
     capture: Option<Action>,
+    /// Capture a key or button for the rebinding.
+    capture_input: bool,
     cancel_capture: bool,
     waypoint_commands: Vec<WaypointCommand>,
 }
@@ -468,14 +538,22 @@ impl Overlay {
         let state = &mut self.state;
         let before = state.settings.clone();
         state.reserved_keys = input.reserved_keys;
+        state.game_bindings = input.game_bindings;
+        state.rebind_note = input.rebind_note;
+        state.unsupported_inputs = input.unsupported_inputs;
+        let mut capture_again = false;
         if let Some(captured) = input.captured {
-            match (captured, state.capturing.take()) {
-                (Captured::Hotkey(hotkey), Some(action)) => state.assign(action, hotkey),
-                (Captured::Cancelled, _) | (_, None) => {}
+            if let (Captured::Hotkey(hotkey), Some(action)) = (captured, state.capturing.take()) {
+                state.assign(action, hotkey);
             }
+            capture_again = state
+                .rebinds
+                .on_captured(captured, &mut state.settings, &state.keys);
         }
         if !input.ui_open {
             state.capturing = None;
+            state.rebinds.cancel();
+            capture_again = false;
         }
         state.waypoints.sync(input.ui_open, &input.waypoints);
         self.notices.update(input.notices, params.time);
@@ -572,7 +650,11 @@ impl Overlay {
         if let Some(action) = actions.capture {
             state.capturing = Some(action);
             state.key_note = None;
+            state.rebinds.cancel();
             out.start_capture = true;
+        } else if (actions.capture_input || capture_again) && state.rebinds.adding() {
+            state.capturing = None;
+            out.start_input_capture = true;
         }
         if state.settings != before {
             out.settings = Some(state.settings.clone());
@@ -686,100 +768,141 @@ fn main_window(
 ) -> MenuActions {
     let mut actions = MenuActions::default();
     let mut open = true;
+    // Room for the contents up to the screen's height (egui keeps the window inside the
+    // screen), from the screen of this frame: egui only ever lowers a size it remembers, so
+    // the menu would not grow back after the window got bigger. The window's own scrolling
+    // would fill this room, so the scroll area is ours: it shrinks to the contents and scrolls
+    // what does not fit.
+    let room = ctx.content_rect().height();
     egui::Window::new("reminedog")
         .id(egui::Id::new("reminedog-main"))
         .open(&mut open)
         .default_pos([40.0, 40.0])
         .resizable(false)
+        // Folded, the menu would keep waiting for a key for a hotkey or a rule unseen.
+        .collapsible(false)
+        .resize(move |r| r.min_height(room))
         .show(ctx, |ui| {
-            ui.label(format!("{} か Esc で閉じる", state.keys.menu.label()));
-            ui.separator();
-
-            ui.label(RichText::new("ズーム").strong());
-            ui.label(format!(
-                "ゲーム中に {} を押している間、画面の中央を拡大する",
-                state.keys.zoom.label()
-            ));
-            let (lo, hi) = ZOOM_FACTOR_RANGE;
-            ui.add(egui::Slider::new(&mut state.settings.zoom_factor, lo..=hi).text("倍率"));
-            ui.checkbox(&mut state.settings.zoom_high_res, "高精細にする")
-                .on_hover_text(
-                    "ゲームに縦長の解像度で描かせ、細かいところまで拡大する。\n\
-                     倍率に比例して重くなる",
-                );
-            if let Some(note) = high_res_note.filter(|_| state.settings.zoom_high_res) {
-                ui.label(RichText::new(note).weak());
-            }
-            // Used when high resolution is off or not available.
-            ui.add_enabled_ui(
-                !state.settings.zoom_high_res || high_res_note.is_some(),
-                |ui| {
-                    ui.checkbox(&mut state.settings.zoom_smooth, "なめらかに拡大する")
-                        .on_hover_text("高精細でないときの拡大のしかた");
-                },
-            );
-            ui.separator();
-
-            ui.label(RichText::new("キー").strong());
-            egui::Grid::new("reminedog-keys")
-                .num_columns(2)
-                .spacing([12.0, 4.0])
+            egui::ScrollArea::vertical()
+                .id_salt("reminedog-menu")
                 .show(ui, |ui| {
-                    for action in Action::ALL {
-                        ui.label(action.name());
-                        let waiting = state.capturing == Some(action);
-                        let text = if waiting {
-                            "キーを押す…".to_owned()
-                        } else {
-                            state.keys.get(action).label()
-                        };
-                        if ui.add(egui::Button::new(text).selected(waiting)).clicked() {
-                            if waiting {
-                                state.capturing = None;
-                                actions.cancel_capture = true;
-                            } else {
-                                actions.capture = Some(action);
-                            }
-                        }
-                        ui.end_row();
-                    }
+                    menu_contents(
+                        ui,
+                        state,
+                        info,
+                        status,
+                        high_res_note,
+                        waypoints,
+                        &mut actions,
+                    );
                 });
-            if state.capturing.is_some() {
-                ui.label(
-                    RichText::new("割り当てるキーかマウスのボタンを押す（Esc で取り消し）").weak(),
-                );
-            } else if let Some(note) = &state.key_note {
-                ui.label(RichText::new(note).color(ui.visuals().warn_fg_color));
-            }
-            if ui.button("キーを元に戻す").clicked() {
-                state.capturing = None;
-                actions.cancel_capture = true;
-                state.key_note = None;
-                for action in Action::ALL {
-                    state.set_hotkey(action, action.default_hotkey());
-                }
-            }
-            ui.separator();
-
-            waypoint_section(
-                ui,
-                &mut state.waypoints,
-                waypoints,
-                &state.keys,
-                &mut actions.waypoint_commands,
-            );
-            ui.separator();
-
-            egui::CollapsingHeader::new("状態")
-                .id_salt("reminedog-status-section")
-                .show(ui, |ui| status_grid(ui, info, status));
-            ui.checkbox(
-                &mut state.settings.show_status,
-                "メニューを閉じても状態を表示する",
-            );
         });
     actions.close = !open;
     actions
+}
+
+fn menu_contents(
+    ui: &mut egui::Ui,
+    state: &mut UiState,
+    info: &FrameInfo,
+    status: &[StatusLine],
+    high_res_note: Option<&str>,
+    waypoints: &WaypointView,
+    actions: &mut MenuActions,
+) {
+    ui.label(format!("{} か Esc で閉じる", state.keys.menu.label()));
+    ui.separator();
+
+    ui.label(RichText::new("ズーム").strong());
+    ui.label(format!(
+        "ゲーム中に {} を押している間、画面の中央を拡大する",
+        state.keys.zoom.label()
+    ));
+    let (lo, hi) = ZOOM_FACTOR_RANGE;
+    ui.add(egui::Slider::new(&mut state.settings.zoom_factor, lo..=hi).text("倍率"));
+    ui.checkbox(&mut state.settings.zoom_high_res, "高精細にする")
+        .on_hover_text(
+            "ゲームに縦長の解像度で描かせ、細かいところまで拡大する。\n\
+             倍率に比例して重くなる",
+        );
+    if let Some(note) = high_res_note.filter(|_| state.settings.zoom_high_res) {
+        ui.label(RichText::new(note).weak());
+    }
+    // Used when high resolution is off or not available.
+    ui.add_enabled_ui(
+        !state.settings.zoom_high_res || high_res_note.is_some(),
+        |ui| {
+            ui.checkbox(&mut state.settings.zoom_smooth, "なめらかに拡大する")
+                .on_hover_text("高精細でないときの拡大のしかた");
+        },
+    );
+    ui.separator();
+
+    ui.label(RichText::new("キー").strong());
+    egui::Grid::new("reminedog-keys")
+        .num_columns(2)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            for action in Action::ALL {
+                ui.label(action.name());
+                let waiting = state.capturing == Some(action);
+                let text = if waiting {
+                    "キーを押す…".to_owned()
+                } else {
+                    state.keys.get(action).label()
+                };
+                if ui.add(egui::Button::new(text).selected(waiting)).clicked() {
+                    if waiting {
+                        state.capturing = None;
+                        actions.cancel_capture = true;
+                    } else {
+                        actions.capture = Some(action);
+                    }
+                }
+                ui.end_row();
+            }
+        });
+    if state.capturing.is_some() {
+        ui.label(RichText::new("割り当てるキーかマウスのボタンを押す（Esc で取り消し）").weak());
+    } else if let Some(note) = &state.key_note {
+        ui.label(RichText::new(note).color(ui.visuals().warn_fg_color));
+    }
+    if ui.button("キーを元に戻す").clicked() {
+        state.capturing = None;
+        actions.cancel_capture = true;
+        state.reset_hotkeys();
+    }
+    ui.separator();
+
+    waypoint_section(
+        ui,
+        &mut state.waypoints,
+        waypoints,
+        &state.keys,
+        &mut actions.waypoint_commands,
+    );
+    ui.separator();
+
+    let rebinds = rebind_section(
+        ui,
+        &mut state.rebinds,
+        &mut state.settings,
+        &state.keys,
+        &state.game_bindings,
+        state.rebind_note.as_deref(),
+        &state.unsupported_inputs,
+    );
+    actions.capture_input |= rebinds.capture;
+    actions.cancel_capture |= rebinds.cancel_capture;
+    ui.separator();
+
+    egui::CollapsingHeader::new("状態")
+        .id_salt("reminedog-status-section")
+        .show(ui, |ui| status_grid(ui, info, status));
+    ui.checkbox(
+        &mut state.settings.show_status,
+        "メニューを閉じても状態を表示する",
+    );
 }
 
 fn zoom_badge(ctx: &egui::Context, factor: f32) {
@@ -1014,6 +1137,217 @@ mod tests {
         // The zoom may: the router hands its key to the game while F3 is held.
         state.assign(Action::Zoom, Hotkey::parse("C").unwrap());
         assert_eq!(state.settings.zoom_key, "C");
+    }
+
+    #[test]
+    fn rule_sources_are_refused_as_hotkeys() {
+        let mut state = UiState::new(Settings {
+            rebinds: vec![
+                reminedog_core::Rebind {
+                    from: "key.keyboard.keypad.1".into(),
+                    to: "key.keyboard.f3".into(),
+                },
+                reminedog_core::Rebind {
+                    from: "key.mouse.4".into(),
+                    to: "key.keyboard.c".into(),
+                },
+            ],
+            ..Settings::default()
+        });
+        // The hooks give keypad 1 as 1: a hotkey on 1 would take its presses.
+        let note = refused(&mut state, Action::Zoom, "1");
+        assert_eq!(note.as_deref(), Some("テンキー 1 は置き換えに使っている"));
+        let note = refused(&mut state, Action::Waypoint, "Shift+Mouse4");
+        assert_eq!(
+            note.as_deref(),
+            Some("マウスのボタン4 は置き換えに使っている")
+        );
+        state.assign(Action::Zoom, Hotkey::parse("Mouse5").unwrap());
+        assert_eq!(state.settings.zoom_key, "Mouse5");
+    }
+
+    /// The menu's window after a few frames on a screen of `size` points.
+    fn menu_rect(size: egui::Vec2, state: &mut UiState, waypoints: &WaypointView) -> Rect {
+        menu_rect_in(&egui::Context::default(), size, state, waypoints)
+    }
+
+    /// [`menu_rect`] in `ctx`, which remembers the earlier frames.
+    fn menu_rect_in(
+        ctx: &egui::Context,
+        size: egui::Vec2,
+        state: &mut UiState,
+        waypoints: &WaypointView,
+    ) -> Rect {
+        let info = FrameInfo {
+            frames: 1,
+            fps: 60.0,
+            size: [size.x as u32, size.y as u32],
+            ppp: 1.0,
+        };
+        for _ in 0..4 {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(raw, |ui| {
+                main_window(ui.ctx(), state, &info, &[], None, waypoints);
+            });
+            output.textures_delta.clear();
+        }
+        ctx.memory(|m| m.area_rect(egui::Id::new("reminedog-main")))
+            .expect("the menu was shown")
+    }
+
+    fn many_waypoints() -> WaypointView {
+        WaypointView {
+            world: crate::WorldLabel::Singleplayer("w".into()),
+            waypoints: (0..20)
+                .map(|id| reminedog_core::Waypoint {
+                    id,
+                    name: format!("地点 {id}"),
+                    dimension: "minecraft:overworld".into(),
+                    x: 0.0,
+                    y: 64.0,
+                    z: 0.0,
+                    created_unix: 0,
+                })
+                .collect(),
+            playing: true,
+            ..WaypointView::default()
+        }
+    }
+
+    #[test]
+    fn the_menu_scrolls_inside_a_small_window() {
+        let waypoints = many_waypoints();
+        let mut state = state();
+        // Minecraft's default 854×480, at a UI scale of 1.5 and 1.
+        for small in [vec2(854.0 / 1.5, 480.0 / 1.5), vec2(854.0, 480.0)] {
+            let rect = menu_rect(small, &mut state, &waypoints);
+            let screen = Rect::from_min_size(Pos2::ZERO, small);
+            assert!(screen.contains_rect(rect), "{rect:?} on {small:?}");
+            assert!(rect.height() > small.y - 20.0, "uses the height: {rect:?}");
+        }
+        // On a large screen the window is as tall as its contents.
+        let large = vec2(1920.0, 1080.0);
+        let rect = menu_rect(large, &mut state, &waypoints);
+        assert!(rect.height() < 900.0, "{rect:?}");
+        assert_eq!(rect.min, egui::pos2(40.0, 40.0));
+    }
+
+    #[test]
+    fn the_menu_grows_back_when_the_screen_gets_bigger() {
+        let waypoints = many_waypoints();
+        let mut state = state();
+        let large = vec2(1920.0, 1080.0);
+        let fresh = menu_rect(large, &mut state, &waypoints);
+        // Opened in a small window, which is then maximized (and back).
+        let ctx = egui::Context::default();
+        let small = vec2(854.0, 480.0);
+        let rect = menu_rect_in(&ctx, small, &mut state, &waypoints);
+        assert!(rect.height() <= small.y, "{rect:?}");
+        let rect = menu_rect_in(&ctx, large, &mut state, &waypoints);
+        assert!(rect.height() > small.y, "{rect:?}");
+        assert_eq!(rect.height(), fresh.height(), "as tall as its contents");
+        let rect = menu_rect_in(&ctx, small, &mut state, &waypoints);
+        assert!(rect.height() <= small.y, "{rect:?}");
+    }
+
+    #[test]
+    fn the_menu_cannot_be_folded() {
+        let ctx = egui::Context::default();
+        let mut state = state();
+        let rect = menu_rect_in(&ctx, vec2(1920.0, 1080.0), &mut state, &many_waypoints());
+        // A double click on the title bar folds a collapsible window.
+        let title = rect.min + vec2(rect.width() / 2.0, 12.0);
+        let click = |pressed| egui::Event::PointerButton {
+            pos: title,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let info = FrameInfo {
+            frames: 1,
+            fps: 60.0,
+            size: [1920, 1080],
+            ppp: 1.0,
+        };
+        for events in [
+            vec![egui::Event::PointerMoved(title), click(true), click(false)],
+            vec![click(true), click(false)],
+            vec![],
+            vec![],
+        ] {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1080.0))),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(raw, |ui| {
+                main_window(ui.ctx(), &mut state, &info, &[], None, &many_waypoints());
+            });
+            output.textures_delta.clear();
+        }
+        let after = ctx
+            .memory(|m| m.area_rect(egui::Id::new("reminedog-main")))
+            .expect("shown");
+        assert_eq!(after.height(), rect.height());
+    }
+
+    fn rule(from: &str, to: &str) -> reminedog_core::Rebind {
+        reminedog_core::Rebind {
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    #[test]
+    fn resetting_the_hotkeys_keeps_those_on_rule_sources() {
+        let mut state = state();
+        state.assign(Action::Zoom, Hotkey::parse("Mouse5").unwrap());
+        state.assign(Action::Menu, Hotkey::parse("F6").unwrap());
+        // Z is free now: a rule may use it.
+        state
+            .settings
+            .rebinds
+            .push(rule("key.keyboard.z", "key.keyboard.left.shift"));
+        state.reset_hotkeys();
+        assert_eq!(state.settings.zoom_key, "Mouse5");
+        assert_eq!(state.settings.menu_key, "Ctrl+I");
+        assert_eq!(state.key_note.as_deref(), Some("Z は置き換えに使っている"));
+        assert_eq!(hotkeys(&state.settings), state.keys);
+        // Nothing in the way: all back, no note.
+        state.settings.rebinds.clear();
+        state.reset_hotkeys();
+        assert_eq!(state.keys, Hotkeys::DEFAULT);
+        assert_eq!(state.key_note, None);
+        // A rule on the default's key that changes nothing (the menu is on Ctrl+I already):
+        // no note either.
+        state
+            .settings
+            .rebinds
+            .push(rule("key.keyboard.i", "key.keyboard.o"));
+        state.reset_hotkeys();
+        assert_eq!(state.keys, Hotkeys::DEFAULT);
+        assert_eq!(state.key_note, None);
+    }
+
+    #[test]
+    fn resetting_the_hotkeys_keeps_the_ones_a_kept_key_would_hide() {
+        let mut state = state();
+        state.assign(Action::Waypoint, Hotkey::parse("M").unwrap());
+        state.assign(Action::Zoom, Hotkey::parse("J").unwrap());
+        state
+            .settings
+            .rebinds
+            .push(rule("key.keyboard.z", "key.keyboard.c"));
+        state.reset_hotkeys();
+        // The zoom stays on J, so the waypoint key cannot go back to J.
+        assert_eq!(state.settings.zoom_key, "J");
+        assert_eq!(state.settings.waypoint_key, "M");
+        assert_eq!(state.settings.navigate_key, "K");
+        assert_eq!(state.key_note.as_deref(), Some("Z は置き換えに使っている"));
+        assert_eq!(hotkeys(&state.settings), state.keys);
     }
 
     #[test]

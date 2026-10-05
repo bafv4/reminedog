@@ -6,6 +6,7 @@
 use std::fmt;
 
 use egui::{Key, Modifiers, PointerButton};
+use reminedog_core::InputId;
 
 /// What is pressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +164,126 @@ fn trigger_from_name(name: &str) -> Option<Trigger> {
     (!reserved).then_some(Trigger::Key(key))
 }
 
+/// The trigger a key or mouse button sets off, as the platform hooks name keys with a US
+/// layout: the keypad's digits, Enter, `+`, `-`, `.`, `/` and `=` are the main keys' (so a
+/// hotkey on 1 takes keypad 1 too). `None` for keys no hotkey can be on.
+pub(crate) fn input_trigger(id: InputId) -> Option<Trigger> {
+    const LETTERS: [Key; 26] = [
+        Key::A,
+        Key::B,
+        Key::C,
+        Key::D,
+        Key::E,
+        Key::F,
+        Key::G,
+        Key::H,
+        Key::I,
+        Key::J,
+        Key::K,
+        Key::L,
+        Key::M,
+        Key::N,
+        Key::O,
+        Key::P,
+        Key::Q,
+        Key::R,
+        Key::S,
+        Key::T,
+        Key::U,
+        Key::V,
+        Key::W,
+        Key::X,
+        Key::Y,
+        Key::Z,
+    ];
+    const DIGITS: [Key; 10] = [
+        Key::Num0,
+        Key::Num1,
+        Key::Num2,
+        Key::Num3,
+        Key::Num4,
+        Key::Num5,
+        Key::Num6,
+        Key::Num7,
+        Key::Num8,
+        Key::Num9,
+    ];
+    const FUNCTION_KEYS: [Key; 24] = [
+        Key::F1,
+        Key::F2,
+        Key::F3,
+        Key::F4,
+        Key::F5,
+        Key::F6,
+        Key::F7,
+        Key::F8,
+        Key::F9,
+        Key::F10,
+        Key::F11,
+        Key::F12,
+        Key::F13,
+        Key::F14,
+        Key::F15,
+        Key::F16,
+        Key::F17,
+        Key::F18,
+        Key::F19,
+        Key::F20,
+        Key::F21,
+        Key::F22,
+        Key::F23,
+        Key::F24,
+    ];
+    let sc = match id {
+        InputId::Key(sc) => usize::from(sc),
+        InputId::Mouse(button) => {
+            return match button {
+                2 => Some(Trigger::Mouse(PointerButton::Middle)),
+                4 => Some(Trigger::Mouse(PointerButton::Extra1)),
+                5 => Some(Trigger::Mouse(PointerButton::Extra2)),
+                _ => None,
+            };
+        }
+    };
+    let key = match sc {
+        4..=29 => LETTERS[sc - 4],
+        30..=38 => DIGITS[sc - 29],
+        39 | 98 => Key::Num0,
+        89..=97 => DIGITS[sc - 88],
+        58..=69 => FUNCTION_KEYS[sc - 58],
+        104..=115 => FUNCTION_KEYS[sc - 92],
+        40 | 88 => Key::Enter,
+        41 => Key::Escape,
+        42 => Key::Backspace,
+        43 => Key::Tab,
+        44 => Key::Space,
+        45 | 86 => Key::Minus,
+        46 | 103 => Key::Equals,
+        47 => Key::OpenBracket,
+        48 => Key::CloseBracket,
+        49 => Key::Backslash,
+        51 => Key::Semicolon,
+        52 => Key::Quote,
+        53 => Key::Backtick,
+        54 => Key::Comma,
+        55 | 99 => Key::Period,
+        56 | 84 => Key::Slash,
+        73 => Key::Insert,
+        74 => Key::Home,
+        75 => Key::PageUp,
+        76 => Key::Delete,
+        77 => Key::End,
+        78 => Key::PageDown,
+        79 => Key::ArrowRight,
+        80 => Key::ArrowLeft,
+        81 => Key::ArrowDown,
+        82 => Key::ArrowUp,
+        87 => Key::Plus,
+        _ => return None,
+    };
+    Some(Trigger::Key(key))
+}
+
 /// Whether a key or button can be assigned (for key capture).
 pub fn assignable(trigger: Trigger) -> bool {
     match trigger {
@@ -249,6 +370,38 @@ mod tests {
         assert!(menu.matches_key(Some(Key::I), Modifiers::CTRL));
         assert!(!menu.matches_key(Some(Key::I), Modifiers::NONE));
         assert!(!menu.matches_key(Some(Key::I), Modifiers::SHIFT));
+    }
+
+    #[test]
+    fn triggers_of_keys_and_buttons() {
+        let trigger = input_trigger;
+        assert_eq!(trigger(InputId::Key(4)), Some(Trigger::Key(Key::A)));
+        assert_eq!(trigger(InputId::Key(29)), Some(Trigger::Key(Key::Z)));
+        assert_eq!(trigger(InputId::Key(30)), Some(Trigger::Key(Key::Num1)));
+        assert_eq!(trigger(InputId::Key(39)), Some(Trigger::Key(Key::Num0)));
+        // The keypad's digits are the main digits' to the hooks.
+        assert_eq!(trigger(InputId::Key(89)), Some(Trigger::Key(Key::Num1)));
+        assert_eq!(trigger(InputId::Key(98)), Some(Trigger::Key(Key::Num0)));
+        assert_eq!(trigger(InputId::Key(88)), Some(Trigger::Key(Key::Enter)));
+        assert_eq!(trigger(InputId::Key(60)), Some(Trigger::Key(Key::F3)));
+        assert_eq!(trigger(InputId::Key(115)), Some(Trigger::Key(Key::F24)));
+        assert_eq!(
+            trigger(InputId::Key(80)),
+            Some(Trigger::Key(Key::ArrowLeft))
+        );
+        // Modifier keys and keys the hooks have no egui name for.
+        assert_eq!(trigger(InputId::Key(224)), None);
+        assert_eq!(trigger(InputId::Key(57)), None);
+        assert_eq!(trigger(InputId::Key(135)), None);
+        assert_eq!(
+            trigger(InputId::Mouse(4)),
+            Some(Trigger::Mouse(PointerButton::Extra1))
+        );
+        assert_eq!(
+            trigger(InputId::Mouse(2)),
+            Some(Trigger::Mouse(PointerButton::Middle))
+        );
+        assert_eq!(trigger(InputId::Mouse(1)), None, "the UI's own buttons");
     }
 
     #[test]
