@@ -1,21 +1,23 @@
 //! Waypoints on the swap path: the world the player is in (latest.log and the saves folder),
-//! Minecraft's debug key bindings (options.txt), the hotkeys and menu commands that become
-//! F3+C requests ([`f3c`]), and the positions and failures that come back as waypoints and
-//! notices.
+//! Minecraft's key bindings (options.txt: the debug keys, and every key's mappings for the
+//! menu's key rebinding), the hotkeys and menu commands that become F3+C requests ([`f3c`]), and
+//! the positions and failures that come back as waypoints and notices.
 //!
 //! The state is a static, so it outlives the overlay's `Runtime` (rebuilt when the game's
 //! device context changes). Only the frame code uses it, inside the swap detour. With it
 //! locked the router and the f3c state may be locked, never the other way round, and no game
 //! code runs.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use reminedog_core::{
-    DebugKeys, Location, UNBOUND, Waypoint, WaypointBook, WorldId, WorldState, WorldWatcher,
-    glfw_key, key_label, load_debug_keys, mapping_label, sdl_scancode, unix_now,
+    DebugKeys, InputId, Location, Naming, UNBOUND, Waypoint, WaypointBook, WorldId, WorldState,
+    WorldWatcher, bindings_by_key, glfw_key, glfw_key_of, input_by_name, input_label, key_label,
+    mapping_label, options_path, parse_debug_keys, unix_now,
 };
 use reminedog_render::{
     HotkeyAction, Key, Notice, WaypointCommand, WaypointView, WorldLabel, format_xyz,
@@ -27,7 +29,7 @@ use crate::input;
 
 /// How often latest.log is read for world changes.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// How often options.txt is read for the debug key bindings.
+/// How often options.txt is read for the key bindings.
 const KEYS_INTERVAL: Duration = Duration::from_secs(5);
 /// How often waypoints an earlier save failed to write are saved again.
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
@@ -54,8 +56,9 @@ pub struct Frame {
 
 /// Every frame of the overlay's window, before the overlay renders: follows the world and the
 /// key bindings, turns F3+C outcomes into waypoints and notices, and the hotkeys pressed since
-/// the last frame into requests. `playing`: the game has captured the cursor.
-pub fn before_frame(game_dir: &Path, window: usize, playing: bool) -> Frame {
+/// the last frame into requests. `playing`: the game has captured the cursor. `naming`: how
+/// the hooked window library's Minecraft names keys in options.txt.
+pub fn before_frame(game_dir: &Path, window: usize, playing: bool, naming: Naming) -> Frame {
     let mut state = lock();
     let now = Instant::now();
     let waypoints = state.get_or_insert_with(|| Waypoints::new(game_dir, now));
@@ -74,13 +77,20 @@ pub fn before_frame(game_dir: &Path, window: usize, playing: bool) -> Frame {
     }
     if now >= waypoints.next_keys {
         waypoints.next_keys = now + KEYS_INTERVAL;
-        waypoints.load_keys();
+        waypoints.load_keys(naming);
         let keys = &waypoints.keys;
+        // The user's own F3+C: the copy key as the platform reports it to the game.
+        let copy = input_by_name(&keys.copy_location, naming);
         f3c::set_passive_keys(
-            glfw_key(&keys.copy_location),
-            sdl_scancode(&keys.copy_location),
+            copy.and_then(glfw_key_of)
+                .map(|(key, _)| key)
+                .filter(|&key| key != -1),
+            match copy {
+                Some(InputId::Key(scancode)) => Some(u32::from(scancode)),
+                _ => None,
+            },
         );
-        input::router().set_debug_modifier(egui_key(&keys.modifier));
+        input::router().set_debug_modifier(input_by_name(&keys.modifier, naming));
     }
     f3c::expire(REQUEST_TIMEOUT);
     for outcome in f3c::take_outcomes() {
@@ -103,6 +113,15 @@ pub fn before_frame(game_dir: &Path, window: usize, playing: bool) -> Frame {
         notices: std::mem::take(&mut waypoints.pending_notices),
         reserved_keys: waypoints.reserved_keys.clone(),
     }
+}
+
+/// The game's mappings on each key, as options.txt had them at the last read (for the menu's
+/// key rebinding).
+pub fn game_bindings() -> Vec<(InputId, Vec<String>)> {
+    lock()
+        .as_ref()
+        .map(|waypoints| waypoints.game_bindings.clone())
+        .unwrap_or_default()
 }
 
 /// The menu's waypoint commands from the frame just rendered; their notices show next frame.
@@ -137,6 +156,8 @@ struct Waypoints {
     /// The menu's warnings about `keys`.
     key_problems: Vec<String>,
     reserved_keys: Vec<Key>,
+    /// Every key's mappings in options.txt (`bindings_by_key`).
+    game_bindings: Vec<(InputId, Vec<String>)>,
     /// The player's last known position, and when it came.
     location: Option<(Location, Instant)>,
     /// The destination.
@@ -163,6 +184,7 @@ impl Waypoints {
             next_retry: now,
             key_problems: binding_problems(&keys),
             reserved_keys: reserved_keys(&keys),
+            game_bindings: Vec::new(),
             keys,
             keys_read: false,
             location: None,
@@ -197,15 +219,19 @@ impl Waypoints {
         }
     }
 
-    /// Reads the debug key bindings; on an error the ones read before stay.
-    fn load_keys(&mut self) {
-        let keys = match load_debug_keys(&self.game_dir) {
-            Ok(keys) => keys,
+    /// Reads the key bindings, with key names as `naming` has them; on an error the ones read
+    /// before stay. A missing file (a fresh instance) has the defaults.
+    fn load_keys(&mut self, naming: Naming) {
+        let text = match fs::read(options_path(&self.game_dir)) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(e) => {
                 log_once(&mut self.keys_errors, &e, "options.txt: cannot read");
                 return;
             }
         };
+        self.game_bindings = bindings_by_key(&text, naming);
+        let keys = parse_debug_keys(&text);
         if self.keys_read && keys == self.keys {
             return;
         }
@@ -510,11 +536,16 @@ fn failure_text(reason: &Failure, keys: &DebugKeys) -> String {
         }
         Failure::Unreadable => "座標を読み取れなかった".to_owned(),
         Failure::NotPlaying => "ゲームの画面を閉じてから押す".to_owned(),
-        Failure::KeysHeld if keys.copy_drops_items() => format!(
+        Failure::KeysHeld(Some((source, output))) => format!(
+            "{}（{} に置き換え）を押している間は座標を取得できない",
+            input_label(*source),
+            input_label(*output)
+        ),
+        Failure::KeysHeld(None) if keys.copy_drops_items() => format!(
             "{} か Ctrl を押している間は座標を取得できない",
             debug_key_labels(keys)
         ),
-        Failure::KeysHeld => format!(
+        Failure::KeysHeld(None) => format!(
             "{} を押している間は座標を取得できない",
             debug_key_labels(keys)
         ),
@@ -733,7 +764,7 @@ mod tests {
         for reason in [
             Failure::Unreadable,
             Failure::NotPlaying,
-            Failure::KeysHeld,
+            Failure::KeysHeld(None),
             Failure::Timeout,
             Failure::NoHooks,
         ] {
@@ -858,21 +889,35 @@ mod tests {
         let now = Instant::now();
         let mut waypoints = Waypoints::new(dir.path(), now);
         // Missing: the defaults.
-        waypoints.load_keys();
+        waypoints.load_keys(Naming::Glfw);
         assert_eq!(waypoints.keys, DebugKeys::default());
         assert_eq!(waypoints.reserved_keys, [Key::F3, Key::C]);
         assert!(waypoints.key_problems.is_empty());
+        assert!(waypoints.game_bindings.is_empty());
 
         fs::write(
             options_path(dir.path()),
             "key_key.debug.modifier:key.keyboard.f4\n\
              key_key.debug.copyLocation:key.keyboard.keypad.1\n\
              key_key.debug.crash:key.keyboard.unknown\n\
-             key_key.drop:key.keyboard.keypad.1\n",
+             key_key.drop:key.keyboard.keypad.1\n\
+             key_key.attack:key.mouse.left\n\
+             key_key.use:key.mouse.right\n",
         )
         .unwrap();
-        waypoints.load_keys();
+        waypoints.load_keys(Naming::Glfw);
         assert_eq!(waypoints.keys.modifier, "key.keyboard.f4");
+        // Every key's mappings, for the menu (debug ones other than the modifier left out).
+        let ids = |ids: &[&str]| ids.iter().map(|&id| id.to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            waypoints.game_bindings,
+            [
+                (InputId::Key(61), ids(&["key.debug.modifier"])),
+                (InputId::Key(89), ids(&["key.drop"])),
+                (InputId::Mouse(1), ids(&["key.attack"])),
+                (InputId::Mouse(3), ids(&["key.use"])),
+            ]
+        );
         assert_eq!(waypoints.reserved_keys, [Key::F4, Key::Num1]);
         assert_eq!(
             waypoints.key_problems,
@@ -888,8 +933,12 @@ mod tests {
             "key_key.debug.modifier:key.keyboard.left.shift\n",
         )
         .unwrap();
-        waypoints.load_keys();
+        waypoints.load_keys(Naming::Modern);
         assert_eq!(waypoints.reserved_keys, [Key::C]);
+        assert_eq!(
+            waypoints.game_bindings,
+            [(InputId::Key(225), ids(&["key.debug.modifier"]))]
+        );
         assert_eq!(
             waypoints.key_problems,
             ["F3+C のキー設定（key.keyboard.left.shift）には対応していない"]
@@ -911,19 +960,25 @@ mod tests {
         let x = "key.keyboard.x";
         let y = "key.keyboard.y";
         assert_eq!(
-            failure_text(&Failure::KeysHeld, &keys(f4, x, y)),
+            failure_text(&Failure::KeysHeld(None), &keys(f4, x, y)),
             "F4・X・Y を押している間は座標を取得できない"
         );
         assert_eq!(
-            failure_text(&Failure::KeysHeld, &keys(f4, x, UNBOUND)),
+            failure_text(&Failure::KeysHeld(None), &keys(f4, x, UNBOUND)),
             "F4・X を押している間は座標を取得できない"
         );
         // Ctrl matters only where the copy key drops items.
         let mut drops = keys(f4, x, y);
         drops.shared_with_copy = vec!["key.drop".into()];
         assert_eq!(
-            failure_text(&Failure::KeysHeld, &drops),
+            failure_text(&Failure::KeysHeld(None), &drops),
             "F4・X・Y か Ctrl を押している間は座標を取得できない"
+        );
+        // Held by a rebinding rule: the key to let go of.
+        let mouse4_f3 = Some((InputId::Mouse(4), InputId::Key(60)));
+        assert_eq!(
+            failure_text(&Failure::KeysHeld(mouse4_f3), &drops),
+            "マウスのボタン4（F3 に置き換え）を押している間は座標を取得できない"
         );
         assert_eq!(
             failure_text(&Failure::Refused, &DebugKeys::default()),

@@ -21,6 +21,7 @@ mod hook;
 mod input;
 mod loader;
 mod pointer;
+mod rebind_state;
 mod sdl;
 mod sdl_input;
 mod tall;

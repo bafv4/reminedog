@@ -2,9 +2,13 @@
 //!
 //! SDL3 queues input and the game drains the queue with `SDL_PollEvent`; the detour hands
 //! each event to the router and drops the ones the overlay takes, so the game never sees
-//! them. The game might read input some other way (event watchers, `SDL_PeepEvents`,
-//! keyboard-state polling); those functions are only logged the first time they are
-//! used, so a log shows whether the filter covers the game.
+//! them. The game might read input some other way (event watchers, `SDL_PeepEvents`); those
+//! functions are only logged the first time they are used, so a log shows whether the filter
+//! covers the game.
+//!
+//! The key rebinding rewrites the caller's event in place into the router's output, key or
+//! mouse button alike; `SDL_GetKeyboardState` and the modifier bits of key events report what
+//! the game got ([`rebind_state`]).
 //!
 //! F3+C for waypoints ([`f3c`]) is made-up key events handed out before SDL's own; the
 //! game handles each one before it polls again, so a `SDL_SetClipboardText` between two
@@ -12,17 +16,18 @@
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use reminedog_core::{sdl_keycode, sdl_scancode};
-use reminedog_render::{Key, Modifiers, PointerButton, Route};
+use reminedog_core::{InputId, SCANCODE_COUNT, sdl_keycode, sdl_keycode_of, sdl_scancode};
+use reminedog_render::{Delivery, Key, Modifiers, Output, Phase, PointerButton, Route};
 use windows_sys::Win32::Foundation::HMODULE;
 
 use crate::f3c::{self, Failure, Injected, Job, Purpose};
 use crate::ffi;
 use crate::hook::{self, export};
 use crate::input::{self, FUNCTION_KEYS, router};
+use crate::rebind_state;
 
 type PollEventFn = unsafe extern "C" fn(event: *mut u8) -> bool;
 type GetWindowFromIdFn = unsafe extern "C" fn(id: u32) -> *mut c_void;
@@ -30,6 +35,7 @@ type WindowBoolFn = unsafe extern "C" fn(window: *mut c_void) -> bool;
 type GetWindowPixelDensityFn = unsafe extern "C" fn(window: *mut c_void) -> f32;
 type GetWindowIdFn = unsafe extern "C" fn(window: *mut c_void) -> u32;
 type SetClipboardTextFn = unsafe extern "C" fn(text: *const c_char) -> bool;
+type GetModStateFn = unsafe extern "C" fn() -> u16;
 
 // Probes.
 type PeepEventsFn = unsafe extern "C" fn(*mut u8, c_int, c_int, u32, u32) -> c_int;
@@ -56,6 +62,8 @@ const EVENT_MOUSE_WHEEL: u32 = 0x403;
 const OFF_WINDOW_ID: usize = 16;
 const OFF_WINDOW_DATA1: usize = 20;
 const OFF_WINDOW_DATA2: usize = 24;
+/// The keyboard or mouse of key and button events.
+const OFF_WHICH: usize = 20;
 /// sizeof(SDL_Event).
 const EVENT_SIZE: usize = 128;
 const OFF_KEY_SCANCODE: usize = 24;
@@ -70,6 +78,7 @@ const OFF_MOTION_XREL: usize = 36;
 const OFF_MOTION_YREL: usize = 40;
 const OFF_BUTTON: usize = 24;
 const OFF_BUTTON_DOWN: usize = 25;
+const OFF_BUTTON_CLICKS: usize = 26;
 const OFF_WHEEL_X: usize = 24;
 const OFF_WHEEL_Y: usize = 28;
 const OFF_WHEEL_DIRECTION: usize = 32;
@@ -77,6 +86,17 @@ const OFF_WHEEL_DIRECTION: usize = 32;
 const KMOD_SHIFT: u16 = 0x0003;
 const KMOD_CTRL: u16 = 0x00C0;
 const KMOD_ALT: u16 = 0x0300;
+/// The modifier keys' scancodes and bits (SDL3 has one bit per key).
+const MODIFIER_BITS: [(u16, u16); 8] = [
+    (224, 0x0040), // left Ctrl
+    (225, 0x0001), // left Shift
+    (226, 0x0100), // left Alt
+    (227, 0x0400), // left GUI
+    (228, 0x0080), // right Ctrl
+    (229, 0x0002), // right Shift
+    (230, 0x0200), // right Alt
+    (231, 0x0800), // right GUI
+];
 
 const SCANCODE_LCTRL: u32 = 224;
 const SCANCODE_RCTRL: u32 = 228;
@@ -101,6 +121,9 @@ struct Api {
     stop_text_input: WindowBoolFn,
     text_input_active: WindowBoolFn,
     get_window_id: Option<GetWindowIdFn>,
+    /// The real modifier state, for mouse buttons rebound to keys (not detoured: Minecraft reads
+    /// a click's modifiers with it, which stay physical).
+    get_mod_state: Option<GetModStateFn>,
 }
 
 static API: OnceLock<Api> = OnceLock::new();
@@ -117,11 +140,16 @@ static PEEP_EVENTS: OnceLock<PeepEventsFn> = OnceLock::new();
 static WAIT_EVENT: OnceLock<WaitEventFn> = OnceLock::new();
 static WAIT_EVENT_TIMEOUT: OnceLock<WaitEventTimeoutFn> = OnceLock::new();
 static SET_RELATIVE_MOUSE_MODE: OnceLock<SetRelativeMouseModeFn> = OnceLock::new();
-/// Trampoline of the logging pass-through; also called directly for the real key state
-/// (F3+C), which made-up events never change.
+/// Trampoline of SDL_GetKeyboardState; also called directly for the real key state (F3+C, the
+/// rebinding), which made-up events never change.
 static GET_KEYBOARD_STATE: OnceLock<GetKeyboardStateFn> = OnceLock::new();
 /// SDL_GetKeyboardState itself, for the real key state if it could not be detoured.
 static GET_KEYBOARD_STATE_EXPORT: OnceLock<GetKeyboardStateFn> = OnceLock::new();
+/// SDL_GetKeyboardState is detoured: the game reads the key state the rebinding gives it.
+static KEY_STATE_SPOOFED: AtomicBool = AtomicBool::new(false);
+/// What SDL_GetKeyboardState returns while the rebinding has a say on some key: SDL's array with
+/// that applied (a C bool per scancode, as SDL's).
+static SPOOFED_KEYS: [AtomicU8; SCANCODE_COUNT] = [const { AtomicU8::new(0) }; SCANCODE_COUNT];
 static GET_MOUSE_STATE: OnceLock<GetMouseStateFn> = OnceLock::new();
 static GET_RELATIVE_MOUSE_STATE: OnceLock<GetMouseStateFn> = OnceLock::new();
 static ADD_EVENT_WATCH: OnceLock<AddEventWatchFn> = OnceLock::new();
@@ -153,6 +181,8 @@ pub fn install(module: HMODULE) {
                 )?),
                 get_window_id: get(c"SDL_GetWindowID")
                     .map(|f| std::mem::transmute::<*const c_void, GetWindowIdFn>(f)),
+                get_mod_state: get(c"SDL_GetModState")
+                    .map(|f| std::mem::transmute::<*const c_void, GetModStateFn>(f)),
             })
         }
     })();
@@ -212,11 +242,12 @@ pub fn install(module: HMODULE) {
         set_relative_mouse_mode_probe,
         SET_RELATIVE_MOUSE_MODE
     );
-    hook!(
+    let keyboard_state_hooked = hook!(
         c"SDL_GetKeyboardState",
-        get_keyboard_state_probe,
+        get_keyboard_state_detour,
         GET_KEYBOARD_STATE
     );
+    KEY_STATE_SPOOFED.store(keyboard_state_hooked, Ordering::Relaxed);
     hook!(c"SDL_GetMouseState", get_mouse_state_probe, GET_MOUSE_STATE);
     hook!(
         c"SDL_GetRelativeMouseState",
@@ -329,7 +360,8 @@ fn f3c_events(job: &Job) -> Result<[(Event, Tag); 4], Failure> {
     // A held crash key would arm Minecraft's debug crash once the modifier is down, the real
     // release of a held modifier would come after ours (and toggle the debug overlay), and,
     // where the copy key also drops items, Ctrl would make a refused C drop a whole stack
-    // (only then: Ctrl is often held to sprint).
+    // (only then: Ctrl is often held to sprint). Held as the game reads them: a key rebound
+    // to one of them counts, one rebound to another key does not.
     let ctrl = job.keys.copy_drops_items();
     let watched = [
         Some(codes.modifier.0),
@@ -338,10 +370,21 @@ fn f3c_events(job: &Job) -> Result<[(Event, Tag); 4], Failure> {
         ctrl.then_some(SCANCODE_LCTRL),
         ctrl.then_some(SCANCODE_RCTRL),
     ];
-    match keys_held(watched.into_iter().flatten()) {
-        Some(false) => {}
-        Some(true) => return Err(Failure::KeysHeld),
-        None => return Err(Failure::NoHooks),
+    let real = real_keys().ok_or(Failure::NoHooks)?;
+    let held: Vec<u32> = watched
+        .into_iter()
+        .flatten()
+        .filter(|&scancode| {
+            let physically = || real.get(scancode as usize).is_some_and(|&down| down != 0);
+            match input_key(scancode) {
+                Some(id) => rebind_state::held(id, physically),
+                None => physically(),
+            }
+        })
+        .collect();
+    if !held.is_empty() {
+        let ids: Vec<InputId> = held.into_iter().filter_map(input_key).collect();
+        return Err(Failure::KeysHeld(rebind_state::rule_holding(&ids)));
     }
     let id = API
         .get()
@@ -361,23 +404,72 @@ fn real_keyboard_state() -> Option<GetKeyboardStateFn> {
         .copied()
 }
 
-/// Whether any of `scancodes` is physically held, from SDL's own key state; `None` if SDL
-/// cannot tell.
-fn keys_held(scancodes: impl IntoIterator<Item = u32>) -> Option<bool> {
+/// SDL's own key state, one C bool per scancode (what is physically held); `None` if SDL cannot
+/// tell. Read it right away: SDL updates it as it pumps events.
+fn real_keys() -> Option<&'static [u8]> {
     let get = real_keyboard_state()?;
     let mut count: c_int = 0;
-    // SAFETY: SDL writes the array's length and returns its own array, valid on this thread.
-    // Called through the trampoline, the first-use probe does not see it.
+    // SAFETY: SDL writes the array's length and returns its own array. Called through the
+    // trampoline, the rebinding's detour does not see it.
     let state = unsafe { get(&mut count) };
     if state.is_null() {
         return None;
     }
     let count = usize::try_from(count).unwrap_or(0);
-    Some(scancodes.into_iter().any(|scancode| {
-        let i = scancode as usize;
-        // SAFETY: `i` is inside the array; each entry is a one-byte C bool.
-        i < count && unsafe { state.cast::<u8>().add(i).read() } != 0
-    }))
+    // SAFETY: SDL's array of `count` one-byte bools, which lives as long as SDL.
+    Some(unsafe { std::slice::from_raw_parts(state.cast::<u8>(), count) })
+}
+
+/// Whether the game reads the key state the rebinding gives it (without that, keys cannot be
+/// rebound: a held source would read as held).
+pub fn key_state_spoofed() -> bool {
+    KEY_STATE_SPOOFED.load(Ordering::Relaxed)
+}
+
+/// The game's view of the key state: SDL's array, with the rebinding's say on the keys it
+/// holds down or hides ([`rebind_state`]). Minecraft asks for the array afresh every time it
+/// reads a key, so a copy patched now is what it reads.
+unsafe extern "C" fn get_keyboard_state_detour(numkeys: *mut c_int) -> *const bool {
+    static USED: AtomicBool = AtomicBool::new(false);
+    first_use(&USED, "SDL_GetKeyboardState");
+    let Some(original) = GET_KEYBOARD_STATE.get() else {
+        return std::ptr::null();
+    };
+    let mut count: c_int = 0;
+    // SAFETY: SDL writes the length to our local and returns its own array.
+    let state = unsafe { original(&mut count) };
+    if !numkeys.is_null() {
+        // SAFETY: the caller's pointer, which SDL allows to be null.
+        unsafe { *numkeys = count };
+    }
+    if state.is_null() || !rebind_state::any_forced() {
+        return state;
+    }
+    // A longer array than ours is left alone (the game must not read past what it is told).
+    let Some(count) = usize::try_from(count)
+        .ok()
+        .filter(|&n| n > 0 && n <= SCANCODE_COUNT)
+    else {
+        return state;
+    };
+    // SAFETY: SDL's array of `count` one-byte bools.
+    let real = unsafe { std::slice::from_raw_parts(state.cast::<u8>(), count) };
+    spoof_keys(real, &SPOOFED_KEYS[..count], rebind_state::forced);
+    SPOOFED_KEYS.as_ptr().cast()
+}
+
+/// Copies the key state `real` into `out`, with what `forced` says about each key.
+fn spoof_keys(real: &[u8], out: &[AtomicU8], forced: impl Fn(InputId) -> Option<bool>) {
+    for (scancode, (entry, &down)) in out.iter().zip(real).enumerate() {
+        let down = match u16::try_from(scancode)
+            .ok()
+            .and_then(|sc| forced(InputId::Key(sc)))
+        {
+            Some(held) => u8::from(held),
+            None => down,
+        };
+        entry.store(down, Ordering::Relaxed);
+    }
 }
 
 /// Modifier down, copy down, copy up, modifier up, for the window with `window_id`. Keys are
@@ -471,9 +563,11 @@ unsafe extern "C" fn set_clipboard_text_detour(text: *const c_char) -> bool {
     unsafe { original(text) }
 }
 
+/// Hands the event to the router; the key rebinding rewrites it in place.
+///
 /// # Safety
-/// `event` must point to a complete SDL_Event.
-unsafe fn route_event(event: *const u8) -> Route {
+/// `event` must point to a complete SDL_Event the caller lets us write.
+unsafe fn route_event(event: *mut u8) -> Route {
     let Some(api) = API.get() else {
         return Route::Forward;
     };
@@ -521,7 +615,23 @@ unsafe fn route_event(event: *const u8) -> Route {
                 let mods = event.add(OFF_KEY_MOD).cast::<u16>().read_unaligned();
                 let down = *event.add(OFF_KEY_DOWN) != 0;
                 let repeat = *event.add(OFF_KEY_REPEAT) != 0;
-                router().key(egui_key(key), down, repeat, modifiers(mods), captured)
+                let raw = input_key(read_u32(OFF_KEY_SCANCODE));
+                let delivery = {
+                    let mut router = router();
+                    let delivery = router.key(
+                        egui_key(key),
+                        raw,
+                        down,
+                        repeat,
+                        modifiers(mods),
+                        captured,
+                        false,
+                    );
+                    // Before the game gets the event (and may read the key state).
+                    rebind_state::apply(window as usize, &router.rebind_state());
+                    delivery
+                };
+                deliver(&mut *event.cast::<Event>(), delivery, || adjust_mod(mods))
             }
             EVENT_TEXT_INPUT => {
                 let text = event.add(OFF_TEXT).cast::<*const c_char>().read_unaligned();
@@ -546,7 +656,8 @@ unsafe fn route_event(event: *const u8) -> Route {
                 captured,
             ),
             EVENT_MOUSE_BUTTON_DOWN | EVENT_MOUSE_BUTTON_UP => {
-                let button = match *event.add(OFF_BUTTON) {
+                let number = *event.add(OFF_BUTTON);
+                let button = match number {
                     1 => PointerButton::Primary,
                     2 => PointerButton::Middle,
                     3 => PointerButton::Secondary,
@@ -554,7 +665,20 @@ unsafe fn route_event(event: *const u8) -> Route {
                     5 => PointerButton::Extra2,
                     _ => return Route::Forward,
                 };
-                router().button(button, *event.add(OFF_BUTTON_DOWN) != 0, captured)
+                let down = *event.add(OFF_BUTTON_DOWN) != 0;
+                let delivery = {
+                    let mut router = router();
+                    let delivery =
+                        router.button(button, Some(InputId::Mouse(number)), down, captured);
+                    rebind_state::apply(window as usize, &router.rebind_state());
+                    delivery
+                };
+                // A key made of a click gets the modifiers held now, as the click would (SAFETY:
+                // SDL_GetModState takes no arguments).
+                let real_mods = || api.get_mod_state.map_or(0, |get| get());
+                deliver(&mut *event.cast::<Event>(), delivery, || {
+                    adjust_mod(real_mods())
+                })
             }
             EVENT_MOUSE_WHEEL => {
                 // Direction 1 = flipped (natural scrolling).
@@ -566,12 +690,194 @@ unsafe fn route_event(event: *const u8) -> Route {
                 router().scroll(read_f32(OFF_WHEEL_X) * sign, read_f32(OFF_WHEEL_Y) * sign)
             }
             EVENT_WINDOW_FOCUS_LOST => {
-                router().focus_lost();
+                // SDL3 sends the releases of held keys after this event, not of buttons, and the
+                // router drops those of rebound sources: their outputs are released first, at
+                // the next poll.
+                let releases = {
+                    let mut router = router();
+                    let releases = router.focus_lost(|id| matches!(id, InputId::Key(_)));
+                    rebind_state::apply(window as usize, &router.rebind_state());
+                    releases
+                };
+                let window_id = read_u32(OFF_WINDOW_ID);
+                inject_first(
+                    releases
+                        .into_iter()
+                        .filter_map(|output| output_event(window_id, output))
+                        .collect(),
+                );
                 Route::Forward
             }
             _ => Route::Forward,
         }
     }
+}
+
+/// Acts on the router's decision about the key or button event the game is about to get:
+/// `Send` rewrites it into the output. Key events get `key_mod()` as their modifier bits.
+fn deliver(event: &mut Event, delivery: Delivery, key_mod: impl FnOnce() -> u16) -> Route {
+    match delivery {
+        Delivery::Consume => Route::Consume,
+        Delivery::Forward => {
+            if matches!(u32_at(event, 0), EVENT_KEY_DOWN | EVENT_KEY_UP) {
+                put(event, OFF_KEY_MOD, &key_mod().to_ne_bytes());
+            }
+            Route::Forward
+        }
+        Delivery::Send(output) => {
+            if rewrite(event, output, key_mod) {
+                Route::Forward
+            } else {
+                Route::Consume
+            }
+        }
+    }
+}
+
+/// Rewrites a key or mouse button event into `output` in place, keeping its window and
+/// timestamp; false if the game must not get it (a mouse button never repeats: the game would
+/// take a repeat for a press). A key gets `key_mod()`; a key made of a key keeps its keyboard
+/// and raw code, a button made of a button its mouse and clicks.
+fn rewrite(event: &mut Event, output: Output, key_mod: impl FnOnce() -> u16) -> bool {
+    let from_key = matches!(u32_at(event, 0), EVENT_KEY_DOWN | EVENT_KEY_UP);
+    let down = output.phase != Phase::Release;
+    match output.id {
+        InputId::Key(scancode) => {
+            if !from_key {
+                event[OFF_WHICH..].fill(0);
+            }
+            let kind = if down { EVENT_KEY_DOWN } else { EVENT_KEY_UP };
+            put(event, 0, &kind.to_ne_bytes());
+            put(event, OFF_KEY_SCANCODE, &u32::from(scancode).to_ne_bytes());
+            put(event, OFF_KEY, &sdl_keycode_of(output.id).to_ne_bytes());
+            put(event, OFF_KEY_MOD, &key_mod().to_ne_bytes());
+            event[OFF_KEY_DOWN] = u8::from(down);
+            event[OFF_KEY_REPEAT] = u8::from(output.phase == Phase::Repeat);
+        }
+        InputId::Mouse(button) => {
+            if output.phase == Phase::Repeat {
+                return false;
+            }
+            if from_key {
+                event[OFF_WHICH..].fill(0);
+                event[OFF_BUTTON_CLICKS] = 1;
+            }
+            let kind = if down {
+                EVENT_MOUSE_BUTTON_DOWN
+            } else {
+                EVENT_MOUSE_BUTTON_UP
+            };
+            put(event, 0, &kind.to_ne_bytes());
+            event[OFF_BUTTON] = button;
+            event[OFF_BUTTON_DOWN] = u8::from(down);
+        }
+    }
+    true
+}
+
+fn u32_at(event: &Event, offset: usize) -> u32 {
+    let mut bytes = [0; 4];
+    bytes.copy_from_slice(&event[offset..offset + 4]);
+    u32::from_ne_bytes(bytes)
+}
+
+fn put(event: &mut Event, offset: usize, bytes: &[u8]) {
+    event[offset..offset + bytes.len()].copy_from_slice(bytes);
+}
+
+/// The modifier bits of a key event for the game: while the rebinding has a say on a modifier
+/// key, its bit follows the key state the game reads (a key rebound to Ctrl sets Ctrl's bit,
+/// Ctrl rebound to F3 clears it, so F3+B does not turn into Ctrl+B).
+fn adjust_mod(mods: u16) -> u16 {
+    if !rebind_state::modifiers_forced() {
+        return mods;
+    }
+    patch_mod(mods, rebind_state::forced)
+}
+
+/// `mods` with each modifier key's bit set or cleared as `forced` says.
+fn patch_mod(mods: u16, forced: impl Fn(InputId) -> Option<bool>) -> u16 {
+    MODIFIER_BITS.iter().fold(mods, |mods, &(scancode, bit)| {
+        match forced(InputId::Key(scancode)) {
+            Some(true) => mods | bit,
+            Some(false) => mods & !bit,
+            None => mods,
+        }
+    })
+}
+
+/// An event that gives the game `output` on its own (a release on focus loss or from the
+/// safety net), for the window with `window_id`; `None` for a mouse button's repeat.
+fn output_event(window_id: u32, output: Output) -> Option<Event> {
+    let down = output.phase != Phase::Release;
+    match output.id {
+        InputId::Key(scancode) => {
+            let keycode = sdl_keycode_of(output.id);
+            let mut e = key_event(down, window_id, (u32::from(scancode), keycode));
+            e[OFF_KEY_REPEAT] = u8::from(output.phase == Phase::Repeat);
+            Some(e)
+        }
+        InputId::Mouse(_) if output.phase == Phase::Repeat => None,
+        InputId::Mouse(button) => Some(button_event(down, window_id, button)),
+    }
+}
+
+/// A mouse button event as SDL reports one, from no particular mouse (`which` 0), with no
+/// timestamp or position (Minecraft reads none of them).
+fn button_event(down: bool, window_id: u32, button: u8) -> Event {
+    let mut e = [0u8; EVENT_SIZE];
+    let kind = if down {
+        EVENT_MOUSE_BUTTON_DOWN
+    } else {
+        EVENT_MOUSE_BUTTON_UP
+    };
+    put(&mut e, 0, &kind.to_ne_bytes());
+    put(&mut e, OFF_WINDOW_ID, &window_id.to_ne_bytes());
+    e[OFF_BUTTON] = button;
+    e[OFF_BUTTON_DOWN] = u8::from(down);
+    e[OFF_BUTTON_CLICKS] = 1;
+    e
+}
+
+/// Hands out `events` before anything queued. Takes INJECTED: call without the router.
+fn inject_first(events: Vec<Event>) {
+    if events.is_empty() {
+        return;
+    }
+    let mut injected = INJECTED.lock().unwrap_or_else(|e| e.into_inner());
+    for event in events.into_iter().rev() {
+        injected.push_front((event, Tag::Plain));
+    }
+}
+
+/// The safety net's releases ([`rebind_state::lost_releases`]), after a swap of `window`: the
+/// game gets them at its next poll.
+pub fn release_lost_keys(window: *mut c_void) {
+    let Some(get_id) = API.get().and_then(|api| api.get_window_id) else {
+        return;
+    };
+    let releases = rebind_state::lost_releases(window as usize);
+    if releases.is_empty() {
+        return;
+    }
+    // SAFETY: the window SDL passed to SDL_GL_SwapWindow, on its thread.
+    let window_id = unsafe { get_id(window) };
+    let events = releases
+        .into_iter()
+        .filter_map(|output| output_event(window_id, output))
+        .map(|event| (event, Tag::Plain));
+    INJECTED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .extend(events);
+}
+
+/// The key of an SDL3 scancode; `None` outside the key ids (SDL3 has no key below 4).
+fn input_key(scancode: u32) -> Option<InputId> {
+    u16::try_from(scancode)
+        .ok()
+        .filter(|&sc| (4..SCANCODE_COUNT as u16).contains(&sc))
+        .map(InputId::Key)
 }
 
 /// Tells the game the size the zoom wants, the way SDL reports a resize: the new size in
@@ -771,8 +1077,6 @@ probe!(peep_events_probe, PEEP_EVENTS, "SDL_PeepEvents",
 probe!(wait_event_probe, WAIT_EVENT, "SDL_WaitEvent", (event: *mut u8) -> bool, false);
 probe!(wait_event_timeout_probe, WAIT_EVENT_TIMEOUT, "SDL_WaitEventTimeout",
     (event: *mut u8, timeout: i32) -> bool, false);
-probe!(get_keyboard_state_probe, GET_KEYBOARD_STATE, "SDL_GetKeyboardState",
-    (count: *mut c_int) -> *const bool, std::ptr::null());
 probe!(get_mouse_state_probe, GET_MOUSE_STATE, "SDL_GetMouseState",
     (x: *mut f32, y: *mut f32) -> u32, 0);
 probe!(get_relative_mouse_state_probe, GET_RELATIVE_MOUSE_STATE, "SDL_GetRelativeMouseState",
@@ -802,10 +1106,6 @@ mod tests {
     const F3: (u32, u32) = (60, 0x4000_003C);
     const C: (u32, u32) = (6, 0x63);
     const ID: u32 = 3;
-
-    fn u32_at(e: &Event, off: usize) -> u32 {
-        u32::from_ne_bytes(e[off..off + 4].try_into().unwrap())
-    }
 
     /// (type, scancode, down) of each event, for comparing sequences.
     fn keys(events: impl IntoIterator<Item = Event>) -> Vec<(u32, u32, u8)> {
@@ -912,5 +1212,188 @@ mod tests {
         let mut e = [0u8; EVENT_SIZE];
         e[..4].copy_from_slice(&EVENT_WINDOW_PIXEL_SIZE_CHANGED.to_ne_bytes());
         e
+    }
+
+    const W: InputId = InputId::Key(26);
+    const LCTRL: InputId = InputId::Key(224);
+    const MOUSE4: InputId = InputId::Mouse(4);
+    const TIMESTAMP: u64 = 0x1234_5678_9ABC;
+
+    fn send(id: InputId, phase: Phase) -> Output {
+        Output { id, phase }
+    }
+
+    /// A key event as SDL fills one: with a timestamp, keyboard, modifiers and raw code.
+    fn physical_key(down: bool, repeat: bool, (scancode, keycode): (u32, u32)) -> Event {
+        let mut e = key_event(down, ID, (scancode, keycode));
+        put(&mut e, 8, &TIMESTAMP.to_ne_bytes());
+        put(&mut e, OFF_WHICH, &7u32.to_ne_bytes());
+        put(&mut e, OFF_KEY_MOD, &0x1000u16.to_ne_bytes()); // Num Lock
+        put(&mut e, 34, &0x2Eu16.to_ne_bytes()); // raw
+        e[OFF_KEY_REPEAT] = u8::from(repeat);
+        e
+    }
+
+    /// A button event as SDL fills one: with a timestamp, mouse, clicks and position.
+    fn physical_button(down: bool, button: u8) -> Event {
+        let mut e = button_event(down, ID, button);
+        put(&mut e, 8, &TIMESTAMP.to_ne_bytes());
+        put(&mut e, OFF_WHICH, &9u32.to_ne_bytes());
+        e[OFF_BUTTON_CLICKS] = 2;
+        put(&mut e, 28, &100.5f32.to_ne_bytes());
+        e
+    }
+
+    fn u16_at(e: &Event, off: usize) -> u16 {
+        u16::from_ne_bytes([e[off], e[off + 1]])
+    }
+
+    #[test]
+    fn a_key_rebound_to_a_key() {
+        let mut e = physical_key(true, false, C);
+        assert!(rewrite(&mut e, send(W, Phase::Press), || 0x1040));
+        assert_eq!(u32_at(&e, 0), EVENT_KEY_DOWN);
+        assert_eq!(u32_at(&e, OFF_KEY_SCANCODE), 26);
+        assert_eq!(u32_at(&e, OFF_KEY), u32::from(b'w'));
+        assert_eq!(u16_at(&e, OFF_KEY_MOD), 0x1040);
+        assert_eq!((e[OFF_KEY_DOWN], e[OFF_KEY_REPEAT]), (1, 0));
+        // The rest stays: window, timestamp, keyboard, raw code.
+        assert_eq!(u32_at(&e, OFF_WINDOW_ID), ID);
+        assert_eq!(e[8..16], TIMESTAMP.to_ne_bytes());
+        assert_eq!(u32_at(&e, OFF_WHICH), 7);
+        assert_eq!(u16_at(&e, 34), 0x2E);
+
+        let mut e = physical_key(true, true, C);
+        assert!(rewrite(&mut e, send(W, Phase::Repeat), || 0));
+        assert_eq!((e[OFF_KEY_DOWN], e[OFF_KEY_REPEAT]), (1, 1));
+        let mut e = physical_key(false, false, C);
+        assert!(rewrite(&mut e, send(W, Phase::Release), || 0));
+        assert_eq!(u32_at(&e, 0), EVENT_KEY_UP);
+        assert_eq!((e[OFF_KEY_DOWN], e[OFF_KEY_REPEAT]), (0, 0));
+    }
+
+    #[test]
+    fn a_key_rebound_to_a_button() {
+        let mut e = physical_key(true, false, C);
+        assert!(rewrite(
+            &mut e,
+            send(MOUSE4, Phase::Press),
+            || unreachable!()
+        ));
+        let mut expected = button_event(true, ID, 4);
+        put(&mut expected, 8, &TIMESTAMP.to_ne_bytes());
+        assert_eq!(e, expected);
+        // A button never repeats: the repeat is dropped.
+        let mut e = physical_key(true, true, C);
+        assert!(!rewrite(&mut e, send(MOUSE4, Phase::Repeat), || 0));
+        let mut e = physical_key(false, false, C);
+        assert!(rewrite(&mut e, send(MOUSE4, Phase::Release), || 0));
+        assert_eq!(u32_at(&e, 0), EVENT_MOUSE_BUTTON_UP);
+        assert_eq!(
+            (e[OFF_BUTTON], e[OFF_BUTTON_DOWN], e[OFF_BUTTON_CLICKS]),
+            (4, 0, 1)
+        );
+    }
+
+    #[test]
+    fn a_button_rebound_to_a_key() {
+        let mut e = physical_button(true, 5);
+        assert!(rewrite(
+            &mut e,
+            send(InputId::Key(60), Phase::Press),
+            || 0x40
+        ));
+        let mut expected = key_event(true, ID, F3);
+        put(&mut expected, 8, &TIMESTAMP.to_ne_bytes());
+        put(&mut expected, OFF_KEY_MOD, &0x40u16.to_ne_bytes());
+        assert_eq!(e, expected);
+        let mut e = physical_button(false, 5);
+        assert!(rewrite(
+            &mut e,
+            send(InputId::Key(60), Phase::Release),
+            || 0
+        ));
+        assert_eq!(u32_at(&e, 0), EVENT_KEY_UP);
+        assert_eq!(e[OFF_KEY_DOWN], 0);
+    }
+
+    #[test]
+    fn a_button_rebound_to_a_button() {
+        let mut e = physical_button(true, 5);
+        assert!(rewrite(
+            &mut e,
+            send(InputId::Mouse(1), Phase::Press),
+            || unreachable!()
+        ));
+        let mut expected = physical_button(true, 1);
+        expected[OFF_BUTTON] = 1;
+        assert_eq!(e, expected);
+    }
+
+    #[test]
+    fn delivery_of_key_events() {
+        // Forwarded keys get the modifiers as the game reads them; buttons are left alone.
+        let mut e = physical_key(true, false, C);
+        assert_eq!(
+            deliver(&mut e, Delivery::Forward, || 0x1001),
+            Route::Forward
+        );
+        assert_eq!(u16_at(&e, OFF_KEY_MOD), 0x1001);
+        let before = physical_button(true, 4);
+        let mut e = before;
+        assert_eq!(
+            deliver(&mut e, Delivery::Forward, || 0x1001),
+            Route::Forward
+        );
+        assert_eq!(e, before);
+        assert_eq!(deliver(&mut e, Delivery::Consume, || 0), Route::Consume);
+        assert_eq!(e, before);
+        let repeat = Delivery::Send(send(MOUSE4, Phase::Repeat));
+        assert_eq!(
+            deliver(&mut physical_key(true, true, C), repeat, || 0),
+            Route::Consume
+        );
+    }
+
+    #[test]
+    fn modifier_bits_follow_the_rebinding() {
+        let forced = |id: InputId| match id {
+            InputId::Key(224) => Some(true),  // left Ctrl held by a rule
+            InputId::Key(225) => Some(false), // left Shift taken by a rule
+            _ => None,
+        };
+        // Right Shift and Num Lock stay as they are.
+        assert_eq!(patch_mod(0x1003, forced), 0x1042);
+        assert_eq!(patch_mod(0, forced), 0x40);
+        assert_eq!(patch_mod(0x1003, |_| None), 0x1003);
+    }
+
+    #[test]
+    fn events_for_releases() {
+        let e = output_event(ID, send(LCTRL, Phase::Release)).unwrap();
+        assert_eq!(e, key_event(false, ID, (224, 0x4000_00E0)));
+        let e = output_event(ID, send(MOUSE4, Phase::Release)).unwrap();
+        assert_eq!(e, button_event(false, ID, 4));
+        assert_eq!(u32_at(&e, 0), EVENT_MOUSE_BUTTON_UP);
+        assert_eq!(output_event(ID, send(MOUSE4, Phase::Repeat)), None);
+    }
+
+    #[test]
+    fn the_game_reads_the_spoofed_key_state() {
+        let mut real = [0u8; 300];
+        real[26] = 1; // W, physically held and taken
+        real[6] = 1; // C, physically held
+        let out: Vec<AtomicU8> = (0..300).map(|_| AtomicU8::new(9)).collect();
+        let forced = |id: InputId| match id {
+            InputId::Key(26) => Some(false),
+            InputId::Key(60) => Some(true),
+            _ => None,
+        };
+        spoof_keys(&real, &out, forced);
+        let got: Vec<u8> = out.iter().map(|b| b.load(Ordering::Relaxed)).collect();
+        let mut expected = real;
+        expected[26] = 0;
+        expected[60] = 1;
+        assert_eq!(got, expected);
     }
 }

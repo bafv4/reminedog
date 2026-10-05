@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use reminedog_core::{DebugKeys, Location, UNBOUND, key_label, parse_f3c};
+use reminedog_core::{DebugKeys, InputId, Location, UNBOUND, key_label, parse_f3c};
 
 /// Longest clipboard text looked at; F3+C writes well under 200 bytes.
 const MAX_TEXT: usize = 512;
@@ -77,8 +77,9 @@ pub enum Failure {
     Unreadable,
     /// The game did not have the cursor (a Minecraft screen was open).
     NotPlaying,
-    /// The modifier, copy or crash key, or a Ctrl key, was physically held.
-    KeysHeld,
+    /// The modifier, copy or crash key, or a Ctrl key, was held as the game reads it: physically,
+    /// or as the output of a rebinding rule, (source, output), held by its source.
+    KeysHeld(Option<(InputId, InputId)>),
     /// A debug mapping is bound to a key the agent cannot send (the key's label).
     Unsupported(String),
     /// The modifier or copy-location mapping has no key.
@@ -529,9 +530,12 @@ mod tests {
     #[test]
     fn validation_failure() {
         let mut s = in_flight(Purpose::Record);
-        s.fail(Purpose::Record, Failure::KeysHeld);
+        s.fail(Purpose::Record, Failure::KeysHeld(None));
         assert!(!s.busy());
-        assert_eq!(s.outcomes, [failed(Purpose::Record, Failure::KeysHeld)]);
+        assert_eq!(
+            s.outcomes,
+            [failed(Purpose::Record, Failure::KeysHeld(None))]
+        );
     }
 
     #[test]

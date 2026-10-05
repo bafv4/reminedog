@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use glow::HasContext as _;
-use reminedog_core::{Settings, settings_path};
+use reminedog_core::{InputId, Naming, Settings, input_by_name, input_name, settings_path};
 use reminedog_render::{
-    FrameInput, FrameParams, Overlay, PointerSpeed, StatusLine, ZoomView, gl_summary, hotkeys,
+    FrameInput, FrameParams, Hotkeys, Overlay, PointerSpeed, StatusLine, ZoomView, gl_summary,
+    hotkeys, resolve,
 };
 
 use crate::agent::{self, Globals};
@@ -26,6 +27,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::IsIconic;
 /// Settings changed in the menu are saved after this long without further changes (or
 /// when the menu closes), so dragging a slider does not write the file every frame.
 const SAVE_DELAY: Duration = Duration::from_secs(1);
+
+/// The menu's note when keys cannot be rebound.
+const NO_KEY_REBINDS: &str = "ゲームがキーの状態を読む関数をフックできなかったので、キーボードのキーは置き換えられない（マウスのボタンは置き換えられる）";
 
 /// Consecutive failed frames after which the overlay gives up for the session.
 const MAX_FAILURES: u32 = 30;
@@ -60,6 +64,15 @@ pub trait WindowSystem: Sync {
     fn raw_motion(&self, window: *mut c_void) -> bool;
     /// Whether the game has grabbed the cursor (it is being played, not showing a menu).
     fn captured(&self, window: *mut c_void) -> bool;
+    /// How the game's options.txt names keys under this library.
+    fn naming(&self) -> Naming;
+    /// Whether the game's reads of the key state go through the key rebinding. Without it keys
+    /// cannot be rebound: the game would read a held source as held (when a screen closes).
+    fn key_state_spoofed(&self) -> bool;
+    /// Whether the game can be given `id` (as a key or mouse button event) under this library.
+    fn can_send(&self, id: InputId) -> bool;
+    /// Whether this library reports presses of `id` (a rule's source must be one).
+    fn can_receive(&self, id: InputId) -> bool;
 }
 
 /// Draws the overlay into the back buffer right before the window system presents it.
@@ -192,6 +205,12 @@ struct Runtime {
     /// When the settings last changed, if not saved since.
     unsaved: Option<Instant>,
     tall: TallZoom,
+    /// The router's hotkeys, from `settings`.
+    hotkeys: Hotkeys,
+    /// Keys may be rebound ([`WindowSystem::key_state_spoofed`]), not only mouse buttons.
+    key_rebinds: bool,
+    /// Why some rebinding rules cannot work, for the menu.
+    rebind_note: Option<String>,
 }
 
 // SAFETY: the GL handles and objects are only used inside the swap detour while STATE is
@@ -229,12 +248,13 @@ impl Runtime {
         let settings_path = settings_path(&agent.game_dir);
         let settings = Settings::load(&settings_path);
         log::info!(
-            "settings: {} (menu {}, zoom {}, waypoint {}, navigate {})",
+            "settings: {} (menu {}, zoom {}, waypoint {}, navigate {}, {})",
             settings_path.display(),
             settings.menu_key,
             settings.zoom_key,
             settings.waypoint_key,
-            settings.navigate_key
+            settings.navigate_key,
+            rebinds_summary(&settings)
         );
 
         let context = OwnContext::create(wgl, hdc)?;
@@ -258,11 +278,20 @@ impl Runtime {
             }
         };
         log::info!("overlay: initialized");
-        {
-            let mut router = input::router();
-            router.set_hotkeys(hotkeys(&settings));
-            router.set_pointer_speed(pointer_speed(ws, window));
+        let keys = hotkeys(&settings);
+        let key_rebinds = ws.key_state_spoofed();
+        if !key_rebinds {
+            log::warn!("rebinds: the game's key state reads are not hooked; keys are not rebound");
         }
+        let rules = rebind_rules(ws, &settings, &keys);
+        let active = {
+            let mut router = input::router();
+            router.set_hotkeys(keys);
+            router.set_rebinds(rules, key_rebinds);
+            router.set_pointer_speed(pointer_speed(ws, window));
+            router.rebinds().to_vec()
+        };
+        log_active_rebinds(&active);
 
         let status = vec![
             StatusLine::new(
@@ -289,6 +318,9 @@ impl Runtime {
             settings_path,
             unsaved: None,
             tall: TallZoom::default(),
+            hotkeys: keys,
+            key_rebinds,
+            rebind_note: (!key_rebinds).then(|| NO_KEY_REBINDS.to_owned()),
         }))
     }
 
@@ -355,7 +387,16 @@ impl Runtime {
         let waypoint_commands = {
             let _current = self.context.make_current(wgl).map_err(FrameError::Failed)?;
             // Takes the router's hotkey actions, so before the router is locked below.
-            let marks = waypoints::before_frame(&agent.game_dir, self.window, playing);
+            let marks = waypoints::before_frame(&agent.game_dir, self.window, playing, ws.naming());
+            // Only the menu shows them.
+            let (game_bindings, unsupported_inputs) = if ui_open {
+                (
+                    waypoints::game_bindings(),
+                    unsupported_inputs(ws, &self.settings),
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
             let input = {
                 let mut router = input::router();
                 router.set_enabled(true);
@@ -371,6 +412,9 @@ impl Runtime {
                     waypoints: marks.view,
                     notices: marks.notices,
                     reserved_keys: marks.reserved_keys,
+                    game_bindings,
+                    rebind_note: self.rebind_note.clone(),
+                    unsupported_inputs,
                 }
             };
             let output = self.overlay.render(FrameParams {
@@ -380,7 +424,17 @@ impl Runtime {
                 status: &self.status,
                 input,
             });
-            {
+            // The rules again only when they or the hotkeys changed: resolving logs them (the
+            // zoom's slider changes the settings every frame while dragged).
+            let changed = output.settings.as_ref().map(|settings| {
+                let keys = hotkeys(settings);
+                let rules = (settings.rebinds_enabled != self.settings.rebinds_enabled
+                    || settings.rebinds != self.settings.rebinds
+                    || keys != self.hotkeys)
+                    .then(|| rebind_rules(ws, settings, &keys));
+                (keys, rules)
+            });
+            let active = {
                 let mut router = input::router();
                 if output.close_ui {
                     router.set_ui_open(false);
@@ -388,12 +442,28 @@ impl Runtime {
                 if output.start_capture {
                     router.start_capture();
                 }
+                if output.start_input_capture {
+                    router.start_input_capture();
+                }
                 if output.cancel_capture {
                     router.cancel_capture();
                 }
-                if let Some(settings) = &output.settings {
-                    router.set_hotkeys(hotkeys(settings));
+                match &changed {
+                    Some((keys, rules)) => {
+                        router.set_hotkeys(*keys);
+                        rules.as_ref().map(|rules| {
+                            router.set_rebinds(rules.clone(), self.key_rebinds);
+                            router.rebinds().to_vec()
+                        })
+                    }
+                    None => None,
                 }
+            };
+            if let Some(active) = active {
+                log_active_rebinds(&active);
+            }
+            if let Some((keys, _)) = changed {
+                self.hotkeys = keys;
             }
             if let Some(settings) = output.settings {
                 self.settings = settings;
@@ -435,13 +505,14 @@ impl Runtime {
         self.unsaved = None;
         match self.settings.save(&self.settings_path) {
             Ok(()) => log::info!(
-                "settings saved (menu {}, zoom {}, waypoint {}, navigate {}, ×{:.1}, high resolution {})",
+                "settings saved (menu {}, zoom {}, waypoint {}, navigate {}, ×{:.1}, high resolution {}, {})",
                 self.settings.menu_key,
                 self.settings.zoom_key,
                 self.settings.waypoint_key,
                 self.settings.navigate_key,
                 self.settings.zoom_factor,
-                self.settings.zoom_high_res
+                self.settings.zoom_high_res,
+                rebinds_summary(&self.settings)
             ),
             Err(e) => log::error!(
                 "cannot save settings to {}: {e}",
@@ -480,5 +551,50 @@ impl Runtime {
             Err(e) => log::warn!("cannot free overlay resources: {e}"),
         }
         context.delete(wgl);
+    }
+}
+
+/// The key rebinding's rules in `settings` the router uses ([`resolve`]): less those the
+/// window library cannot report the source of or give the game the output of.
+fn rebind_rules(
+    ws: &dyn WindowSystem,
+    settings: &Settings,
+    keys: &Hotkeys,
+) -> Vec<(InputId, InputId)> {
+    resolve(settings, keys, &unsupported_inputs(ws, settings))
+}
+
+/// The keys and buttons of the rules in `settings` that the window library cannot report (as
+/// a source) or give the game (as an output).
+fn unsupported_inputs(ws: &dyn WindowSystem, settings: &Settings) -> Vec<InputId> {
+    let mut ids = Vec::new();
+    for rule in &settings.rebinds {
+        let from = input_by_name(&rule.from, Naming::Modern).filter(|&id| !ws.can_receive(id));
+        let to = input_by_name(&rule.to, Naming::Modern).filter(|&id| !ws.can_send(id));
+        for id in from.into_iter().chain(to) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+/// The rules the router uses in the end (keys may be left out there, see
+/// [`WindowSystem::key_state_spoofed`]).
+fn log_active_rebinds(rules: &[(InputId, InputId)]) {
+    let list: Vec<String> = rules
+        .iter()
+        .map(|&(from, to)| format!("{} -> {}", input_name(from), input_name(to)))
+        .collect();
+    log::info!("rebinds: {} active ({})", rules.len(), list.join(", "));
+}
+
+/// `rebinds 2` or `rebinds off (2)`, for the settings' log lines.
+fn rebinds_summary(settings: &Settings) -> String {
+    if settings.rebinds_enabled {
+        format!("rebinds {}", settings.rebinds.len())
+    } else {
+        format!("rebinds off ({})", settings.rebinds.len())
     }
 }

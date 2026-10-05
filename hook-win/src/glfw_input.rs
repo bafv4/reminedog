@@ -6,6 +6,10 @@
 //! (`Callbacks.glfwFreeCallbacks` at shutdown), so returning a wrapper would crash on exit.
 //! Wrappers never call game code while holding a lock.
 //!
+//! The key rebinding gives the game's callbacks the router's output in place of the event, key
+//! or mouse button alike; `glfwGetKey` and the modifier bits of key events report what the
+//! game got ([`rebind_state`]).
+//!
 //! F3+C for waypoints ([`f3c`]) goes straight to the game's key callback after a swap
 //! ([`run_f3c`]); `glfwSetClipboardString` is detoured to catch the location, and
 //! `glfwGetKey` to report the modifier as held meanwhile (Minecraft 1.16 reads F3 that way).
@@ -15,14 +19,18 @@ use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use reminedog_core::{DebugKeys, glfw_key};
-use reminedog_render::{Key, PointerButton, Route};
+use reminedog_core::{
+    DebugKeys, InputId, glfw_button_of, glfw_key, glfw_key_of, input_from_glfw_button,
+    input_from_glfw_key,
+};
+use reminedog_render::{Delivery, Key, Output, Phase, PointerButton, Route};
 use windows_sys::Win32::Foundation::HMODULE;
 
 use crate::f3c::{self, Failure, Injected, Purpose};
 use crate::ffi;
 use crate::hook::{self, export};
 use crate::input::{self, FUNCTION_KEYS, router};
+use crate::rebind_state;
 
 type KeyFn = unsafe extern "C" fn(*mut c_void, c_int, c_int, c_int, c_int);
 type CharFn = unsafe extern "C" fn(*mut c_void, c_uint);
@@ -45,6 +53,35 @@ const KEY_RIGHT_CONTROL: c_int = 345;
 const MOD_SHIFT: c_int = 0x1;
 const MOD_CONTROL: c_int = 0x2;
 const MOD_ALT: c_int = 0x4;
+const MOD_SUPER: c_int = 0x8;
+/// The modifier bits the rebinding may change; Caps Lock's and Num Lock's stay.
+const MOD_KEYS: c_int = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
+/// The modifier keys and their bits: the left Shift, Control, Alt and Super, then the right
+/// ones. A bit is set while either of its keys is held.
+const MODIFIER_KEYS: [(c_int, c_int); 8] = [
+    (340, MOD_SHIFT),
+    (341, MOD_CONTROL),
+    (342, MOD_ALT),
+    (343, MOD_SUPER),
+    (344, MOD_SHIFT),
+    (345, MOD_CONTROL),
+    (346, MOD_ALT),
+    (347, MOD_SUPER),
+];
+/// GLFW key codes are below this (`GLFW_KEY_LAST` + 1).
+const KEY_COUNT: usize = 349;
+/// The rebinding's key id (SDL scancode) of each GLFW key code; 0 for none.
+const KEY_IDS: [u16; KEY_COUNT] = {
+    let mut ids = [0; KEY_COUNT];
+    let mut key = 0;
+    while key < KEY_COUNT {
+        if let Some(InputId::Key(sc)) = input_from_glfw_key(key as c_int, 0) {
+            ids[key] = sc;
+        }
+        key += 1;
+    }
+    ids
+};
 const CURSOR: c_int = 0x0003_3001;
 const CURSOR_DISABLED: c_int = 0x0003_4003;
 const RAW_MOUSE_MOTION: c_int = 0x0003_3005;
@@ -80,6 +117,8 @@ static GET_KEY_SCANCODE: OnceLock<GetKeyScancodeFn> = OnceLock::new();
 /// (0 = off).
 static SPOOF_WINDOW: AtomicUsize = AtomicUsize::new(0);
 static SPOOF_KEY: AtomicI32 = AtomicI32::new(0);
+/// glfwGetKey is detoured: the game reads the key state the rebinding gives it.
+static KEY_STATE_SPOOFED: AtomicBool = AtomicBool::new(false);
 
 fn game_callbacks(window: *mut c_void) -> GameCallbacks {
     let game = GAME.lock().unwrap_or_else(|e| e.into_inner());
@@ -257,12 +296,13 @@ pub fn install(module: HMODULE) {
         // SAFETY: glfwGetKey has this signature.
         let _ = GET_KEY_EXPORT.set(unsafe { std::mem::transmute::<*const c_void, GetKeyFn>(f) });
     }
-    hook!(
+    let get_key_hooked = hook!(
         c"glfwGetKey",
         get_key_detour,
         GET_KEY,
-        "older Minecraft versions may refuse F3+C"
+        "older Minecraft versions may refuse F3+C, and keys cannot be rebound"
     );
+    KEY_STATE_SPOOFED.store(get_key_hooked, Ordering::Relaxed);
     if let Some(f) = export(module, c"glfwGetKeyScancode") {
         // SAFETY: glfwGetKeyScancode has this signature (GLFW 3.3+; optional).
         let _ = GET_KEY_SCANCODE
@@ -279,6 +319,18 @@ fn modifiers(mods: c_int) -> reminedog_render::Modifiers {
     )
 }
 
+/// Whether the game reads the key state the rebinding gives it (without that, keys cannot be
+/// rebound: a held source would read as held).
+pub fn key_state_spoofed() -> bool {
+    KEY_STATE_SPOOFED.load(Ordering::Relaxed)
+}
+
+/// The rebinding's key id of a GLFW key code (key -1 has none: GLFW keeps no state for it).
+fn key_id(key: c_int) -> Option<InputId> {
+    let id = *KEY_IDS.get(usize::try_from(key).ok()?)?;
+    (id != 0).then_some(InputId::Key(id))
+}
+
 unsafe extern "C" fn key_wrapper(
     window: *mut c_void,
     key: c_int,
@@ -286,29 +338,122 @@ unsafe extern "C" fn key_wrapper(
     action: c_int,
     mods: c_int,
 ) {
-    let route = ffi::catch("GLFW key", || {
+    let delivery = ffi::catch("GLFW key", || {
         let pressed = action == PRESS || action == REPEAT;
-        router().key(
+        let mut router = router();
+        let delivery = router.key(
             egui_key(key),
+            input_from_glfw_key(key, scancode),
             pressed,
             action == REPEAT,
             modifiers(mods),
             captured(window),
-        )
+            key == -1,
+        );
+        // GLFW updated its key state before calling us; the game reads ours from now on.
+        rebind_state::apply(window as usize, &router.rebind_state());
+        delivery
     });
-    if route != Some(Route::Consume)
-        && let Some(game) = game_callbacks(window).key
-    {
-        // The user's own F3+C: a location the game copies while handling this is theirs.
-        let passive = action == PRESS && f3c::passive_key_glfw(key);
-        if passive {
-            ffi::catch("GLFW F3+C", f3c::begin_passive);
+    match delivery.unwrap_or(Delivery::Forward) {
+        Delivery::Forward => key_to_game(window, key, scancode, action, adjust_mods(window, mods)),
+        Delivery::Consume => {}
+        Delivery::Send(output) => send_output(window, output, adjust_mods(window, mods), mods),
+    }
+}
+
+/// Calls the game's key callback. The user's own F3+C: a location the game copies while
+/// handling the copy key's press is theirs.
+fn key_to_game(window: *mut c_void, key: c_int, scancode: c_int, action: c_int, mods: c_int) {
+    let Some(game) = game_callbacks(window).key else {
+        return;
+    };
+    let passive = action == PRESS && f3c::passive_key_glfw(key);
+    if passive {
+        ffi::catch("GLFW F3+C", f3c::begin_passive);
+    }
+    // SAFETY: a window GLFW passed us, on the thread that handles its events.
+    unsafe { game(window, key, scancode, action, mods) };
+    if passive {
+        ffi::catch("GLFW F3+C", f3c::end_passive);
+    }
+}
+
+/// Gives the game the rebinding's `output` as GLFW would report it: a key with `key_mods`, a
+/// mouse button with `button_mods` (Minecraft takes a click's modifiers as they physically are).
+fn send_output(window: *mut c_void, output: Output, key_mods: c_int, button_mods: c_int) {
+    match output.id {
+        InputId::Key(_) => {
+            let Some((key, scancode)) = glfw_key_of(output.id) else {
+                return;
+            };
+            // What GLFW reports for the key, else the table's. Not asked for key -1 (GLFW would
+            // report an invalid key to the game's error callback).
+            let scancode = match key {
+                -1 => scancode,
+                _ => match key_scancode(key) {
+                    0 => scancode,
+                    reported => reported,
+                },
+            };
+            let action = match output.phase {
+                Phase::Press => PRESS,
+                Phase::Repeat => REPEAT,
+                Phase::Release => RELEASE,
+            };
+            key_to_game(window, key, scancode, action, key_mods);
         }
-        // SAFETY: forwarding GLFW's arguments to the game's callback.
-        unsafe { game(window, key, scancode, action, mods) };
-        if passive {
-            ffi::catch("GLFW F3+C", f3c::end_passive);
+        InputId::Mouse(_) => {
+            // A mouse button never repeats; the game would take a repeat for a release.
+            let action = match output.phase {
+                Phase::Press => PRESS,
+                Phase::Release => RELEASE,
+                Phase::Repeat => return,
+            };
+            if let Some(button) = glfw_button_of(output.id)
+                && let Some(game) = game_callbacks(window).mouse_button
+            {
+                // SAFETY: as above.
+                unsafe { game(window, button, action, button_mods) };
+            }
         }
+    }
+}
+
+/// The modifier bits of a key event for the game. While the rebinding has a say on a modifier
+/// key, Shift, Control, Alt and Super follow the key state the game reads (GLFW sets them from
+/// the physical keys, so a key rebound to Ctrl would not set Control, and Ctrl rebound to F3
+/// would turn F3+B into Ctrl+B).
+fn adjust_mods(window: *mut c_void, mods: c_int) -> c_int {
+    if !rebind_state::modifiers_forced() {
+        return mods;
+    }
+    let real = real_get_key();
+    rebuild_mods(mods, |key| {
+        let physically = || {
+            // SAFETY: a window GLFW passed us, on its event thread; a valid key code.
+            real.is_some_and(|get| unsafe { get(window, key) } == PRESS)
+        };
+        match key_id(key) {
+            Some(id) => rebind_state::held(id, physically),
+            None => physically(),
+        }
+    })
+}
+
+/// `mods` with the Shift, Control, Alt and Super bits set by which modifier keys are `held`.
+fn rebuild_mods(mods: c_int, held: impl Fn(c_int) -> bool) -> c_int {
+    MODIFIER_KEYS.iter().fold(
+        mods & !MOD_KEYS,
+        |bits, &(key, bit)| {
+            if held(key) { bits | bit } else { bits }
+        },
+    )
+}
+
+/// The safety net's releases ([`rebind_state::lost_releases`]), after a swap of `window`.
+pub fn release_lost_keys(window: *mut c_void) {
+    for output in rebind_state::lost_releases(window as usize) {
+        send_output(window, output, 0, 0);
     }
 }
 
@@ -345,22 +490,30 @@ unsafe extern "C" fn mouse_button_wrapper(
     action: c_int,
     mods: c_int,
 ) {
-    let route = ffi::catch("GLFW mouse button", || {
-        let button = match button {
+    let delivery = ffi::catch("GLFW mouse button", || {
+        let raw = input_from_glfw_button(button);
+        let pointer = match button {
             0 => PointerButton::Primary,
             1 => PointerButton::Secondary,
             2 => PointerButton::Middle,
             3 => PointerButton::Extra1,
             4 => PointerButton::Extra2,
-            _ => return Route::Forward,
+            _ => return Delivery::Forward,
         };
-        router().button(button, action == PRESS, captured(window))
+        let mut router = router();
+        let delivery = router.button(pointer, raw, action == PRESS, captured(window));
+        rebind_state::apply(window as usize, &router.rebind_state());
+        delivery
     });
-    if route != Some(Route::Consume)
-        && let Some(game) = game_callbacks(window).mouse_button
-    {
-        // SAFETY: as above.
-        unsafe { game(window, button, action, mods) };
+    match delivery.unwrap_or(Delivery::Forward) {
+        Delivery::Forward => {
+            if let Some(game) = game_callbacks(window).mouse_button {
+                // SAFETY: as above.
+                unsafe { game(window, button, action, mods) };
+            }
+        }
+        Delivery::Consume => {}
+        Delivery::Send(output) => send_output(window, output, adjust_mods(window, mods), mods),
     }
 }
 
@@ -389,7 +542,19 @@ unsafe extern "C" fn scroll_wrapper(window: *mut c_void, dx: f64, dy: f64) {
 
 unsafe extern "C" fn focus_wrapper(window: *mut c_void, focused: c_int) {
     if focused == 0 {
-        ffi::catch("GLFW focus", || router().focus_lost());
+        // GLFW sends the releases of held keys (but key -1) and buttons after this callback,
+        // which the router drops for rebound sources: their outputs are released here, first.
+        let releases = ffi::catch("GLFW focus", || {
+            let mut router = router();
+            let releases = router.focus_lost(|id| !matches!(glfw_key_of(id), Some((-1, _))));
+            rebind_state::apply(window as usize, &router.rebind_state());
+            releases
+        })
+        .unwrap_or_default();
+        for output in releases {
+            // Without modifiers, as GLFW's own releases on focus loss.
+            send_output(window, output, 0, 0);
+        }
     }
     if let Some(game) = game_callbacks(window).focus {
         // SAFETY: as above.
@@ -434,8 +599,9 @@ unsafe extern "C" fn set_clipboard_string_detour(window: *mut c_void, text: *con
     }
 }
 
-/// The real key state, except the modifier while F3+C is being sent (Minecraft 1.16 asks
-/// glfwGetKey whether F3 is held when C's key event arrives).
+/// The key state the game should see: the modifier while F3+C is being sent (Minecraft 1.16
+/// asks glfwGetKey whether F3 is held when C's key event arrives), else the rebinding's say
+/// ([`rebind_state`]), else the real state. Lock-free: the game calls it often.
 unsafe extern "C" fn get_key_detour(window: *mut c_void, key: c_int) -> c_int {
     let state = match GET_KEY.get() {
         // SAFETY: the caller's arguments; GLFW reports its own errors.
@@ -444,9 +610,12 @@ unsafe extern "C" fn get_key_detour(window: *mut c_void, key: c_int) -> c_int {
     };
     let spoofed = SPOOF_WINDOW.load(Ordering::Relaxed);
     if spoofed != 0 && spoofed == window as usize && SPOOF_KEY.load(Ordering::Relaxed) == key {
-        PRESS
-    } else {
-        state
+        return PRESS;
+    }
+    match key_id(key).and_then(|id| rebind_state::forced_in(window as usize, id)) {
+        Some(true) => PRESS,
+        Some(false) => RELEASE,
+        None => state,
     }
 }
 
@@ -500,7 +669,8 @@ fn check_f3c(window: *mut c_void, keys: &DebugKeys) -> Result<(c_int, c_int), Fa
     // A held crash key would arm Minecraft's debug crash once the modifier is down, the real
     // release of a held modifier would come after ours (and toggle the debug overlay), and,
     // where the copy key also drops items, Ctrl would make a refused C drop a whole stack
-    // (only then: Ctrl is often held to sprint).
+    // (only then: Ctrl is often held to sprint). Held as the game reads them: a key rebound
+    // to one of them counts, one rebound to another key does not.
     let ctrl = keys.copy_drops_items();
     let watched = [
         Some(codes.modifier),
@@ -509,13 +679,21 @@ fn check_f3c(window: *mut c_void, keys: &DebugKeys) -> Result<(c_int, c_int), Fa
         ctrl.then_some(KEY_LEFT_CONTROL),
         ctrl.then_some(KEY_RIGHT_CONTROL),
     ];
-    // SAFETY: a window GLFW passed us, on its event thread; valid key codes.
-    if watched
+    let held: Vec<c_int> = watched
         .into_iter()
         .flatten()
-        .any(|key| unsafe { get_key(window, key) } == PRESS)
-    {
-        return Err(Failure::KeysHeld);
+        .filter(|&key| {
+            // SAFETY: a window GLFW passed us, on its event thread; valid key codes.
+            let physically = || unsafe { get_key(window, key) } == PRESS;
+            match key_id(key) {
+                Some(id) => rebind_state::held(id, physically),
+                None => physically(),
+            }
+        })
+        .collect();
+    if !held.is_empty() {
+        let ids: Vec<InputId> = held.into_iter().filter_map(key_id).collect();
+        return Err(Failure::KeysHeld(rebind_state::rule_holding(&ids)));
     }
     if game_callbacks(window).key.is_none() {
         return Err(Failure::NoCallback);
@@ -682,4 +860,49 @@ fn egui_key(key: c_int) -> Option<Key> {
         334 => Key::Plus,                          // keypad +
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_ids_of_glfw_key_codes() {
+        assert_eq!(key_id(65), Some(InputId::Key(4))); // A
+        assert_eq!(key_id(292), Some(InputId::Key(60))); // F3
+        assert_eq!(key_id(340), Some(InputId::Key(225))); // left Shift
+        assert_eq!(key_id(347), Some(InputId::Key(231))); // right Super
+        assert_eq!(key_id(348), Some(InputId::Key(101))); // Menu
+        // Both of GLFW's "world" keys are the ISO key.
+        assert_eq!(key_id(161), Some(InputId::Key(100)));
+        assert_eq!(key_id(162), Some(InputId::Key(100)));
+        // Key -1, codes GLFW does not use, F25 (SDL3 has none), out of range.
+        for key in [-1, i32::MIN, 0, 31, 64, 314, 349, i32::MAX] {
+            assert_eq!(key_id(key), None, "{key}");
+        }
+        // The modifier keys are the rebinding's modifier keys.
+        for (key, _) in MODIFIER_KEYS {
+            let Some(InputId::Key(id)) = key_id(key) else {
+                panic!("{key}");
+            };
+            assert!(
+                rebind_state::MODIFIER_SCANCODES.contains(&usize::from(id)),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn modifier_bits_follow_the_held_keys() {
+        const CAPS_LOCK: c_int = 0x10;
+        // Nothing held: only Caps Lock's bit stays.
+        assert_eq!(rebuild_mods(MOD_KEYS | CAPS_LOCK, |_| false), CAPS_LOCK);
+        // Either side sets the bit.
+        assert_eq!(rebuild_mods(0, |key| key == 345), MOD_CONTROL);
+        assert_eq!(rebuild_mods(0, |key| key == 340), MOD_SHIFT);
+        assert_eq!(
+            rebuild_mods(MOD_CONTROL, |key| matches!(key, 342 | 347)),
+            MOD_ALT | MOD_SUPER
+        );
+    }
 }

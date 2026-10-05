@@ -7,6 +7,9 @@
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::{Mutex, OnceLock};
 
+use reminedog_core::{
+    InputId, Naming, glfw_button_of, glfw_key_of, input_from_glfw_button, input_from_glfw_key,
+};
 use windows_sys::Win32::Foundation::{HMODULE, HWND};
 
 use crate::ffi;
@@ -74,6 +77,30 @@ impl WindowSystem for Glfw {
 
     fn captured(&self, window: *mut c_void) -> bool {
         crate::glfw_input::captured(window)
+    }
+
+    fn naming(&self) -> Naming {
+        Naming::Glfw
+    }
+
+    fn key_state_spoofed(&self) -> bool {
+        crate::glfw_input::key_state_spoofed()
+    }
+
+    fn can_send(&self, id: InputId) -> bool {
+        match id {
+            InputId::Key(_) => glfw_key_of(id).is_some(),
+            InputId::Mouse(_) => glfw_button_of(id).is_some(),
+        }
+    }
+
+    /// The keys and buttons whose GLFW codes come back as themselves.
+    fn can_receive(&self, id: InputId) -> bool {
+        match id {
+            InputId::Key(_) => glfw_key_of(id)
+                .is_some_and(|(key, scancode)| input_from_glfw_key(key, scancode) == Some(id)),
+            InputId::Mouse(_) => glfw_button_of(id).and_then(input_from_glfw_button) == Some(id),
+        }
     }
 
     fn describe(&self) -> String {
@@ -186,6 +213,7 @@ unsafe extern "C" fn swap_buffers_detour(window: *mut c_void) {
     }
     // A waypoint request: F3+C, now that the frame is out and no lock is held.
     ffi::catch("F3+C", || crate::glfw_input::run_f3c(window));
+    ffi::catch("rebinds", || crate::glfw_input::release_lost_keys(window));
 }
 
 /// Reports the tall size to the game while zooming.

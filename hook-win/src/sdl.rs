@@ -9,6 +9,7 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use reminedog_core::{InputId, Naming, SCANCODE_COUNT};
 use windows_sys::Win32::Foundation::{HMODULE, HWND};
 
 use crate::ffi;
@@ -131,6 +132,28 @@ impl WindowSystem for Sdl {
 
     fn captured(&self, window: *mut c_void) -> bool {
         crate::sdl_input::captured(window)
+    }
+
+    fn naming(&self) -> Naming {
+        Naming::Modern
+    }
+
+    fn key_state_spoofed(&self) -> bool {
+        crate::sdl_input::key_state_spoofed()
+    }
+
+    /// Any scancode SDL3 knows, and the five buttons it reports on Windows.
+    fn can_send(&self, id: InputId) -> bool {
+        match id {
+            InputId::Key(scancode) => (4..SCANCODE_COUNT).contains(&usize::from(scancode)),
+            InputId::Mouse(button) => (1..=5).contains(&button),
+        }
+    }
+
+    /// The same as [`can_send`](Self::can_send): the hooks take SDL3's scancodes and buttons
+    /// as they are.
+    fn can_receive(&self, id: InputId) -> bool {
+        self.can_send(id)
     }
 
     fn framebuffer_size(&self, window: *mut c_void) -> (i32, i32) {
@@ -331,7 +354,9 @@ unsafe extern "C" fn gl_swap_window_detour(window: *mut c_void) -> bool {
         }
     });
     // SAFETY: same arguments the caller passed us.
-    unsafe { original(window) }
+    let swapped = unsafe { original(window) };
+    ffi::catch("rebinds", || crate::sdl_input::release_lost_keys(window));
+    swapped
 }
 
 /// Reports the zoom's tall size to the game while zooming.
