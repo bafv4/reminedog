@@ -4,6 +4,7 @@
 // Usage: java -cp <lwjgl jars>;<classes> Smoke [FRAMES] [--legacy] [--readback] [--screenshot]
 //                                            [--seconds=N] [--capture] [--mc] [--world=NAME]
 //                                            [--f3c-events] [--f3c-refuse]
+//                                            [--screen-key=KEY [--watch-keys=KEY,...]]
 //   FRAMES      frames to render (default 120)
 //   --legacy    default window hints, like Minecraft 1.13-1.16 (else 3.2 core, like 1.17+)
 //   --readback  after the last swap, print "PIXEL x y r g b" (front buffer) and
@@ -22,6 +23,15 @@
 //   --f3c-events  F3 is held when its key events say so, like Minecraft 1.21.9+ (else when
 //                 glfwGetKey(F3) says so as a key is handled, like 1.16)
 //   --f3c-refuse  F3+C copies nothing, like a world with reduced debug info
+//   --screen-key=KEY  pressing the key with this GLFW key code (e.g. 69 for E) opens a fake
+//                 screen, which releases the cursor ("SCREEN open"), or closes it, which grabs
+//                 the cursor again like Minecraft (SmokeImage.Screen). The run starts in game
+//                 with --capture, else on a screen
+//   --watch-keys=KEY,...  when the screen closes, print "SETALL <key>=<0|1> ..." for these GLFW
+//                 key codes as glfwGetKey reads them just before the cursor is grabbed, as
+//                 Minecraft's KeyMapping.setAll does
+// SMOKE_VERBOSE=1 prints what the "game" receives: "KEY key scancode action mods",
+// "BUTTON button action mods" and "FOCUS 0|1" (GLFW's callback arguments).
 // Every frame it checks that the game's WGL context is still current and that there is no
 // GL error, so an agent that leaks state into the game's context fails the run. The debug
 // keys act like Minecraft's (SmokeImage.DebugKeys): pressing C while F3 is held copies a
@@ -52,7 +62,7 @@ public final class Smoke {
     // F3 as its key events left it (--f3c-events).
     private static boolean f3Down;
     private static final StringBuilder typed = new StringBuilder();
-    // SMOKE_VERBOSE=1 prints every key event the "game" receives.
+    // SMOKE_VERBOSE=1 prints every key, mouse button and focus event the "game" receives.
     private static final boolean VERBOSE = System.getenv("SMOKE_VERBOSE") != null;
     private static String lastGlfwError = "none";
 
@@ -87,9 +97,15 @@ public final class Smoke {
         boolean f3cEvents = false, f3cRefuse = false;
         String world = null;
         double seconds = 0;
+        int screenKey = 0;
+        int[] watchKeys = null;
         for (String arg : args) {
             if (arg.startsWith("--seconds=")) {
                 seconds = Double.parseDouble(arg.substring("--seconds=".length()));
+            } else if (arg.startsWith("--screen-key=")) {
+                screenKey = SmokeImage.keyCode(arg, GLFW_KEY_SPACE, GLFW_KEY_LAST);
+            } else if (arg.startsWith("--watch-keys=")) {
+                watchKeys = SmokeImage.keyCodes(arg, GLFW_KEY_SPACE, GLFW_KEY_LAST);
             } else if (arg.startsWith("--world=")) {
                 world = arg.substring("--world=".length());
             } else if (arg.equals("--f3c-events")) {
@@ -116,6 +132,9 @@ public final class Smoke {
                     throw new Fail("frame count must be positive: " + arg);
                 }
             }
+        }
+        if (watchKeys != null && screenKey == 0) {
+            throw new Fail("--watch-keys needs --screen-key");
         }
         long t0 = System.nanoTime();
         System.out.println("LWJGL " + Version.getVersion());
@@ -162,10 +181,14 @@ public final class Smoke {
         final boolean events = f3cEvents;
         final SmokeImage.DebugKeys debugKeys = new SmokeImage.DebugKeys(f3cRefuse,
             () -> glfwSetClipboardString(window, SmokeImage.DebugKeys.F3C_TEXT));
+        final SmokeImage.Screen screen = screenKey == 0 ? null
+            : new SmokeImage.Screen(screenKey, !capture, watchKeys != null ? watchKeys : new int[0],
+                key -> glfwGetKey(window, key) == GLFW_PRESS,
+                () -> setCursor(window, GLFW_CURSOR_NORMAL), () -> setCursor(window, GLFW_CURSOR_DISABLED));
         glfwSetKeyCallback(window, (w, key, scancode, action, mods) -> {
             keys++;
             if (VERBOSE) {
-                System.out.printf("KEY %d %d %d%n", key, action, mods);
+                System.out.printf("KEY %d %d %d %d%n", key, scancode, action, mods);
             }
             // Minecraft 1.16 asks glfwGetKey whether F3 is held; 1.21.9+ follows F3's key events.
             // Both read the crash key's real state with glfwGetKey.
@@ -179,12 +202,20 @@ public final class Smoke {
             if (key == GLFW_KEY_F3) {
                 f3Down = action != GLFW_RELEASE;
             }
+            if (screen != null && action == GLFW_PRESS) {
+                screen.keyPressed(key);
+            }
         });
         glfwSetCharModsCallback(window, (w, codepoint, mods) -> {
             chars++;
             typed.appendCodePoint(codepoint);
         });
-        glfwSetMouseButtonCallback(window, (w, button, action, mods) -> buttons++);
+        glfwSetMouseButtonCallback(window, (w, button, action, mods) -> {
+            buttons++;
+            if (VERBOSE) {
+                System.out.printf("BUTTON %d %d %d%n", button, action, mods);
+            }
+        });
         glfwSetCursorPosCallback(window, (w, x, y) -> cursorMoves++);
         glfwSetScrollCallback(window, (w, dx, dy) -> scrolls++);
         final int[] fbSize = new int[2];
@@ -198,12 +229,18 @@ public final class Smoke {
             fbSize[0] = width;
             fbSize[1] = height;
         });
+        // Minecraft follows the window's focus too (the agent learns of focus loss through it).
+        glfwSetWindowFocusCallback(window, (w, focused) -> {
+            if (VERBOSE) {
+                System.out.println("FOCUS " + (focused ? 1 : 0));
+            }
+        });
         SmokeImage.MainTarget mainTarget = mc ? new SmokeImage.MainTarget() : null;
         if (capture) {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            if (glfwRawMouseMotionSupported()) {
-                glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
-            }
+        }
+        if ((capture || screen != null) && glfwRawMouseMotionSupported()) {
+            glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
         }
 
         // The agent swaps GL contexts inside the swap; make sure ours is current afterwards.
@@ -301,6 +338,15 @@ public final class Smoke {
         int[] w = new int[1], h = new int[1];
         glfwGetFramebufferSize(window, w, h);
         SmokeImage.saveBackBuffer(w[0], h[0], path);
+    }
+
+    // Minecraft's InputConstants.grabOrReleaseMouse: the cursor to the window's centre, then
+    // the cursor mode.
+    private static void setCursor(long window, int mode) {
+        int[] w = new int[1], h = new int[1];
+        glfwGetWindowSize(window, w, h);
+        glfwSetCursorPos(window, w[0] / 2.0, h[0] / 2.0);
+        glfwSetInputMode(window, GLFW_CURSOR, mode);
     }
 
     private static void sleep(long millis) {

@@ -1,5 +1,6 @@
 // Helpers shared by the smoke harnesses (Smoke, SmokeSdl): screenshots, the drawn frames,
-// Minecraft's debug keys around F3+C and the files of an open world. Java 8 source.
+// Minecraft's debug keys around F3+C, a screen that releases the cursor, and the files of an
+// open world. Java 8 source.
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -11,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.function.IntPredicate;
 import java.util.zip.CRC32;
 import java.util.zip.DeflaterOutputStream;
 
@@ -232,6 +234,81 @@ final class SmokeImage {
             System.out.printf("F3C STATE overlay=%s modifier=%s copies=%d%n",
                 overlay ? "on" : "off", modifierDown ? "down" : "up", copies);
         }
+    }
+
+    // A Minecraft screen opened and closed with one key (--screen-key), as the inventory is,
+    // so the agent's key state spoofing can be tested:
+    // - opening it releases the cursor ("SCREEN open");
+    // - closing it grabs the cursor again (MouseHandler.grabMouse), which first re-reads the
+    //   keyboard mappings' keys from the window system (KeyMapping.setAll). The harness prints
+    //   the watched keys (--watch-keys) as read the same way: "SETALL <code>=<0|1> ...".
+    // The harness feeds in the key presses (not repeats) of the game's window.
+    static final class Screen {
+        private final int key;
+        private final int[] watchKeys;
+        private final IntPredicate keyDown;
+        private final Runnable release, grab;
+        private boolean open;
+
+        // open: whether the game starts on a screen (the cursor is not grabbed).
+        Screen(int key, boolean open, int[] watchKeys, IntPredicate keyDown, Runnable release, Runnable grab) {
+            this.key = key;
+            this.open = open;
+            this.watchKeys = watchKeys;
+            this.keyDown = keyDown;
+            this.release = release;
+            this.grab = grab;
+        }
+
+        void keyPressed(int code) {
+            if (code != key) {
+                return;
+            }
+            if (!open) {
+                open = true;
+                System.out.println("SCREEN open");
+                release.run();
+                return;
+            }
+            StringBuilder line = new StringBuilder("SETALL");
+            for (int watched : watchKeys) {
+                line.append(' ').append(watched).append('=').append(keyDown.test(watched) ? 1 : 0);
+            }
+            System.out.println(line);
+            open = false;
+            grab.run();
+        }
+    }
+
+    // The key codes of an option like --watch-keys=87,341 (GLFW key codes or SDL scancodes),
+    // each from min to max.
+    static int[] keyCodes(String arg, int min, int max) {
+        int eq = arg.indexOf('=');
+        String[] parts = arg.substring(eq + 1).split(",", -1);
+        int[] codes = new int[parts.length];
+        for (int i = 0; i < parts.length; i++) {
+            int code;
+            try {
+                code = Integer.parseInt(parts[i].trim());
+            } catch (NumberFormatException e) {
+                code = min - 1;
+            }
+            if (code < min || code > max) {
+                throw new IllegalArgumentException(arg.substring(0, eq) + " needs key codes from " + min
+                    + " to " + max + ", not '" + parts[i] + "'");
+            }
+            codes[i] = code;
+        }
+        return codes;
+    }
+
+    // The one key code of an option like --screen-key=69.
+    static int keyCode(String arg, int min, int max) {
+        int[] codes = keyCodes(arg, min, max);
+        if (codes.length != 1) {
+            throw new IllegalArgumentException(arg.substring(0, arg.indexOf('=')) + " needs one key code");
+        }
+        return codes[0];
     }
 
     // What Minecraft leaves in its game directory while a singleplayer world is open, which is
