@@ -27,12 +27,15 @@ Ctrl+I でメニューを開き、マウスとキーボードで操作できる�
 core/      OS に依存しない処理：F3+C のパース、options.txt のキー設定とキーの名前の表、ウェイポイントの保存、ワールドの判定、方角と距離、ログ
 render/    glow + egui_glow によるオーバーレイの描画
 hook-win/  Windows 用のエージェント（reminedog.dll）：DLL の読み込みの監視、デトア、WGL
+installer/ インストーラー（Kotlin、Swing＋FlatLaf）：DLL を置き、ランチャーのインスタンスの JVM 引数に -agentpath を足す
 ci/smoke/  LWJGL で Minecraft と同じように GLFW のウィンドウを作るテスト用のプログラム
 scripts/   Linux 上で Wine を使ってエージェントを動かすスクリプト
 ```
 
 ## DLL の入手
 
+- **インストーラー**：`reminedog-installer.jar`（下の「インストーラー」）が、GitHub の最新のリリースから `reminedog.dll` をダウンロードする。
+  ダウンロードできるのは、リポジトリが公開されていて、リリースに `reminedog.dll` という名前のファイルが付いているときだけ（今はリポジトリが非公開で、リリースもない）
 - **GitHub Actions**：リポジトリの Actions タブ → 最新の `CI` の実行 → Artifacts の `reminedog-windows-x64` をダウンロードする
 - **自分でビルドする**（Windows）：[Rust](https://rustup.rs/) と Visual Studio Build Tools（C++ によるデスクトップ開発）を入れて、次を実行する
 
@@ -47,7 +50,9 @@ scripts/   Linux 上で Wine を使ってエージェントを動かすスクリ
 必要なもの：Windows 10 / 11 と 64 ビット（x64）版の Java（Minecraft のランチャーが使う Java は通常これ）。
 Arm 版 Windows の arm64 版 Java では読み込めない。
 
-JVM は `-agentpath:` の DLL を読み込めないと起動をやめるので、ゲームが起動しなくなったときは JVM 引数から外す。
+JVM は `-agentpath:` の DLL を読み込めないと起動をやめるので、ゲームが起動しなくなったときは JVM 引数から外す（インストーラーの「アンインストール」でも外せる）。
+
+1、2 はインストーラーでもできる（下の「インストーラー」）。
 
 1. `reminedog.dll` を、パスに日本語も空白（スペース）も含まない場所に置く（例：`C:\reminedog\reminedog.dll`）。
    JVM 引数は空白で区切られるので、`C:\Program Files` や空白を含むユーザー名のフォルダは使えない（引用符で囲む方法はランチャーによって効かない）
@@ -61,6 +66,32 @@ JVM は `-agentpath:` の DLL を読み込めないと起動をやめるので�
 3. ゲームを起動する。ログはゲームフォルダの `reminedog/reminedog.log` に出る
    （Prism Launcher ならインスタンスの `minecraft` フォルダ。公式ランチャーなら起動構成の「ゲームディレクトリ」で、空欄なら `%APPDATA%\.minecraft`）。
    実際のフォルダはオーバーレイの「ゲームフォルダ」の行とログの `game dir:` の行に出る
+
+### インストーラー
+
+`reminedog-installer.jar` をダブルクリックする（Java 8 以降が要る。ダブルクリックで開かないときは `java -jar reminedog-installer.jar`）。
+入手先：Actions の Artifacts の `reminedog-installer`、または自分でビルドする（下の「開発」）。
+
+1. **reminedog の DLL**：「GitHub から最新版をダウンロードする」（保存するフォルダ。既定は `C:\reminedog`）か、「PC にある DLL を使う」を選ぶ。
+   パスに空白・日本語・`=` が入っていると使えない（理由が赤字で出る）
+2. **インスタンス**：見つけたランチャーのインスタンスが一覧に出る。入れたいものにチェックを付けて「インストール」を押す。外すときは「アンインストール」（DLL のファイルは消さない）。
+   「状態」の列は、今の JVM 引数に reminedog が入っているか（「導入済み」「未導入」「別の DLL：…」）
+3. 作業の前にランチャーを閉じる。開いたままだと、ランチャーが設定を書き戻して変更が消えることがある（起動しているランチャーを見つけたら確認が出る）
+
+| ランチャー | 探す場所 | 書き換えるもの |
+|---|---|---|
+| 公式ランチャー | `%APPDATA%\.minecraft` | `launcher_profiles.json`（Microsoft Store 版は `launcher_profiles_microsoft_store.json`）の起動構成の `javaArgs` |
+| Prism Launcher | `%APPDATA%\PrismLauncher` | インスタンスの `instance.cfg` の `JvmArgs` と `OverrideJavaArgs` |
+| MultiMC | デスクトップ・ダウンロード・ドキュメント・`C:\` の `MultiMC` フォルダ | インスタンスの `instance.cfg` の `JvmArgs` と `OverrideJavaArgs` |
+| MCSR Launcher | `%LOCALAPPDATA%\MCSRLauncher` | インスタンスの `instance.json` の `options` |
+
+ほかの場所にあるランチャー（持ち運び用の Prism、別のフォルダの MultiMC など）は「ランチャーのフォルダを追加…」で選ぶ。
+
+- 引数のほかの部分はそのまま残す。reminedog の引数がすでにあれば、DLL のパスだけを置き換える（`=log=debug` などのオプションは残す）
+- 公式ランチャーで「JVM 引数」を使っていない起動構成には、ランチャーの既定の引数（`-Xmx2G` など）に足して書く
+- Prism・MultiMC で、インスタンスがランチャー全体の JVM 引数を使っているときは、インスタンスの JVM 引数を使うように切り替え、ランチャー全体の引数に足して書く
+- MCSR Launcher で、インスタンスがランチャーの Java の設定を使っているときは、インスタンスの設定に切り替え、ランチャーの Java・メモリー・JVM 引数を写してから足す。
+  そのため、後でランチャー側の Java の設定を変えても、そのインスタンスには効かなくなる
 
 ### 操作
 
@@ -195,3 +226,12 @@ scripts/wine-smoke.sh --agent target/x86_64-pc-windows-gnu/debug/reminedog.dll -
 `--seconds 8 --capture --xdotool "key ctrl+i"` のように、秒数を決めて動かし、`xdotool` でキーやマウスの操作を送れる（`--sdl` で SDL3 版）。
 `--mc` を付けると Minecraft と同じように自前のフレームバッファに描いてからウィンドウに転送するので、高精細のズームを試せる（例：`--capture --mc --xdotool "keydown z sleep 2" --grab zoom.png` で Z を押したままの画面を保存する）。
 日本語を表示するには、日本語フォントを `target/wine-cache/prefix/drive_c/windows/Fonts/msgothic.ttc` などの名前で置く（`~/.wine` ではない。初回の実行でフォルダができる）。
+
+インストーラー（`installer/`）は Gradle でビルドする（JDK 17 以降が要る。Gradle は初回に `gradlew` がダウンロードする）。
+
+```
+cd installer
+gradlew build      # テストと installer\build\libs\reminedog-installer.jar（Linux は ./gradlew build）
+```
+
+jar には FlatLaf と Kotlin のライブラリが入っていて、Java 8 以降で動く。

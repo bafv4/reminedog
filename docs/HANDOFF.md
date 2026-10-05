@@ -586,3 +586,50 @@ Minecraft の視野角は縦方向で決まる。同じ幅で縦に k 倍長い�
 - ホットキーとルールの重なりの判定（`input_trigger` を使う `plain_hotkey_on`、`check_rules`、元のキーの拒否、ホットキーの割り当ての拒否、行の警告）は US 配列のキーの位置で見るが、SDL3 のフックはホットキーを配列に従うキーコードで照合する（`sdl_input.rs` の `route_event` は `egui_key(key)` を router に渡す）。
   US 配列以外の 26.x では、両者が別の物理のキーを指す（QWERTZ でズームが Z なら、ズームを取るのは Y の位置のキー。そのキーを元にするルールは警告なしに追加できるが、押下はズームに取られて効かない。Z の位置のキーは、ズームにならないのに「Z は「ズーム」に使っているので置き換えられない」で断られる）。
   利用者は US 配列なので直していない。直すなら、SDL3 ではフックから `SDL_GetKeyFromScancode` で配列のキーを渡すか、ホットキーも `InputId` で照合する
+
+## 追記：インストーラー（2026-10-05）
+
+`installer/`。Fabric のインストーラーのように、jar をダブルクリックすると DLL を置き、ランチャーのインスタンスの JVM 引数に `-agentpath:<DLL>` を足す（外すこともできる）。
+Kotlin（利用者が学びたい）、Swing＋FlatLaf、Gradle。Java 8 以降で動く 1 つの jar にする（ダブルクリックで開く Java は、java.com の Java 8 のことも、Adoptium の 25 のこともある）。
+
+### 見た目のライブラリ
+
+最初は WebLaF で作ったが、Maven Central の最新版 1.2.14（2023 年）は Java 21・25 で初期化に失敗した（final のフィールドを書き換える `FieldHelper` が、Java 12 向けの実装のまま `UnsupportedOperationException`）。
+Java 18 以降向けの修正は 2024-07 に master に入ったが、リリースされていない。Java 17 以下では動いたが、WebLaF は GPLv3 でもあり、利用者の判断で FlatLaf にした。FlatLaf は Java 8〜25 で表示できた。
+
+### ランチャーの設定ファイル（ソースで確認）
+
+- **公式ランチャー**：`.minecraft/launcher_profiles.json`（Microsoft Store・Xbox アプリ版は `launcher_profiles_microsoft_store.json`。Fabric のインストーラーと同じ名前）の `profiles.<id>.javaArgs`。
+  `javaArgs` がない起動構成は、ランチャーの既定の引数（`-Xmx2G -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50 -XX:G1HeapRegionSize=32M`）で起動するので、それに足して書く。
+  この既定の文字列は記憶によるもので、この PC には公式ランチャーがなく確かめていない。起動中かどうかは、ランチャーは名前付きミューテックス `MojangLauncher` を持つ（Fabric はネイティブのライブラリで見る）が、Java からは見られないので、`tasklist` で `MinecraftLauncher.exe`・`Minecraft.exe` を探す
+- **MultiMC**：インスタンスの `instance.cfg` の `JvmArgs`。`OverrideJava` か `OverrideJavaArgs` が true のときだけ使われ、そうでなければ `multimc.cfg` の `JvmArgs`（`MinecraftInstance.cpp` の `OrSetting`）。
+  書式は `key=value` の行だけで、値は `\\`・`\n`・`\t`・`\#` でエスケープする（`INIFile::escape`）。インスタンスのフォルダは `multimc.cfg` の `InstanceDir`（既定 `instances`）
+- **Prism Launcher**：同じく `instance.cfg` だが、`OverrideJavaArgs` だけを見る。`ConfigVersion` のあるファイルは Qt の INI（`QSettings`。`[General]` の節、`; , =` を含む値は引用符で囲む、`\\` などの C の書き方のエスケープ）で読み書きし、ないファイルは MultiMC の書式で読む（`INIFile.cpp`）。
+  利用者の `instance.cfg` は CRLF で、`JvmArgs="-agentpath:C:\\reminedog\\reminedog.dll=log=debug"` のように書かれていた
+- **MCSR Launcher**（`MCSRLauncher/Launcher`、Kotlin）：データは `launcher/`（`MCSRLauncher.jar` の隣。インストール先の既定は `%LOCALAPPDATA%\MCSRLauncher`）。インスタンスは `launcher/instances/<id>/instance.json`。
+  `options.useLauncherJavaOption`（既定 true）が true なら、Java・メモリー・JVM 引数をまとめてランチャーの `options.json` から取る。JVM 引数は空白と改行で分けるだけで、引用符を解釈しない（`InstanceProcess.kt`）。
+  起動中は `launcher/_app.lock` をロックしている。`instance.json` は kotlinx.serialization の `ignoreUnknownKeys`・既定値は書かない設定で、保存は `instance.bak.json` を経由する
+
+### 設計
+
+- 引数は文字列のまま編集する：reminedog の引数（ファイル名が `reminedog` で始まり `.dll` で終わる `-agentpath:`。引用符で囲まれていても見つける）だけを置き換え・削除し、ほかの部分（空白、引用符、順序）は残す。すでにあれば最初の 1 つのパスだけを置き換えてオプション（`=log=debug` など）を残し、2 つ目以降は消す
+- DLL のパスは、空白・日本語などの ASCII 以外・`=`・引用符を含むものと、ドライブから始まらないものを断る（MCSR Launcher は引用符を解釈しない、Java の起動プログラムはコマンドラインを ANSI のコードページで読む、JVM は `=` でパスを切る）。既定の置き場所は `C:\reminedog`
+- インスタンスがランチャー全体の設定を使っているとき：Prism・MultiMC は `OverrideJavaArgs=true` にしてランチャー全体の引数＋reminedog を書く。MCSR はランチャーの `javaPath`・`minMemory`・`maxMemory` を写して `useLauncherJavaOption=false` にし、ランチャーの引数＋reminedog を書く（今と同じ Java とメモリーで起動させるため）。外すときは、インスタンスの引数から消すだけで、切り替えは戻さない。ランチャー全体の引数に reminedog があるときは、インスタンスからは外せないと伝える
+- 設定ファイルは行単位（INI）か、キーの順序と数値の書き方を保つ自前の JSON で書き戻す（インデント・改行コード・最後の改行もファイルに合わせる）。書き込みは一時ファイルからの置き換え。依存ライブラリを増やさないため、JSON と INI は自前
+- 起動中のランチャーは設定をメモリーに持っていて後で書き戻す（Prism は起動のたびに `instance.cfg` を書く、MCSR は遊んだ時間を `instance.json` に書く）ので、選んだインスタンスのランチャーが起動していたら確認を出す
+- ダウンロード：GitHub API の `repos/bafv4/reminedog/releases/latest` の `reminedog.dll` という名前のファイル。サイズ、`digest`（SHA-256。GitHub が付けるもの）、先頭の `MZ` を確かめてから置き換える。同じファイルがあればダウンロードしない。ゲームが DLL を読み込んでいると置き換えられないので、そう伝える。失敗したらインスタンスは変えない
+
+### 確かめたこと（2026-10-05、Windows）
+
+- 単体テスト 23 件：引数の編集、JSON と 2 つの INI の書式、各ランチャー（設定ファイルの例を作って、インストール・2 回目・アンインストール）、ダウンロード（手元の HTTP サーバーで、成功・同じファイル・サイズ違い・ハッシュ違い・DLL でない・404）
+- 画面の操作（`APPDATA`・`LOCALAPPDATA` を scratchpad に向け、利用者の Prism・MCSR の設定ファイルの写しと、作った公式ランチャー・MultiMC のファイルを置き、部品を直接操作する Java のプログラムで全インスタンスに「インストール」「アンインストール」）：
+  ログと「状態」の列が期待どおりで、インストール＋アンインストールの後の Prism の 1.16.1 と MCSR の rsg のファイルは元と同じ。起動中の Prism を見つけて確認が出ること、ダウンロードの失敗（非公開のリポジトリ）でインスタンスが変わらないことも確かめた
+- 利用者の本物の設定（読むだけ）で、Prism の 1.21.11 と 26.3（`=log=debug` 付き）が「導入済み」、ほかが「未導入」と出る
+- Java 8（Prism の jre-legacy 1.8.0_51）、17、21、25 で画面が出る。Windows がダークモードなら暗いテーマ
+
+### 確かめていないこと
+
+- 本物のランチャーで、書き換えた設定が読まれてゲームが起動すること（`docs/TESTING.md` の「インストーラーで確認すること」）。特に、Prism が自分の書式で書き戻したときに引数が残ること、MCSR Launcher が `options` を受け付けること
+- 公式ランチャー（この PC にない）。既定の引数の文字列と、起動中のプロセス名
+- ダウンロードの成功（リリースがない）
+- ARM 版 Windows、Windows 以外（Windows 以外では、そう書いたログを出すだけ）

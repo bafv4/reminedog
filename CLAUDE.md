@@ -57,6 +57,18 @@ hook-win/  Windows のエージェント（reminedog.dll）
   wgl.rs       opengl32 の関数表、自前のコンテキスト
   pointer.rs   Windows のマウスの設定の読み取り
   fonts.rs     日本語フォント（游ゴシック → メイリオ → MS ゴシック）
+installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）。Java 8 以降で動く 1 つの jar（reminedog-installer.jar）
+  Main.kt            FlatLaf（Windows のダークモードに合わせる）と画面の起動
+  InstallerFrame.kt  画面：DLL（GitHub からダウンロードするか、PC のファイル）、インスタンスの一覧と状態、インストール／アンインストール、ログ
+  AgentArg.kt        JVM 引数の中の -agentpath:...reminedog*.dll を探す・置き換える・外す（ほかの部分は文字のまま残す）。使えないパスの判定
+  Launcher.kt        Launcher（ランチャーのデータのフォルダ）・Instance・Args・Change
+  MojangLauncher.kt  公式ランチャー（launcher_profiles.json の javaArgs）
+  MultiMcLauncher.kt MultiMC と Prism Launcher（instance.cfg の JvmArgs・OverrideJavaArgs）
+  McsrLauncher.kt    MCSR Launcher（instance.json の options）
+  Launchers.kt       いつもの場所の検出と、選んだフォルダの判定
+  Ini.kt, Json.kt    設定ファイルの読み書き（Qt の INI と MultiMC の INI を行単位で、JSON はキーの順序と数値の書き方を保つ）
+  Download.kt        GitHub の最新のリリースの reminedog.dll（サイズ・SHA-256・MZ を確かめてから置き換える）
+  Processes.kt       起動中のランチャーの判定（tasklist）
 ci/smoke/  LWJGL で Minecraft と同じようにウィンドウを作るテスト用の Java（GLFW 版 Smoke、SDL3 版 SmokeSdl）。F3+C の真似（--world、--f3c-refuse、--f3c-events）。
            キーの置き換えの確認（SMOKE_VERBOSE=1 で受け取ったイベント、--screen-key・--watch-keys で画面を閉じたときのキーの状態）
 scripts/   wine-smoke.sh（Linux 上で Wine を使って動かす）、fetch-wine-jre.sh
@@ -70,6 +82,7 @@ Windows で：
 cargo build --release -p reminedog-hook-win      # target\release\reminedog.dll
 cargo test --workspace
 cargo clippy --workspace --all-targets
+cd installer; .\gradlew.bat build                  # インストーラーのテストと installer\build\libs\reminedog-installer.jar
 ```
 
 - Rust 1.95 以降（egui 0.36 の要件。今は 1.98）、edition 2024
@@ -80,7 +93,9 @@ cargo clippy --workspace --all-targets
   - 本物の F3+C を送るときは、PowerShell の `SendKeys` ではなく `Add-Type` で `SendInput` を使う（`SendKeys` では F3 を押したまま C を押せない）
   - キーの置き換えを試すなら、ゲームフォルダ（`gamedir=` か作業フォルダ）の `reminedog/settings.json` にルールを書いてから起動する（例：`{"rebinds": [{"from": "key.keyboard.b", "to": "key.keyboard.w"}]}`）。
     `SMOKE_VERBOSE=1` でゲームが受け取ったイベント（`KEY`・`BUTTON`・`FOCUS`）が出る。偽装は `--seconds=30 --capture --screen-key=69 --watch-keys=87,66`（SDL3 は `--seconds=30 --capture --screen-key=8 --watch-keys=26,5`。`--seconds` がないとすぐ終わる）で、B を押したまま E を 2 回押して `SETALL 87=1 66=0` になるかで見る。詳しくは HANDOFF.md の「追記：キーの置き換え」
-- CI（GitHub Actions）：Linux（fmt、clippy、テスト、mingw での clippy）、Windows（clippy、テスト、リリースビルド、成果物 `reminedog-windows-x64`）、Windows のスモークテスト（LWJGL 3.2.2/Java 8、3.3.3/Java 21、3.4.3/Java 25 の SDL3。Mesa の llvmpipe で描く）
+- インストーラーは Gradle 9.8（ラッパー。JDK 17 以降で動く。手元は JDK 25）、Kotlin 2.4、FlatLaf 3.7。Kotlin は `jvmTarget` 1.8 と `-Xjdk-release=1.8`（Java 8 の API だけを使う）、警告はエラー。
+  画面を確かめるなら、利用者の設定ファイルの写しを scratchpad に作り、`APPDATA`・`LOCALAPPDATA` をそこに向けて起動する（本物のランチャーの設定を書き換えない）
+- CI（GitHub Actions）：Linux（fmt、clippy、テスト、mingw での clippy）、インストーラー（テスト、成果物 `reminedog-installer`）、Windows（clippy、テスト、リリースビルド、成果物 `reminedog-windows-x64`）、Windows のスモークテスト（LWJGL 3.2.2/Java 8、3.3.3/Java 21、3.4.3/Java 25 の SDL3。Mesa の llvmpipe で描く）
 
 コミットする前に `cargo fmt --all`、clippy（警告 0）、テストを通す。
 
@@ -94,6 +109,7 @@ cargo clippy --workspace --all-targets
 - デトアには MinHook を使う。retour 0.3 は、直後に即値が続く RIP 相対の命令を正しく移せず、GLFW の関数の先頭で落ちる
 - export は `ffi::export_address`（PE を自分で読む）で引く。ローダーロックの中で GetProcAddress を呼ばないため
 - F3+C を送るときは、C（クラッシュのキー）が押されているとゲームに読ませない（修飾キーと同時だと、10 秒でゲームを落とすデバッグのクラッシュが動く）。GLFW の修飾キーの偽装は、ガードの Drop で必ず消す。ロックの順序は `hook-win/src/f3c.rs` の先頭に書いてある
+- インストーラーはランチャーの設定ファイルを書き換える。変えるのは JVM 引数の reminedog の部分と、それを効かせるためのキーだけで、ほかの行・キー・引数はそのまま残す。書き込みは一時ファイルからの置き換えで行い、試すときは設定ファイルの写しを使う
 - キーの置き換えは押したときに決め、その押下のリピートと解放は押したときの決定に従う（ルール・画面・メニューがその後で変わっても）。ゲームの中でキーが押されたまま残らないようにする。送る F3+C は置き換えを通さない
 - ゲームが読むキーの状態（`glfwGetKey`、`SDL_GetKeyboardState`、キーのイベントの修飾キー、F3+C の確認）は `rebind_state` の表に合わせる。表は、イベントをゲームに渡す前（とフォーカスを失ったとき、安全網の後）に router のロックを持ったまま書き直し、ゲームのコードはロックを外してから呼ぶ。表を読む側はロックを取らない（ゲームが頻繁に読む）
 
@@ -108,6 +124,7 @@ cargo clippy --workspace --all-targets
 | キーの変更、settings.json の保存 | 倍率の保存は実機で確認済み。キーの変更は Wine のみ |
 | F3+C によるウェイポイント（J で記録、K で方角と距離、メニューの一覧） | 手元のスモーク（GLFW・SDL3）で確認済み。実機では未確認 |
 | キーの置き換え（キーとマウスのボタン、ゲーム中だけ。メニューの「キーの置き換え」） | 手元のスモーク（GLFW・SDL3）で確認済み。実機では未確認 |
+| インストーラー（公式ランチャー、MultiMC、Prism Launcher、MCSR Launcher） | 設定ファイルの写しに対して画面から操作して確認済み、Java 8・17・21・25 で表示を確認。本物のランチャーでは未確認。ダウンロードはリリースがないので失敗する |
 
 ### 高精細のズームの仕組み（`hook-win/src/tall.rs`）
 
@@ -139,7 +156,8 @@ cargo clippy --workspace --all-targets
 
 ## 次にやること（候補）
 
-1. ウェイポイント、キーの置き換え、高精細のズーム、キーの変更を実機で確かめてもらう（`docs/TESTING.md` の「キーの置き換えで確認すること」「ウェイポイントで確認すること」「ズームとキーの変更で確認すること」）。問題があれば `=log=debug` のログの `F3+C:`・`world:`・`rebinds:`・`zoom:` の行から直す
+1. ウェイポイント、キーの置き換え、高精細のズーム、キーの変更、インストーラーを実機で確かめてもらう（`docs/TESTING.md` の「インストーラーで確認すること」「キーの置き換えで確認すること」「ウェイポイントで確認すること」「ズームとキーの変更で確認すること」）。問題があれば `=log=debug` のログの `F3+C:`・`world:`・`rebinds:`・`zoom:` の行から直す
+   - インストーラーのダウンロードには、公開されたリポジトリのリリースに `reminedog.dll` という名前のファイルが要る（今は非公開でリリースもない）。リリースを作る CI のジョブもまだない
 2. CI のスモークテストで F3+C とキーの置き換えを確かめる（`--world`・`--f3c-refuse`、settings.json のルールと `--screen-key`・`--watch-keys` を使い、マーカーに `F3+C: clipboard hooks ready`・`SETALL` などを足す。今の CI は新しいオプションを使っていない。`scripts/wine-smoke.sh` もまだ渡せない）
 3. IME の変換中の文字をメニューの入力欄に出す（今は確定した文字だけ）
 4. Linux（Fedora）対応。方針の案は HANDOFF.md の構成の `hook-linux/`（GLFW の関数をフックする、自前のコンテキストは GLX／EGL。MinHook は使えないのでデトアの方法を検討する）

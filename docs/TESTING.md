@@ -5,12 +5,58 @@
 - 高精細のズーム・キーの変更・設定の保存：下の「ズームとキーの変更で確認すること」
 - プロトタイプ 3（F3+C によるウェイポイント）：下の「ウェイポイントで確認すること」
 - キーの置き換え：下の「キーの置き換えで確認すること」
+- インストーラー：下の「インストーラーで確認すること」
 
 ## 準備
 
 1. `reminedog.dll` を入手する（[README](../README.md#dll-の入手)）
 2. パスに日本語も空白（スペース）も含まない場所に置く（例：`C:\reminedog\reminedog.dll`。`C:\Program Files` は不可）
 3. 確かめたいインスタンスの JVM 引数に `-agentpath:C:\reminedog\reminedog.dll` を追加する
+
+## インストーラーで確認すること
+
+`C:\reminedog\reminedog-installer.jar` をダブルクリックして開く。インストーラーは本物のランチャーの設定ファイルを書き換えるので、試すのは次のインスタンスだけにする（スピードラン用のインスタンスは選ばない）。
+
+- Prism Launcher の 1.21.11 と 26.3（今は `-agentpath:C:\reminedog\reminedog.dll` が入っている。26.3 は `=log=debug` 付き）
+- MCSR Launcher の Server（1.21.11。今はランチャーの Java の設定を使っている）
+
+DLL は「PC にある DLL を使う」で `C:\reminedog\reminedog.dll` を選ぶ（「GitHub から最新版をダウンロードする」は、今はリリースがないので失敗する）。
+
+### 開く
+
+- [ ] ダブルクリックで開き、Windows のダークモード／ライトモードに合った色で出る
+- [ ] 一覧に Prism Launcher の 3 つと MCSR Launcher の 5 つのインスタンスが出て、バージョンの列が正しい
+- [ ] 「状態」が、Prism の 1.21.11 と 26.3 は「導入済み」（緑）、ほかは「未導入」
+- [ ] 「保存するフォルダ」を `C:\Program Files\reminedog` にすると、下に赤字で「パスに空白（スペース）が入っています」と出る。`C:\reminedog` に戻す
+
+### ランチャーが起動しているとき
+
+- [ ] Prism を起動したまま、Prism の 1.21.11 にチェックを付けて「アンインストール」を押すと、「次のランチャーが起動しています：Prism Launcher」と出る。「いいえ」を押すと何も変わらない（ログに何も出ない）
+- [ ] 同じく MCSR Launcher を起動したまま Server で試すと、「MCSR Launcher」と出る
+
+### Prism Launcher
+
+Prism を閉じてから行う。
+
+- [ ] 1.21.11 にチェックを付けて「アンインストール」：ログに「Prism Launcher / 1.21.11：外しました（JVM 引数：なし）」、「状態」が「未導入」になる
+- [ ] Prism を開き、1.21.11 の「編集」→「設定」→「Java」の「JVM 引数」が空になっている。起動するとオーバーレイが出ない。Prism を閉じる
+- [ ] 1.21.11 で「インストール」：「追加しました（JVM 引数：-agentpath:C:\reminedog\reminedog.dll）」。Prism の「JVM 引数」に入っていて、起動するとオーバーレイが出る
+- [ ] 26.3 で「インストール」：「すでに入っています」。Prism の「JVM 引数」の `=log=debug` が残っている
+- [ ] 「PC にある DLL を使う」のファイルを `C:\reminedog\reminedog2.dll`（なければ `C:\reminedog\reminedog.dll` をコピーして作る）にすると、26.3 の「状態」が「別の DLL：C:\reminedog\reminedog.dll」になる。26.3 で「インストール」すると `-agentpath:C:\reminedog\reminedog2.dll=log=debug` になる。`C:\reminedog\reminedog.dll` に戻して、もう一度「インストール」する
+
+### MCSR Launcher
+
+MCSR Launcher を閉じてから行う。
+
+- [ ] Server で「インストール」：「追加しました（JVM 引数：-agentpath:C:\reminedog\reminedog.dll）」。
+  MCSR Launcher で Server のインスタンスの設定を開くと、Java の設定がランチャーのものからインスタンスのものに切り替わり、Java・メモリーがランチャーと同じ値で、JVM 引数に `-agentpath:...` が入っている
+- [ ] Server を起動するとオーバーレイが出る（1.21.11 なのでオーバーレイが出るはず。出なければ `<インスタンス>\.minecraft\reminedog\reminedog.log` を送ってほしい）
+- [ ] MCSR Launcher を閉じ、Server で「アンインストール」：「外しました（JVM 引数：なし）」。起動してオーバーレイが出ない
+- [ ] 元に戻したいなら、MCSR Launcher の Server の設定で、Java の設定を「ランチャーの設定を使う」に戻す（インストーラーは戻さない）
+
+### ダウンロード
+
+- [ ] 「GitHub から最新版をダウンロードする」のまま「インストール」：ログに「ダウンロードできませんでした：GitHub（bafv4/reminedog）に公開されているリリースがありません」と出て、「インスタンスは変えていません」のダイアログが出る。「状態」は変わらない
 
 ## キーの置き換えで確認すること
 
