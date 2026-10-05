@@ -23,16 +23,20 @@ core/      OS に依存しない処理（テストあり）
   waypoint.rs  ワールドごとのウェイポイントの JSON（アトミックな保存）
   world.rs     ワールドの判定（latest.log の追跡、シングルプレイのワールド）
   session.rs   WorldWatcher（今のワールド）と WaypointBook（今のワールドのウェイポイント。変更のたびに保存）
-  keybinds.rs  options.txt の F3+C のキー（修飾キー、座標のコピー、クラッシュ）と、コピーのキーを共有する操作。GLFW のキーコード、SDL のスキャンコード・キーコードへの変換
+  keybinds.rs  options.txt の F3+C のキー（修飾キー、座標のコピー、クラッシュ）と、コピーのキーを共有する操作、各キーの割り当て（bindings_by_key）。
+               InputId（キーは SDL のスキャンコード、マウスは SDL の番号）と、名前（Naming で 1.21 と 26.x を読み分ける）・ラベル・GLFW／SDL のコードの変換
+  keytable.rs  26.3 と 1.21.11 のキーの名前の表（jar から抜き出した TSV から生成）
   nav.rs       方角・距離、ネザー座標の変換、guide（ウェイポイントへの案内）
   options.rs   -agentpath:...=<オプション> の解析（gamedir, log, overlay, scale）
   gamedir.rs   ゲームフォルダの判定、reminedog/ 以下のパス
-  settings.rs  settings.json（キー、ズームの倍率など）
+  settings.rs  settings.json（キー、ズームの倍率、キーの置き換えなど）
   logfile.rs   log クレートのファイル出力
 render/    glow + egui_glow の描画（OS に依存しない、テストあり）
   overlay.rs   egui のメニュー、状態の表示、ヒント、自前のカーソル、Hotkeys。FrameInput/FrameOutput でフックとやり取り
   waypoints.rs メニューの「ウェイポイント」の欄、通知、方角と距離の文言。WaypointView/WaypointCommand でフックとやり取り
-  input.rs     InputRouter：各入力を「ゲームに渡す／横取りする」を決める。ホットキー（記録と更新は HotkeyAction のキュー。Minecraft の修飾キーを押している間はゲームに渡す）、キーの割り当て待ち、自前のカーソル
+  input.rs     InputRouter：各入力を「ゲームに渡す／横取りする／置き換える」を決める。ホットキー（記録と更新は HotkeyAction のキュー。Minecraft の修飾キーを押している間はゲームに渡す）、キーの割り当て待ち、自前のカーソル
+  rebind.rs    キーの置き換えの状態機械（Rebinder）。押したときに決め、リピートと解放はそれに従う。RebindState（押さえている出力、隠す元のキー、そのまま渡したルールの出力）
+  rebinds_ui.rs  メニューの「キーの置き換え」の欄と resolve（settings のルール → router のルール）
   hotkey.rs    Hotkey（キーかマウスのボタン＋修飾キー）。設定ファイルの文字列との変換
   zoom.rs      引き伸ばすズーム（高精細が使えないとき）と、縦長の大きさの計算
   pointer.rs   Windows のポインターの速度・加速の計算（自前のカーソル用）
@@ -41,16 +45,20 @@ hook-win/  Windows のエージェント（reminedog.dll）
   lib.rs/agent.rs  Agent_OnLoad。オプション、ログ、パニックフック
   loader.rs    LdrRegisterDllNotification で DLL の読み込みを監視（glfw / SDL3 / opengl32）
   hook.rs      MinHook によるデトア
-  glfw.rs, glfw_input.rs  GLFW（Minecraft 1.21 まで）：glfwSwapBuffers、コールバックの差し替え。F3+C（glfwSetClipboardString・glfwGetKey のフック、キーコールバックへの送信）
-  sdl.rs, sdl_input.rs    SDL3（Minecraft 26.x）：SDL_GL_SwapWindow、SDL_PollEvent のフィルタ。F3+C（SDL_SetClipboardText のフック、キーのイベントの注入）
+  glfw.rs, glfw_input.rs  GLFW（Minecraft 1.21 まで）：glfwSwapBuffers、コールバックの差し替え。F3+C（glfwSetClipboardString・glfwGetKey のフック、キーコールバックへの送信）。
+                          キーの置き換え（出力をコールバックで送る、mods の補正、glfwGetKey の偽装）
+  sdl.rs, sdl_input.rs    SDL3（Minecraft 26.x）：SDL_GL_SwapWindow、SDL_PollEvent のフィルタ。F3+C（SDL_SetClipboardText のフック、キーのイベントの注入）。
+                          キーの置き換え（イベントをその場で書き換える、mod の補正、SDL_GetKeyboardState の偽装）
+  rebind_state.rs  ゲームから見えるキーの状態の表（ロックなし、512 項目）と、元のキーの解放を取り逃したときの安全網
   frame.rs     スワップのたびの処理：自前の WGL コンテキストに切り替えてオーバーレイを描く。設定の読み込みと保存
   f3c.rs       F3+C の要求と結果（ウィンドウのライブラリに依存しない）。送った F3+C の書き込みは握りつぶし、利用者の F3+C は通す
-  waypoints.rs ワールドの追跡、options.txt、F3+C の要求と結果、通知（frame.rs から毎フレーム）
+  waypoints.rs ワールドの追跡、options.txt（デバッグのキーと、メニューに出す各キーの割り当て）、F3+C の要求と結果、通知（frame.rs から毎フレーム）
   tall.rs      高精細のズーム（下で説明）
   wgl.rs       opengl32 の関数表、自前のコンテキスト
   pointer.rs   Windows のマウスの設定の読み取り
   fonts.rs     日本語フォント（游ゴシック → メイリオ → MS ゴシック）
-ci/smoke/  LWJGL で Minecraft と同じようにウィンドウを作るテスト用の Java（GLFW 版 Smoke、SDL3 版 SmokeSdl）。F3+C の真似（--world、--f3c-refuse、--f3c-events）
+ci/smoke/  LWJGL で Minecraft と同じようにウィンドウを作るテスト用の Java（GLFW 版 Smoke、SDL3 版 SmokeSdl）。F3+C の真似（--world、--f3c-refuse、--f3c-events）。
+           キーの置き換えの確認（SMOKE_VERBOSE=1 で受け取ったイベント、--screen-key・--watch-keys で画面を閉じたときのキーの状態）
 scripts/   wine-smoke.sh（Linux 上で Wine を使って動かす）、fetch-wine-jre.sh
 ```
 
@@ -70,6 +78,8 @@ cargo clippy --workspace --all-targets
 - テスト用プログラムを Windows で直接動かすなら、`ci/smoke/*.java` を LWJGL の jar と一緒にコンパイルし、`java -agentpath:...\reminedog.dll -cp ... Smoke --seconds=20 --capture --mc` のように動かす（`.github/workflows/ci.yml` の `smoke-windows` ジョブが手順の見本）
   - ウェイポイントを試すなら `--world=<名前>` を付ける（作業フォルダに latest.log と saves を書く）。記録できれば `reminedog/waypoints/sp-<名前>.json` ができ、終了時の行が `F3C STATE overlay=off modifier=up copies=1` になる。拒否は `--f3c-refuse`。詳しくは HANDOFF.md の「追記：プロトタイプ 3」
   - 本物の F3+C を送るときは、PowerShell の `SendKeys` ではなく `Add-Type` で `SendInput` を使う（`SendKeys` では F3 を押したまま C を押せない）
+  - キーの置き換えを試すなら、ゲームフォルダ（`gamedir=` か作業フォルダ）の `reminedog/settings.json` にルールを書いてから起動する（例：`{"rebinds": [{"from": "key.keyboard.b", "to": "key.keyboard.w"}]}`）。
+    `SMOKE_VERBOSE=1` でゲームが受け取ったイベント（`KEY`・`BUTTON`・`FOCUS`）が出る。偽装は `--seconds=30 --capture --screen-key=69 --watch-keys=87,66`（SDL3 は `--seconds=30 --capture --screen-key=8 --watch-keys=26,5`。`--seconds` がないとすぐ終わる）で、B を押したまま E を 2 回押して `SETALL 87=1 66=0` になるかで見る。詳しくは HANDOFF.md の「追記：キーの置き換え」
 - CI（GitHub Actions）：Linux（fmt、clippy、テスト、mingw での clippy）、Windows（clippy、テスト、リリースビルド、成果物 `reminedog-windows-x64`）、Windows のスモークテスト（LWJGL 3.2.2/Java 8、3.3.3/Java 21、3.4.3/Java 25 の SDL3。Mesa の llvmpipe で描く）
 
 コミットする前に `cargo fmt --all`、clippy（警告 0）、テストを通す。
@@ -84,8 +94,10 @@ cargo clippy --workspace --all-targets
 - デトアには MinHook を使う。retour 0.3 は、直後に即値が続く RIP 相対の命令を正しく移せず、GLFW の関数の先頭で落ちる
 - export は `ffi::export_address`（PE を自分で読む）で引く。ローダーロックの中で GetProcAddress を呼ばないため
 - F3+C を送るときは、C（クラッシュのキー）が押されているとゲームに読ませない（修飾キーと同時だと、10 秒でゲームを落とすデバッグのクラッシュが動く）。GLFW の修飾キーの偽装は、ガードの Drop で必ず消す。ロックの順序は `hook-win/src/f3c.rs` の先頭に書いてある
+- キーの置き換えは押したときに決め、その押下のリピートと解放は押したときの決定に従う（ルール・画面・メニューがその後で変わっても）。ゲームの中でキーが押されたまま残らないようにする。送る F3+C は置き換えを通さない
+- ゲームが読むキーの状態（`glfwGetKey`、`SDL_GetKeyboardState`、キーのイベントの修飾キー、F3+C の確認）は `rebind_state` の表に合わせる。表は、イベントをゲームに渡す前（とフォーカスを失ったとき、安全網の後）に router のロックを持ったまま書き直し、ゲームのコードはロックを外してから呼ぶ。表を読む側はロックを取らない（ゲームが頻繁に読む）
 
-## 今の状態（2026-09-30）
+## 今の状態（2026-10-02）
 
 | 機能 | 状態 |
 |---|---|
@@ -95,6 +107,7 @@ cargo clippy --workspace --all-targets
 | 高精細のズーム（`tall.rs`） | 実機で確認済み（1.21.11、26.3） |
 | キーの変更、settings.json の保存 | 倍率の保存は実機で確認済み。キーの変更は Wine のみ |
 | F3+C によるウェイポイント（J で記録、K で方角と距離、メニューの一覧） | 手元のスモーク（GLFW・SDL3）で確認済み。実機では未確認 |
+| キーの置き換え（キーとマウスのボタン、ゲーム中だけ。メニューの「キーの置き換え」） | 手元のスモーク（GLFW・SDL3）で確認済み。実機では未確認 |
 
 ### 高精細のズームの仕組み（`hook-win/src/tall.rs`）
 
@@ -114,10 +127,20 @@ cargo clippy --workspace --all-targets
 
 ゲームの挙動（1.16.1、1.21.11、26.3 の jar で確かめたこと）と、確かめていないことは HANDOFF.md の「追記：プロトタイプ 3」。
 
+### キーの置き換えの仕組み（`render/src/rebind.rs`、`hook-win/src/rebind_state.rs`）
+
+1. ルールは settings.json の `rebinds`（26.x のキーの名前）。`resolve` が使えないもの（ライブラリが扱えないキーを含む）を除いて router に渡す（`set_rebinds`。ルールかホットキーが変わったときだけ）。除いた理由はメニューの行の下に出る
+2. router は、ホットキーとメニューを今までどおり物理のキーで判定し、ゲームに渡す押下だけを `Rebinder` に渡す。ゲーム中（カーソルを捕まえていて、メニューを閉じている）にルールのある元のキーなら `Delivery::Send(出力)`。リピートと解放は、押したときの記録に従う
+3. GLFW は出力をゲームのキーかマウスのボタンのコールバックで送り、SDL3 は `SDL_PollEvent` のイベントをその場で書き換える。その前に `rebind_state` の表を書き直し、`glfwGetKey`／`SDL_GetKeyboardState` とキーのイベントの修飾キーを「元のキーは離している、出力は押している」に合わせる（画面を閉じたときの `KeyMapping.setAll`、Ctrl+Q、クラッシュのキーのため）
+4. フォーカスを失ったら出力を離し、その後に届く元のキーの解放は捨てる。解放が届かないとき（IME に取られた、フォーカスを失っている間に離した、26.x がワールドの読み込み中や「セーブしてタイトルへ戻る」の間に入力のイベントを捨てた など）は、スワップの後の安全網が `GetAsyncKeyState` で 100 ms 離れているのを見て、元のキーなら置き換え先を離す。
+   ルールの出力と同じ id をそのまま渡した押下（`Passthrough`）なら、ゲームに何も送らずに忘れる（残すと、その id へのルールの押下が捨てられる）。解放が来ないことがある JIS の IME のキー（GLFW の key -1 のキーもこれ）は、元のキーにできない
+
+ゲームとライブラリの挙動（jar と GLFW・SDL のソースで確かめたこと）、設計の理由、確かめていないことは HANDOFF.md の「追記：キーの置き換え」。
+
 ## 次にやること（候補）
 
-1. ウェイポイント、高精細のズーム、キーの変更を実機で確かめてもらう（`docs/TESTING.md` の「ウェイポイントで確認すること」と「ズームとキーの変更で確認すること」）。問題があれば `=log=debug` のログの `F3+C:`・`world:`・`zoom:` の行から直す
-2. CI のスモークテストで F3+C を確かめる（`--world`・`--f3c-refuse` を使い、マーカーに `F3+C: clipboard hooks ready` などを足す。今の CI は新しいオプションを使っていない）
+1. ウェイポイント、キーの置き換え、高精細のズーム、キーの変更を実機で確かめてもらう（`docs/TESTING.md` の「キーの置き換えで確認すること」「ウェイポイントで確認すること」「ズームとキーの変更で確認すること」）。問題があれば `=log=debug` のログの `F3+C:`・`world:`・`rebinds:`・`zoom:` の行から直す
+2. CI のスモークテストで F3+C とキーの置き換えを確かめる（`--world`・`--f3c-refuse`、settings.json のルールと `--screen-key`・`--watch-keys` を使い、マーカーに `F3+C: clipboard hooks ready`・`SETALL` などを足す。今の CI は新しいオプションを使っていない。`scripts/wine-smoke.sh` もまだ渡せない）
 3. IME の変換中の文字をメニューの入力欄に出す（今は確定した文字だけ）
 4. Linux（Fedora）対応。方針の案は HANDOFF.md の構成の `hook-linux/`（GLFW の関数をフックする、自前のコンテキストは GLX／EGL。MinHook は使えないのでデトアの方法を検討する）
 
@@ -128,3 +151,6 @@ cargo clippy --workspace --all-targets
 - 利用者のインスタンスのクライアントの jar は `%APPDATA%\PrismLauncher\libraries\com\mojang\minecraft\<版>\minecraft-<版>-client.jar` にある（1.16.1、1.21.11、26.3）。
   26.3 は難読化されていない。1.21.11 と 1.16.1 は難読化されているので、クラスは文字列の定数から探す（`javap -c -p -constants`）。展開したものはリポジトリの外（scratchpad）に置く
 - 利用者の 1.16.1 はスピードラン用の Mod（SeedQueue など）を入れた構成で、バニラの挙動の確認には使えない
+- 利用者のキー設定（チェックリストを書くとき）：26.3 は「アイテムを捨てる」が C、ホットバー 1 が Q、「オフハンドと交換」が CapsLock、ダッシュが M（トグル）、チャットが Backspace。1.21.11 は捨てるが Q、ダッシュが左 Ctrl、「ホットバーの保存」が C。どちらでも空いているキーは B・H・N・U・Y（B・H・N は F3 との組み合わせだけ）。キーボードは US 配列（kbd101）なので、JIS のキーは確かめられない
+- SendInput でスモークに送るときは、利用者が操作していないこととスモークのウィンドウが前面にあることを確かめてから送る（`--screen-key` ではカーソルをウィンドウの中央に動かす）。PC がロックされていると SendInput は届かない（自分のウィンドウへの PostMessage なら届くが、SDL3 はキーボードのフォーカスがないとキーのイベントの windowID が 0 になる）。
+  右 Ctrl・右 Alt・矢印・Insert などの拡張キーには `KEYEVENTF_EXTENDEDKEY` を付け、マウスの X ボタンは `mouseData` で指定する。CapsLock を送ったら、ロックの状態を元に戻す
