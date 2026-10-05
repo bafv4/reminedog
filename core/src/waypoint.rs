@@ -314,10 +314,15 @@ pub(crate) fn tmp_path(path: &Path) -> PathBuf {
 
 /// `<stem>.corrupt-<unix>.json` next to `path`, with `-<n>` added if that already exists.
 pub(crate) fn backup_path(path: &Path, unix: u64) -> PathBuf {
+    copy_path(path, "corrupt", unix)
+}
+
+/// `<stem>.<kind>-<unix>.json` next to `path`, with `-<n>` added if that already exists.
+pub(crate) fn copy_path(path: &Path, kind: &str, unix: u64) -> PathBuf {
     let stem = path.file_stem().unwrap_or_default();
     let candidate = |suffix: &str| {
         let mut name = OsString::from(stem);
-        name.push(format!(".corrupt-{unix}{suffix}.json"));
+        name.push(format!(".{kind}-{unix}{suffix}.json"));
         path.with_file_name(name)
     };
     let mut backup = candidate("");
