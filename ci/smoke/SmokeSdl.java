@@ -4,7 +4,7 @@
 // it. Java 8 source: javac --release 8.
 //
 // Usage: java -cp <lwjgl jars incl. lwjgl-sdl>;<classes> SmokeSdl [FRAMES] [--screenshot]
-//                                                                [--seconds=N] [--capture] [--mc]
+//                                                                [--seconds=N] [--capture] [--mc [--sodium]]
 //                                                                [--world=NAME] [--f3c-refuse]
 //                                                                [--screen-key=SCANCODE
 //                                                                 [--watch-keys=SCANCODE,...]]
@@ -13,6 +13,8 @@
 //   --capture     relative mouse mode, as Minecraft uses in game
 //   --mc          render like Minecraft: into its own framebuffer at the pixel size the
 //                 window events report, then copied into the window
+//   --sodium      with --mc, set the viewport like Minecraft with Sodium, which skips a
+//                 glViewport equal to the last one (SmokeImage.viewport)
 //   --world=NAME  at start, write saves/NAME/session.lock and a logs/latest.log with the
 //                 integrated server's start line into the current directory, as Minecraft
 //                 does when it opens a singleplayer world (so the agent knows the world)
@@ -121,6 +123,10 @@ public final class SmokeSdl {
                 mc = true;
                 continue;
             }
+            if (arg.equals("--sodium")) {
+                SmokeImage.sodium = true;
+                continue;
+            }
             if (arg.equals("--screenshot")) {
                 screenshot = true;
                 continue;
@@ -139,6 +145,9 @@ public final class SmokeSdl {
         }
         if (watchKeys != null && screenKey == 0) {
             throw new Fail("--watch-keys needs --screen-key");
+        }
+        if (SmokeImage.sodium && !mc) {
+            throw new Fail("--sodium needs --mc");
         }
         System.out.println("LWJGL " + Version.getVersion());
         if (world != null) {

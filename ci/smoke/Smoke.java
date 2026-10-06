@@ -2,7 +2,7 @@
 // reminedog agent (-agentpath:) without the game. Java 8 source: javac --release 8.
 //
 // Usage: java -cp <lwjgl jars>;<classes> Smoke [FRAMES] [--legacy] [--readback] [--screenshot]
-//                                            [--seconds=N] [--capture] [--mc] [--world=NAME]
+//                                            [--seconds=N] [--capture] [--mc [--sodium]] [--world=NAME]
 //                                            [--f3c-events] [--f3c-refuse]
 //                                            [--screen-key=KEY [--watch-keys=KEY,...]]
 //   FRAMES      frames to render (default 120)
@@ -14,6 +14,8 @@
 //                 mouse motion where supported (Minecraft's "Raw Input" setting, on by default)
 //   --mc          render like Minecraft: into its own framebuffer at the size the framebuffer
 //                 size callback reports, then copied into the window
+//   --sodium      with --mc, set the viewport like Minecraft with Sodium, which skips a
+//                 glViewport equal to the last one (SmokeImage.viewport)
 //   --screenshot  after the last swap, save the back buffer as smoke-screenshot.png in the
 //                 current directory (diagnostic: what an overlay drew, where the driver keeps
 //                 the back buffer after a swap, as Wine + llvmpipe does)
@@ -116,6 +118,8 @@ public final class Smoke {
                 capture = true;
             } else if (arg.equals("--mc")) {
                 mc = true;
+            } else if (arg.equals("--sodium")) {
+                SmokeImage.sodium = true;
             } else if (arg.equals("--legacy")) {
                 legacy = true;
             } else if (arg.equals("--readback")) {
@@ -135,6 +139,9 @@ public final class Smoke {
         }
         if (watchKeys != null && screenKey == 0) {
             throw new Fail("--watch-keys needs --screen-key");
+        }
+        if (SmokeImage.sodium && !mc) {
+            throw new Fail("--sodium needs --mc");
         }
         long t0 = System.nanoTime();
         System.out.println("LWJGL " + Version.getVersion());

@@ -95,18 +95,39 @@ final class SmokeImage {
         glDisable(GL_SCISSOR_TEST);
     }
 
+    // --sodium: the viewport as Minecraft with Sodium sets it. Sodium's GlStateManagerMixin
+    // does not call glViewport with the values of the last call, and Minecraft's lightmap pass
+    // sets a 16x16 viewport once a tick (here every 13th frame). So most frames set no
+    // viewport at all, which the agent's high-resolution zoom must cope with.
+    static boolean sodium;
+    private static int lastViewportX = -1, lastViewportY, lastViewportW, lastViewportH;
+
+    static void viewport(int x, int y, int w, int h) {
+        if (sodium && x == lastViewportX && y == lastViewportY && w == lastViewportW && h == lastViewportH) {
+            return;
+        }
+        lastViewportX = x;
+        lastViewportY = y;
+        lastViewportW = w;
+        lastViewportH = h;
+        glViewport(x, y, w, h);
+    }
+
     // Minecraft's frame: the scene goes into its own framebuffer ("main render target") at
     // the framebuffer size the window system reports, and is then copied into the window
     // (framebuffer 0), as Minecraft 1.21.5+ does. Needs GL 3.0.
     static final class MainTarget {
-        private int framebuffer, texture, width, height;
+        private int framebuffer, texture, width, height, frame;
 
         void render(int w, int h) {
             if (framebuffer == 0 || w != width || h != height) {
                 resize(w, h);
             }
+            if (sodium && ++frame % 13 == 0) {
+                viewport(0, 0, 16, 16);
+            }
             GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, framebuffer);
-            glViewport(0, 0, width, height);
+            viewport(0, 0, width, height);
             glClearColor(0.2f, 0.4f, 0.6f, 1f);
             glClear(GL_COLOR_BUFFER_BIT);
             drawScene(width, height);
@@ -115,7 +136,7 @@ final class SmokeImage {
         void present() {
             GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, framebuffer);
             GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, 0);
-            glViewport(0, 0, width, height);
+            viewport(0, 0, width, height);
             GL30.glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
             GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
         }
