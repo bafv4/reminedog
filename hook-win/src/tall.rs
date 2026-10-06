@@ -15,7 +15,8 @@
 //! 3. At the buffer swap, the middle rows of our framebuffer are copied into the window.
 //!
 //! `glViewport` is wrapped too, only to confirm that the game really renders at the tall
-//! size; if it does not, the zoom falls back to enlarging the pixels.
+//! size (it set the tall viewport once since the zoom started); if it does not, the zoom
+//! falls back to enlarging the pixels.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -68,8 +69,10 @@ static GAME_CONTEXT: AtomicUsize = AtomicUsize::new(0);
 /// The game bound (or blitted to) framebuffer 0 since the last frame, getting ours.
 static REDIRECTED: AtomicBool = AtomicBool::new(false);
 /// The tall size (width << 32 | height) the game should set as its viewport, and whether
-/// it did since the last frame. Only the height is compared: the game may keep a width of
-/// its own (26.3 renders 2560 wide in a window SDL reports as 2561 pixels wide).
+/// it did since the zoom started. Only the height is compared: the game may keep a width of
+/// its own (26.3 renders 2560 wide in a window SDL reports as 2561 pixels wide). Once set,
+/// the viewport stays tall, and Sodium skips a `glViewport` equal to the last one, so most
+/// frames set none: "seen" is kept until the zoom ends, not checked per frame.
 static TALL_VIEWPORT: AtomicU64 = AtomicU64::new(0);
 static TALL_VIEWPORT_SEEN: AtomicBool = AtomicBool::new(false);
 /// For the log while zooming: the game's `glViewport` calls since the last frame, the
@@ -418,7 +421,7 @@ impl TallZoom {
                 return fallback;
             }
             let redirected = REDIRECTED.swap(false, Ordering::Relaxed);
-            let tall = TALL_VIEWPORT_SEEN.swap(false, Ordering::Relaxed)
+            let tall = TALL_VIEWPORT_SEEN.load(Ordering::Relaxed)
                 || !VIEWPORT_WRAPPED.load(Ordering::Relaxed);
             let viewport_calls = VIEWPORT_CALLS.swap(0, Ordering::Relaxed);
             let tallest = VIEWPORT_TALLEST.swap(0, Ordering::Relaxed);
@@ -440,11 +443,23 @@ impl TallZoom {
             };
             let factor = active.factor;
             let view = if redirected && tall {
+                if self.misses > 0 {
+                    log::debug!(
+                        "zoom: tall frame after {} frames not rendered at the tall size",
+                        self.misses
+                    );
+                }
                 self.misses = 0;
                 self.first_miss = None;
                 self.compose();
                 ZoomView::HighRes { factor }
             } else {
+                if redirected {
+                    // The game drew into our framebuffer at its old size, not into the
+                    // window: copy that in, for the fallback to enlarge (the window's buffer
+                    // holds an old frame or nothing).
+                    self.copy_rows(0);
+                }
                 self.misses += 1;
                 let first_miss = *self.first_miss.get_or_insert_with(Instant::now);
                 if log::log_enabled!(log::Level::Debug) {
@@ -547,6 +562,7 @@ impl TallZoom {
         };
         REDIRECT.store(0, Ordering::Relaxed);
         TALL_VIEWPORT.store(0, Ordering::Relaxed);
+        TALL_VIEWPORT_SEEN.store(false, Ordering::Relaxed);
         if let Some(game) = &self.game
             && let Some(target) = &game.target
         {
@@ -558,6 +574,14 @@ impl TallZoom {
 
     /// The middle of our framebuffer into the window, at 1:1.
     fn compose(&self) {
+        if let Some(active) = &self.active {
+            self.copy_rows(middle_row(active.tall[1] as u32, active.real[1] as u32) as i32);
+        }
+    }
+
+    /// The window's height of rows of our framebuffer, from row `y0` up, into the window at
+    /// 1:1.
+    fn copy_rows(&self, y0: i32) {
         let (Some(game), Some(active)) = (&self.game, &self.active) else {
             return;
         };
@@ -566,7 +590,6 @@ impl TallZoom {
         };
         let gl = &game.gl;
         let [w, h] = active.real;
-        let y0 = middle_row(active.tall[1] as u32, h as u32) as i32;
         // SAFETY: the game's context is current (checked by the caller); every state
         // touched is restored.
         unsafe {
