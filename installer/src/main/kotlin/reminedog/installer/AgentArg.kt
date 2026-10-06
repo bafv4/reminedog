@@ -28,9 +28,7 @@ object AgentArg {
                 c == '=' || c == '"' || c == '\'' -> return "パスに記号「$c」が入っています"
             }
         }
-        if (!(path.length > 2 && path[0].isLetter() && path[1] == ':' && path[2] == '\\')) {
-            return "ドライブから始まるパス（C:\\... など）にしてください"
-        }
+        if (!isDrivePath(path)) return "ドライブから始まるパス（C:\\... など）にしてください"
         if (!isAgentFile(fileName(path))) return "ファイル名は reminedog で始まる .dll にしてください（例：reminedog.dll）"
         return null
     }
@@ -82,11 +80,16 @@ object AgentArg {
     /** The arguments without any reminedog argument. */
     fun remove(args: String): String = cut(args, find(args))
 
-    fun samePath(a: String, b: String): Boolean = normalize(a) == normalize(b)
+    fun samePath(a: String, b: String): Boolean = pathKey(a) == pathKey(b)
+
+    /** The same text for paths Windows takes as the same file (case and slash direction aside). */
+    fun pathKey(path: String): String = path.replace('/', '\\').lowercase()
+
+    /** Whether a path starts with a drive (`C:\` or `C:/`), so it does not depend on the working folder. */
+    fun isDrivePath(path: String): Boolean =
+        path.length > 2 && (path[0] in 'A'..'Z' || path[0] in 'a'..'z') && path[1] == ':' && (path[2] == '\\' || path[2] == '/')
 
     fun fileName(path: String): String = path.substringAfterLast('\\').substringAfterLast('/')
-
-    private fun normalize(path: String) = path.replace('/', '\\').lowercase()
 
     private fun isAgentFile(name: String): Boolean {
         val lower = name.lowercase()

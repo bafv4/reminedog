@@ -2,6 +2,7 @@ package reminedog.installer
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -65,5 +66,16 @@ class AgentArgTest {
         assertEquals("C:/x/reminedog.dll", found[0].path)
         assertEquals("log=debug,gamedir=C:\\g", found[0].options)
         assertTrue(AgentArg.samePath("c:/X/REMINEDOG.dll", "C:\\x\\reminedog.dll"))
+    }
+
+    @Test
+    fun `only paths from a drive are taken as the same file wherever the game runs`() {
+        assertTrue(AgentArg.isDrivePath("C:\\reminedog\\reminedog.dll"))
+        assertTrue(AgentArg.isDrivePath("d:/games/reminedog.dll"))
+        assertFalse(AgentArg.isDrivePath("reminedog.dll"))
+        assertFalse(AgentArg.isDrivePath("..\\reminedog.dll"))
+        assertFalse(AgentArg.isDrivePath("C:reminedog.dll"))
+        assertFalse(AgentArg.isDrivePath("\\\\server\\share\\reminedog.dll"))
+        assertEquals(AgentArg.pathKey("C:\\Tools\\ReMineDog.dll"), AgentArg.pathKey("c:/tools/reminedog.DLL"))
     }
 }

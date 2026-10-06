@@ -7,6 +7,7 @@ import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.jupiter.api.io.TempDir
 import kotlin.streams.toList
 import kotlin.test.Test
@@ -14,9 +15,45 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class DownloadTest {
+    @TempDir
+    lateinit var dir: Path
+
+    private val dll = byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 1, 2, 3)
+
+    /** A local HTTP server with the files a download asks for, counting the requests. */
+    private class Server(files: Map<String, ByteArray>) : AutoCloseable {
+        private val server = HttpServer.create(InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0)
+        val requests = AtomicInteger()
+
+        init {
+            for ((path, body) in files) {
+                server.createContext(path) { exchange ->
+                    requests.incrementAndGet()
+                    exchange.sendResponseHeaders(200, body.size.toLong())
+                    exchange.responseBody.use { it.write(body) }
+                }
+            }
+            server.start()
+        }
+
+        fun url(path: String) = "http://127.0.0.1:${server.address.port}$path"
+
+        override fun close() = server.stop(0)
+    }
+
+    private fun sha256(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun write(relative: String, bytes: ByteArray): Path {
+        val file = dir.resolve(relative)
+        Files.createDirectories(file.parent)
+        Files.write(file, bytes)
+        return file
+    }
+
     @Test
     fun `the DLL of a release is found with its hash`() {
         val release = Download.parse(
@@ -40,35 +77,70 @@ class DownloadTest {
     }
 
     @Test
-    fun `a downloaded DLL is checked before it replaces the file`(@TempDir dir: Path) {
-        val dll = byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 1, 2, 3)
-        val notDll = byteArrayOf(1, 2, 3, 4, 5)
-        val server = HttpServer.create(InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0)
-        for ((path, body) in listOf("/dll" to dll, "/other" to notDll)) {
-            server.createContext(path) { exchange ->
-                exchange.sendResponseHeaders(200, body.size.toLong())
-                exchange.responseBody.use { it.write(body) }
-            }
-        }
-        server.start()
-        try {
-            val base = "http://127.0.0.1:${server.address.port}"
-            val sha256 = MessageDigest.getInstance("SHA-256").digest(dll).joinToString("") { "%02x".format(it) }
+    fun `a downloaded DLL is checked before it replaces the file`() {
+        Server(mapOf("/dll" to dll, "/other" to byteArrayOf(1, 2, 3, 4, 5))).use { server ->
             val target = dir.resolve("reminedog/reminedog.dll")
-            val release = Download.Release("v1", "$base/dll", dll.size.toLong(), sha256)
+            val release = Download.Release("v1", server.url("/dll"), dll.size.toLong(), sha256(dll))
 
             assertTrue(Download.save(release, target))
             assertContentEquals(dll, Files.readAllBytes(target))
             assertFalse(Download.save(release, target), "the same file is not downloaded again")
 
             val other = dir.resolve("other/reminedog.dll")
-            assertFailsWith<IOException> { Download.save(Download.Release("v1", "$base/dll", 6, null), other) }
-            assertFailsWith<IOException> { Download.save(Download.Release("v1", "$base/dll", 5, "00"), other) }
-            assertFailsWith<IOException> { Download.save(Download.Release("v1", "$base/other", 5, null), other) }
-            assertFailsWith<IOException> { Download.save(Download.Release("v1", "$base/missing", 5, null), other) }
-            assertEquals(emptyList(), Files.list(other.parent).use { files -> files.map { it.fileName.toString() }.toList() })
-        } finally {
-            server.stop(0)
+            assertFailsWith<IOException> { Download.save(Download.Release("v1", server.url("/dll"), 6, null), other) }
+            assertFailsWith<IOException> { Download.save(Download.Release("v1", server.url("/dll"), 5, "00"), other) }
+            assertFailsWith<IOException> { Download.save(Download.Release("v1", server.url("/other"), 5, null), other) }
+            assertFailsWith<IOException> { Download.save(Download.Release("v1", server.url("/missing"), 5, null), other) }
+            assertFalse(Files.exists(other.parent), "nothing is written when the download fails")
+        }
+    }
+
+    @Test
+    fun `replacing downloads once and changes only the files that differ`() {
+        Server(mapOf("/dll" to dll)).use { server ->
+            val release = Download.Release("v2", server.url("/dll"), dll.size.toLong(), sha256(dll))
+            val stale = write("a/reminedog.dll", byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 9))
+            val same = write("b/reminedog.dll", dll)
+            val missing = dir.resolve("c/reminedog.dll")
+            var downloads = 0
+
+            val results = Download.replaceAll(release, listOf(stale, same, missing)) { downloads++ }
+            assertIs<Download.Replaced.Updated>(results[0])
+            assertIs<Download.Replaced.AlreadyLatest>(results[1])
+            assertIs<Download.Replaced.Updated>(results[2])
+            assertEquals(listOf(stale, same, missing), results.map { it.path })
+            assertEquals(1, downloads)
+            assertEquals(1, server.requests.get())
+            for (file in listOf(stale, same, missing)) assertContentEquals(dll, Files.readAllBytes(file))
+            assertEquals(listOf("reminedog.dll"), Files.list(stale.parent).use { files -> files.map { it.fileName.toString() }.toList() })
+
+            // Every file is the same as GitHub's hash: nothing is downloaded.
+            val again = Download.replaceAll(release, listOf(stale, same, missing)) { downloads++ }
+            assertTrue(again.all { it is Download.Replaced.AlreadyLatest })
+            assertEquals(1, downloads)
+            assertEquals(1, server.requests.get())
+
+            // Without GitHub's hash, it downloads to compare.
+            val unknown = Download.replaceAll(Download.Release("v2", server.url("/dll"), dll.size.toLong(), null), listOf(stale))
+            assertIs<Download.Replaced.AlreadyLatest>(unknown.single())
+            assertEquals(2, server.requests.get())
+        }
+    }
+
+    @Test
+    fun `a file that cannot be replaced fails alone`() {
+        Server(mapOf("/dll" to dll)).use { server ->
+            val release = Download.Release("v2", server.url("/dll"), dll.size.toLong(), sha256(dll))
+            // The folder of this target is a file, so nothing can be written there.
+            val blocked = write("blocked", byteArrayOf(0)).resolve("reminedog.dll")
+            val fine = dir.resolve("fine/reminedog.dll")
+
+            val results = Download.replaceAll(release, listOf(blocked, fine))
+            val failed = assertIs<Download.Replaced.Failed>(results[0])
+            assertTrue(failed.reason.contains("書き込めません"), failed.reason)
+            assertIs<Download.Replaced.Updated>(results[1])
+            assertContentEquals(dll, Files.readAllBytes(fine))
+            assertFailsWith<IOException> { Download.save(release, blocked) }
         }
     }
 }
