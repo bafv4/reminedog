@@ -11,7 +11,8 @@ Mod ではなく、JVM に `-agentpath:` で読み込ませる Rust 製のネイ
 ## 利用者とのやり取り
 
 - 利用者は日本語で話す。返事・ドキュメント・UI の文言は日本語。コードのコメント、コミットメッセージ、ログは英語
-- 実機で確かめるのは利用者（Windows、NVIDIA RTX 4060 Ti、Prism Launcher、バニラ）。確かめたバージョンは 1.21.11（GLFW 3.4.0）と 26.3（SDL 3.4.14）
+- 実機で確かめるのは利用者（Windows、NVIDIA RTX 4060 Ti、Prism Launcher）。確かめたバージョンは 1.21.11（GLFW 3.4.0）と 26.3（SDL 3.4.14）。
+  1.21.11 には 2026-10-05 から Fabric と Sodium・Iris・Lithium が入っている（それより前の 1.21.11 での確認はバニラ）。26.3 はバニラ
 - JVM 引数は `-agentpath:C:\reminedog\reminedog.dll`（先頭の `-` を忘れると起動しない）。ログは `<ゲームフォルダ>/reminedog/reminedog.log`、詳しいログは `=log=debug` を付ける
 - 利用者に確かめてほしいことは、`docs/TESTING.md` のチェックリストに書いて渡す
 
@@ -89,7 +90,10 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 - Rust 1.95 以降（egui 0.36 の要件。今は 1.98）、edition 2024
 - MSVC では CRT を静的にリンクする（`.cargo/config.toml` の `+crt-static`。Java 8 に vcruntime140 がないため）
 - Linux からは `--target x86_64-pc-windows-gnu` で DLL をビルドし、`scripts/wine-smoke.sh` で試せる（README の「開発」）。Windows では DLL を置いてゲームで確かめるのが早い
-- テスト用プログラムを Windows で直接動かすなら、`ci/smoke/*.java` を LWJGL の jar と一緒にコンパイルし、`java -agentpath:...\reminedog.dll -cp ... Smoke --seconds=20 --capture --mc` のように動かす（`.github/workflows/ci.yml` の `smoke-windows` ジョブが手順の見本）
+- テスト用プログラムを Windows で直接動かすなら、`ci/smoke/*.java` を LWJGL の jar と一緒にコンパイルし、`java -agentpath:...\reminedog.dll -cp ... Smoke --seconds=20 --capture --mc` のように動かす（`.github/workflows/ci.yml` の `smoke-windows` ジョブが手順の見本）。
+  Prism の libraries に LWJGL のネイティブの jar がないときは、ゲームが展開したもの（`-Dorg.lwjgl.librarypath=%TEMP%\lwjgl_yuanq\3.3.3+5\x64` など）を使う
+  - ズームは、Z の WM_KEYDOWN／WM_KEYUP をスモークのウィンドウに `PostMessage` すれば試せる（利用者の入力に触れない）。`=log=debug` の `zoom:` の行と、`PrintWindow` で撮ったウィンドウで見る。
+    `--sodium`（`--mc` と一緒に）で、Sodium と同じく直前と同じ値の `glViewport` を省く
   - ウェイポイントを試すなら `--world=<名前>` を付ける（作業フォルダに latest.log と saves を書く）。記録できれば `reminedog/waypoints/sp-<名前>.json` ができ、終了時の行が `F3C STATE overlay=off modifier=up copies=1` になる。拒否は `--f3c-refuse`。詳しくは HANDOFF.md の「追記：プロトタイプ 3」
   - 本物の F3+C を送るときは、PowerShell の `SendKeys` ではなく `Add-Type` で `SendInput` を使う（`SendKeys` では F3 を押したまま C を押せない）
   - キーの置き換えを試すなら、ゲームフォルダ（`gamedir=` か作業フォルダ）の `reminedog/settings.json` にルールを書いてから起動する（例：`{"rebinds": [{"from": "key.keyboard.b", "to": "key.keyboard.w"}]}`）。
@@ -121,7 +125,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 | オーバーレイ（egui、日本語フォント） | 実機で確認済み（1.21.11、26.3） |
 | メニュー（Ctrl+I）、入力の横取り、自前のカーソル（Windows のポインターの速度を反映） | 実機で確認済み |
 | チェックボックスと文字の縦位置の補正 | 実機で確認済み |
-| 高精細のズーム（`tall.rs`） | 実機で確認済み（1.21.11、26.3） |
+| 高精細のズーム（`tall.rs`） | 実機で確認済み（1.21.11、26.3）。Sodium を入れた 1.21.11 で崩れていたのを直した（スモークの `--sodium` と実機で確認） |
 | キーの変更、settings.json の保存 | 倍率の保存は実機で確認済み。キーの変更は Wine のみ |
 | F3+C によるウェイポイント（J で記録、K で方角と距離、メニューの一覧） | 手元のスモーク（GLFW・SDL3）で確認済み。実機では未確認 |
 | キーの置き換え（キーとマウスのボタン、ゲーム中だけ。メニューの「キーの置き換え」） | 手元のスモーク（GLFW・SDL3）で確認済み。実機では未確認 |
@@ -132,7 +136,9 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 1. ズームキーを押している間、ゲームにフレームバッファが縦に k 倍長いと伝える（GLFW：ゲームのフレームバッファの大きさのコールバックをスワップの後に呼び、`glfwGetFramebufferSize` を差し替え。SDL3：`SDL_PollEvent` から大きさの変更のイベントを渡し、`SDL_GetWindowSizeInPixels` を差し替え）
 2. opengl32.dll が読み込まれたときに `wglGetProcAddress` をフックし、ゲームに `glBindFramebuffer(EXT)`・`glBlitNamedFramebuffer` のラッパーを渡す。ズーム中はフレームバッファ 0 を自前の縦長のフレームバッファに差し替える
 3. スワップのときに、その中央をウィンドウに blit する
-4. `glViewport` のラッパーで、ゲームが本当に縦長で描いたかを確かめる。3 フレーム以上かつ 1 秒以上続けて描かれなければ、引き伸ばすズームに切り替える（描画先の作り直しで数フレーム止まっても見切らないように）
+4. `glViewport` のラッパーで、ゲームが本当に縦長で描いたかを確かめる（ズームを始めてから縦長の高さの viewport を一度でも設定したか。Sodium は直前と同じ値の `glViewport` を省くので、フレームごとには見ない）。
+   3 フレーム以上かつ 1 秒以上続けて描かれなければ、引き伸ばすズームに切り替える（描画先の作り直しで数フレーム止まっても見切らないように）。
+   縦長で描かれなかったフレームでは、ゲームが自前のフレームバッファに描いた絵をウィンドウに写してから引き伸ばす（ウィンドウには古い絵しか残っていないため）
 
 26.3 の実機では、ゲームは縦長で描いていたが幅が 2560（SDL が報告するウィンドウは 2561 px）で、幅まで一致を求める判定に落ちて引き伸ばすズームになっていた。判定を高さだけにして直し、実機で確認した。26.3 はウィンドウの大きさを `SDL_GetWindowSizeInPixels` で問い合わせず、イベントの値を使う。`=log=debug` の `zoom: frame not rendered ...` の行に、`glViewport` の回数・最大の大きさ・スワップ時の viewport・大きさの問い合わせの回数が出る。
 
@@ -169,7 +175,9 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 - `scripts/wine-smoke.sh --grab` は X の画面全体を保存する。SDL3 版のウィンドウは画面の中央寄りに開く
 - 利用者のインスタンスのクライアントの jar は `%APPDATA%\PrismLauncher\libraries\com\mojang\minecraft\<版>\minecraft-<版>-client.jar` にある（1.16.1、1.21.11、26.3）。
   26.3 は難読化されていない。1.21.11 と 1.16.1 は難読化されているので、クラスは文字列の定数から探す（`javap -c -p -constants`）。展開したものはリポジトリの外（scratchpad）に置く
-- 利用者の 1.16.1 はスピードラン用の Mod（SeedQueue など）を入れた構成で、バニラの挙動の確認には使えない
+- 利用者の 1.16.1 はスピードラン用の Mod（SeedQueue など）を入れた構成で、バニラの挙動の確認には使えない。
+  1.21.11 も 2026-10-05 から Fabric＋Sodium 0.8・Iris 1.10（シェーダーパックは未選択で無効）・Lithium・fabric-regrowth を入れていて、フルスクリーン、GUI の大きさ 5。
+  1.21.11 の描画の不具合は、まず Sodium の変更を疑う（Mod の jar は `minecraft\mods` にある。調べるときは scratchpad に展開して `javap`）
 - 利用者のキー設定（チェックリストを書くとき）：26.3 は「アイテムを捨てる」が C、ホットバー 1 が Q、「オフハンドと交換」が CapsLock、ダッシュが M（トグル）、チャットが Backspace。1.21.11 は捨てるが Q、ダッシュが左 Ctrl、「ホットバーの保存」が C。どちらでも空いているキーは B・H・N・U・Y（B・H・N は F3 との組み合わせだけ）。キーボードは US 配列（kbd101）なので、JIS のキーは確かめられない
 - SendInput でスモークに送るときは、利用者が操作していないこととスモークのウィンドウが前面にあることを確かめてから送る（`--screen-key` ではカーソルをウィンドウの中央に動かす）。PC がロックされていると SendInput は届かない（自分のウィンドウへの PostMessage なら届くが、SDL3 はキーボードのフォーカスがないとキーのイベントの windowID が 0 になる）。
   右 Ctrl・右 Alt・矢印・Insert などの拡張キーには `KEYEVENTF_EXTENDEDKEY` を付け、マウスの X ボタンは `mouseData` で指定する。CapsLock を送ったら、ロックの状態を元に戻す
