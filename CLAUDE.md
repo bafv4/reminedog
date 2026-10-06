@@ -59,7 +59,8 @@ hook-win/  Windows のエージェント（reminedog.dll）
   fonts.rs     日本語フォント（游ゴシック → メイリオ → MS ゴシック）
 installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）。Java 8 以降で動く 1 つの jar（reminedog-installer.jar）
   Main.kt            FlatLaf（Windows のダークモードに合わせる）と画面の起動
-  InstallerFrame.kt  画面：DLL（GitHub からダウンロードするか、PC のファイル）、インスタンスの一覧と状態、インストール／アンインストール、ログ
+  InstallerFrame.kt  画面：DLL（GitHub からダウンロードするか、PC のファイル）、インスタンスの一覧と状態、インストール／アンインストール、
+                     最新版に更新（インスタンスが読み込んでいる DLL を、その場所のまま置き換える）、ログ
   AgentArg.kt        JVM 引数の中の -agentpath:...reminedog*.dll を探す・置き換える・外す（ほかの部分は文字のまま残す）。使えないパスの判定
   Launcher.kt        Launcher（ランチャーのデータのフォルダ）・Instance・Args・Change
   MojangLauncher.kt  公式ランチャー（launcher_profiles.json の javaArgs）
@@ -67,7 +68,7 @@ installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）。Java 8
   McsrLauncher.kt    MCSR Launcher（instance.json の options）
   Launchers.kt       いつもの場所の検出と、選んだフォルダの判定
   Ini.kt, Json.kt    設定ファイルの読み書き（Qt の INI と MultiMC の INI を行単位で、JSON はキーの順序と数値の書き方を保つ）
-  Download.kt        GitHub の最新のリリースの reminedog.dll（サイズ・SHA-256・MZ を確かめてから置き換える）
+  Download.kt        GitHub の最新のリリースの reminedog.dll（サイズ・SHA-256・MZ を確かめてから置き換える）。replaceAll で複数の DLL を 1 回のダウンロードで置き換える
   Processes.kt       起動中のランチャーの判定（tasklist）
 ci/smoke/  LWJGL で Minecraft と同じようにウィンドウを作るテスト用の Java（GLFW 版 Smoke、SDL3 版 SmokeSdl）。F3+C の真似（--world、--f3c-refuse、--f3c-events）。
            キーの置き換えの確認（SMOKE_VERBOSE=1 で受け取ったイベント、--screen-key・--watch-keys で画面を閉じたときのキーの状態）
@@ -124,7 +125,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 | キーの変更、settings.json の保存 | 倍率の保存は実機で確認済み。キーの変更は Wine のみ |
 | F3+C によるウェイポイント（J で記録、K で方角と距離、メニューの一覧） | 手元のスモーク（GLFW・SDL3）で確認済み。実機では未確認 |
 | キーの置き換え（キーとマウスのボタン、ゲーム中だけ。メニューの「キーの置き換え」） | 手元のスモーク（GLFW・SDL3）で確認済み。実機では未確認 |
-| インストーラー（公式ランチャー、MultiMC、Prism Launcher、MCSR Launcher） | 設定ファイルの写しに対して画面から操作して確認済み、Java 8・17・21・25 で表示を確認。本物のランチャーでは未確認。ダウンロードはリリースがないので失敗する |
+| インストーラー（公式ランチャー、MultiMC、Prism Launcher、MCSR Launcher） | 設定ファイルの写しに対して画面から操作して確認済み、Java 8・17・21・25 で表示を確認。本物のランチャーでは未確認。ダウンロードと「最新版に更新」はリリースがないので失敗する（置き換えは単体テストで確認） |
 
 ### 高精細のズームの仕組み（`hook-win/src/tall.rs`）
 
