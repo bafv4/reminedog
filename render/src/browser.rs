@@ -92,15 +92,16 @@ const DOUBLE_CLICK_SECONDS: f64 = 0.5;
 const DOUBLE_CLICK_DISTANCE: f32 = 4.0;
 /// CSS pixels per wheel notch (Chromium's on Windows).
 const WHEEL_STEP: f32 = 100.0;
+/// Frames to get the window where the page was when it appears.
+const PLACING_TRIES: u8 = 3;
 
 /// The page's picture as a GL texture of the overlay's context.
 #[derive(Default)]
 pub(crate) struct PageTexture {
     texture: Option<(glow::Texture, TextureId)>,
     size: [u32; 2],
-    /// Generation and number of the picture uploaded.
-    uploaded: (u64, u64),
-    has_picture: bool,
+    /// Generation and number of the picture on the texture; `None` when it has none to show.
+    uploaded: Option<(u64, u64)>,
 }
 
 impl PageTexture {
@@ -120,10 +121,10 @@ impl PageTexture {
         let [width, height] = pixels.size;
         let complete = pixels.bgra.len() >= width as usize * height as usize * 4;
         if pixels.seq == 0 || width == 0 || height == 0 || !complete {
-            self.has_picture = false;
+            self.uploaded = None;
             return;
         }
-        if (pixels.generation, pixels.seq) == self.uploaded && self.has_picture {
+        if self.uploaded == Some((pixels.generation, pixels.seq)) {
             return;
         }
         let gl = painter.gl().clone();
@@ -184,13 +185,12 @@ impl PageTexture {
             }
             gl.bind_texture(glow::TEXTURE_2D, None);
         }
-        self.uploaded = (pixels.generation, pixels.seq);
-        self.has_picture = true;
+        self.uploaded = Some((pixels.generation, pixels.seq));
     }
 
     /// The texture with the page on it.
     pub(crate) fn picture(&self) -> Option<TextureId> {
-        self.texture.filter(|_| self.has_picture).map(|(_, id)| id)
+        self.uploaded.and(self.texture).map(|(_, id)| id)
     }
 }
 
@@ -201,10 +201,9 @@ pub(crate) struct BrowserMenu {
     address: Option<String>,
     /// The page's corner relative to the window's, measured.
     offset: Option<Vec2>,
-    /// Frames left to put the window where the page was, after it appeared.
+    /// Tries at putting the window where the page was since it appeared (the offset is only
+    /// known once drawn); [`PLACING_TRIES`] once it is there.
     placing: u8,
-    /// The window was drawn in the last frame.
-    window_was_shown: bool,
     /// Buttons that went down on the page and are not up yet ([`PageButton::bit`]).
     buttons: u8,
     last_click: Option<Click>,
@@ -288,10 +287,10 @@ pub(crate) fn browser_ui(
     ui_open: bool,
     commands: &mut Vec<BrowserCommand>,
 ) {
-    // The window appears when the menu opens with the browser shown, or the other way round.
-    let window_shown = ui_open && view.shown;
-    let appeared = window_shown && !menu.window_was_shown;
-    menu.window_was_shown = window_shown;
+    if !(ui_open && view.shown) {
+        // No window: it is placed again when it appears.
+        menu.placing = 0;
+    }
     if !ui_open {
         menu.address = None;
         menu.buttons = 0;
@@ -321,9 +320,6 @@ pub(crate) fn browser_ui(
         );
         return;
     }
-    if appeared {
-        menu.placing = 3;
-    }
     browser_window(ctx, menu, view, settings, picture, rect, commands);
 }
 
@@ -346,7 +342,7 @@ fn browser_window(
         // Dragged by the title bar only, a window keeps the position it remembers over
         // `current_pos`. Here the page and its corner take their own drags anyway.
         .drag_area(egui::WindowDrag::Anywhere);
-    if menu.placing > 0 {
+    if menu.placing < PLACING_TRIES {
         window = window.current_pos(rect.min - menu.offset.unwrap_or(DEFAULT_OFFSET));
     }
     let shown = window.show(ctx, |ui| {
@@ -359,14 +355,14 @@ fn browser_window(
     let Some((window_rect, Some(page_rect))) = shown.map(|s| (s.response.rect, s.inner)) else {
         return;
     };
-    if menu.placing > 0 {
+    if menu.placing < PLACING_TRIES {
         // Put the page back where it was (the offset is only known once drawn).
         if (page_rect.min - rect.min).length() > 0.5 {
             menu.offset = Some(page_rect.min - window_rect.min);
-            menu.placing -= 1;
+            menu.placing += 1;
             return;
         }
-        menu.placing = 0;
+        menu.placing = PLACING_TRIES;
     }
     let size = page_rect.size();
     let placed = [page_rect.min.x, page_rect.min.y, size.x, size.y];
