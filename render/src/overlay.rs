@@ -482,8 +482,8 @@ struct UiState {
     capturing: Option<Action>,
     /// Why the last captured key was not taken.
     key_note: Option<String>,
-    /// [`Self::key_note`] is about a browser key (it shows in the browser's section).
-    key_note_browser: bool,
+    /// The hotkey [`Self::key_note`] is about (it shows in the list that has it).
+    key_note_about: Action,
     waypoints: WaypointMenu,
     rebinds: RebindMenu,
     browser: BrowserMenu,
@@ -508,7 +508,7 @@ impl UiState {
             reserved_keys: Vec::new(),
             capturing: None,
             key_note: None,
-            key_note_browser: false,
+            key_note_about: Action::Menu,
             waypoints: WaypointMenu::default(),
             rebinds: RebindMenu::default(),
             browser: BrowserMenu::default(),
@@ -536,7 +536,7 @@ impl UiState {
     /// for an action that sends F3+C, or a rebinding rule's source (the router would take its
     /// presses for the hotkey before the rule).
     fn assign(&mut self, action: Action, hotkey: Hotkey) {
-        self.key_note_browser = action.optional();
+        self.key_note_about = action;
         if action.uses_f3c()
             && self
                 .reserved_keys
@@ -582,7 +582,9 @@ impl UiState {
     /// refuses a rebinding rule's source: an action whose default is one keeps its key (with a
     /// note), and so does one whose default would then hide another key or be hidden by it.
     fn reset_hotkeys(&mut self, actions: &[Action]) {
-        self.key_note_browser = actions.iter().any(|action| action.optional());
+        if let Some(&first) = actions.first() {
+            self.key_note_about = first;
+        }
         let mut note = None;
         let mut keep: Vec<Action> = Action::ALL
             .into_iter()
@@ -673,7 +675,7 @@ fn key_grid(
             }
         });
     let capturing_here = state.capturing.is_some_and(|action| list.contains(&action));
-    let note_here = state.key_note_browser == list.iter().any(|action| action.optional());
+    let note_here = list.contains(&state.key_note_about);
     if capturing_here {
         ui.label(RichText::new("割り当てるキーかマウスのボタンを押す（Esc で取り消し）").weak());
     } else if let Some(note) = state.key_note.as_ref().filter(|_| note_here) {
@@ -1289,7 +1291,7 @@ mod tests {
             "Ctrl+B",
         );
         assert!(note.is_some_and(|note| note.contains("ブラウザの表示／非表示")));
-        assert!(state.key_note_browser);
+        assert!(Action::BROWSER.contains(&state.key_note_about));
         // A browser key cannot take the zoom's.
         assert!(refused(&mut state, Action::Browser(BrowserAction::PageUp), "Z").is_some());
         // Cleared.
