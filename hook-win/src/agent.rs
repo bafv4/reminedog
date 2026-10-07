@@ -24,6 +24,12 @@ pub fn globals() -> Option<&'static Globals> {
     GLOBALS.get()
 }
 
+/// The version: the release's (the release workflow sets REMINEDOG_VERSION), otherwise the crate's.
+pub const VERSION: &str = match option_env!("REMINEDOG_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// Identifies the build in logs; CI sets it to the commit hash.
 pub const BUILD_ID: &str = match option_env!("REMINEDOG_BUILD_ID") {
     Some(id) => id,
@@ -56,10 +62,7 @@ pub fn on_load(raw_options: &str) {
         );
     }));
 
-    log::info!(
-        "reminedog {} ({BUILD_ID}) agent loaded",
-        env!("CARGO_PKG_VERSION")
-    );
+    log::info!("reminedog {VERSION} ({BUILD_ID}) agent loaded");
     log::info!(
         "java: {}",
         ffi::module_path(None).map_or_else(|| "?".into(), |p| p.display().to_string())

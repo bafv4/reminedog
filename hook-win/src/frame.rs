@@ -297,7 +297,7 @@ impl Runtime {
         let status = vec![
             StatusLine::new(
                 "ビルド",
-                format!("{} ({})", env!("CARGO_PKG_VERSION"), agent::BUILD_ID),
+                format!("{} ({})", agent::VERSION, agent::BUILD_ID),
             ),
             StatusLine::new("ウィンドウ", ws.describe()),
             StatusLine::new("ゲームのGL", game_gl),
