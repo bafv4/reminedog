@@ -10,7 +10,7 @@
 
 ## 準備
 
-1. `reminedog.dll` を入手する（[README](../README.md#dll-の入手)）
+1. `reminedog.dll` を入手する（[README](../README.md#インストール方法)）
 2. パスに日本語も空白（スペース）も含まない場所に置く（例：`C:\reminedog\reminedog.dll`。`C:\Program Files` は不可）
 3. 確かめたいインスタンスの JVM 引数に `-agentpath:C:\reminedog\reminedog.dll` を追加する
 
