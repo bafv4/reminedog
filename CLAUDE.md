@@ -108,7 +108,9 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
     PageUp／PageDown・矢印などの拡張キーを `PostMessage` で送るときは lParam の 24 ビット目を立てる（立てないと GLFW がテンキーとして受け取る）。メニューのマウス操作は `--capture` なしで `WM_MOUSEMOVE`・`WM_LBUTTONDOWN` を送る
 - インストーラーは Gradle 9.8（ラッパー。JDK 17 以降で動く。手元は JDK 25）、Kotlin 2.4、FlatLaf 3.7。Kotlin は `jvmTarget` 1.8 と `-Xjdk-release=1.8`（Java 8 の API だけを使う）、警告はエラー。
   画面を確かめるなら、利用者の設定ファイルの写しを scratchpad に作り、`APPDATA`・`LOCALAPPDATA` をそこに向けて起動する（本物のランチャーの設定を書き換えない）
-- CI（GitHub Actions）：Linux（fmt、clippy、テスト、mingw での clippy）、インストーラー（テスト、成果物 `reminedog-installer`）、Windows（clippy、テスト、リリースビルド、成果物 `reminedog-windows-x64`）、Windows のスモークテスト（LWJGL 3.2.2/Java 8、3.3.3/Java 21、3.4.3/Java 25 の SDL3。Mesa の llvmpipe で描く）
+- CI（GitHub Actions）：Linux（fmt、clippy、テスト、mingw での clippy）、インストーラー（テスト、成果物 `reminedog-installer`）、Windows（clippy、テスト、リリースビルド、`ci/check-dll.ps1` で DLL の確認、成果物 `reminedog-windows-x64`）、Windows のスモークテスト（LWJGL 3.2.2/Java 8、3.3.3/Java 21、3.4.3/Java 25 の SDL3。Mesa の llvmpipe で描く）
+- リリース（`.github/workflows/release.yml`）：Actions から版を入れて手で実行する。版は環境変数 `REMINEDOG_VERSION`（DLL：`agent::VERSION` とログ・状態の行、`hook-win/build.rs` が embed-resource で埋めるバージョン情報）と Gradle の `-PreminedogVersion`（jar の名前と manifest の `Implementation-Version`、画面のタイトル）で入れる。
+  リポジトリの `Cargo.toml` の版は変えない（版を渡さないビルドでは、DLL は Cargo の版、インストーラーは `dev`）。成果物は `reminedog-<版>.dll`・`.pdb`・`reminedog-installer-<版>.jar` の下書きのリリース。利用者の PC では DLL は `reminedog.dll` のまま（インストーラーが名前を変えて置く。`Download` は `reminedog-<版>.dll` を探す）
 
 コミットする前に `cargo fmt --all`、clippy（警告 0）、テストを通す。
 
@@ -184,7 +186,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 ## 次にやること（候補）
 
 1. ウェイポイント、キーの置き換え、高精細のズーム、キーの変更、インストーラー、ゲーム内ブラウザを実機で確かめてもらう（`docs/TESTING.md` の「インストーラーで確認すること」「キーの置き換えで確認すること」「ウェイポイントで確認すること」「ズームとキーの変更で確認すること」「ブラウザで確認すること」）。問題があれば `=log=debug` のログの `F3+C:`・`world:`・`rebinds:`・`zoom:`・`browser:` の行から直す
-   - インストーラーのダウンロードには、公開されたリポジトリのリリースに `reminedog.dll` という名前のファイルが要る（今は非公開でリリースもない）。リリースを作る CI のジョブもまだない
+   - インストーラーのダウンロードには、公開されたリポジトリの公開済みのリリース（`release.yml` で作った下書きを公開したもの）が要る（今は非公開でリリースもない）
 2. CI のスモークテストで F3+C とキーの置き換えを確かめる（`--world`・`--f3c-refuse`、settings.json のルールと `--screen-key`・`--watch-keys` を使い、マーカーに `F3+C: clipboard hooks ready`・`SETALL` などを足す。今の CI は新しいオプションを使っていない。`scripts/wine-smoke.sh` もまだ渡せない）
 3. IME の変換中の文字をメニューの入力欄に出す（今は確定した文字だけ）
 4. Linux（Fedora）対応。方針の案は HANDOFF.md の構成の `hook-linux/`（GLFW の関数をフックする、自前のコンテキストは GLX／EGL。MinHook は使えないのでデトアの方法を検討する）

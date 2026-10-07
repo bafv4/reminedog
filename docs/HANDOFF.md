@@ -750,3 +750,13 @@ MSVC のリリースビルドの依存は `dumpbin /dependents` で確かめた�
 - iframe の中の動画のキー操作（JS はトップのフレームだけ。記事に埋め込まれた YouTube はクリックでしか操作できない）
 - WebView2 ランタイムのない環境での表示（「WebView2 ランタイムが見つかりません」と出るはず）、ブラウザのプロセスが落ちたとき
 - GNU のビルドの clippy（手元に MinGW がない。CI で見る）
+
+## 追記：リリース（2026-10-07）
+
+`.github/workflows/release.yml`。Actions から版（`1.2.0`、試験版は `1.2.0-beta.1`）を入れて手で実行し、下書きのリリース `v<版>` を作る（利用者が決めた方針：手動で実行、下書き、利用者の PC では DLL の名前は `reminedog.dll` のまま）。
+
+- ジョブ：版の形と、同じ版のタグ・リリース（下書きを含む）がないことを確かめる → Windows で clippy・テスト・リリースビルド（`REMINEDOG_VERSION`・`REMINEDOG_BUILD_ID`）と `ci/check-dll.ps1`（`Agent_OnLoad` の export、動的 CRT がないこと、バージョン情報の版）／Linux でインストーラーのテストと jar（`-PreminedogVersion`、manifest の版を確かめる） → `gh release create --draft --target <commit> --generate-notes`。`-` を含む版は pre-release
+- 版の埋め込み：DLL は `agent::VERSION`（ログの最初の行、状態の「ビルド」の行）と、`hook-win/build.rs` が embed-resource（`compile_for_cdylib`）で埋める VERSIONINFO（エクスプローラーのプロパティの「詳細」）。リソースコンパイラーがない GNU のビルドでは警告を出してリソースなしにする。インストーラーは jar の名前と manifest の `Implementation-Version`（`Download.INSTALLER_VERSION`、画面のタイトル）
+- `Cargo.toml` の版は変えない。版を渡さないビルドは、DLL が Cargo の版、インストーラーが `dev`
+- インストーラーは、リリースの `reminedog-<版>.dll`（`reminedog.dll` も可）をダウンロードして `reminedog.dll` として置く。GitHub の `releases/latest` は下書きと pre-release を返さない
+- 確かめたこと：手元で `REMINEDOG_VERSION=9.8.7-test.1` のビルドの DLL のバージョン情報（FileVersion `9.8.7-test.1`、数値 9.8.7.0）と `ci/check-dll.ps1` の成功・版違いでの失敗、`-PreminedogVersion=9.8.7` の jar の名前と manifest と `INSTALLER_VERSION`、ワークフローの YAML の書式、版の正規表現。ワークフロー自体はまだ動かしていない

@@ -34,10 +34,41 @@ ci/smoke/  LWJGL で Minecraft と同じように GLFW のウィンドウを作�
 scripts/   Linux 上で Wine を使ってエージェントを動かすスクリプト
 ```
 
+## インストール（リリースから）
+
+[Releases](https://github.com/bafv4/reminedog/releases) の最新の版（`v1.2.0` など）から入れる。名前に `-beta` などが付いた版は試験版。
+必要なもの：Windows 10 / 11、64 ビット（x64）版の Java（Minecraft のランチャーが使う Java は通常これ）。
+
+### インストーラーで入れる（おすすめ）
+
+1. リリースの Assets から `reminedog-installer-<版>.jar` をダウンロードし、ダブルクリックで開く（Java 8 以降が要る。開かないときは、コマンドプロンプトで `java -jar reminedog-installer-<版>.jar`）。画面のタイトルに版が出る
+2. 入れたいランチャーを閉じておく
+3. 「reminedog の DLL」は「GitHub から最新版をダウンロードする」のまま、保存するフォルダは既定の `C:eminedog` のままでよい（空白・日本語を含むフォルダは使えない）
+4. 一覧で入れたいインスタンスにチェックを付け、「インストール」を押す。DLL が `C:eminedogeminedog.dll` に置かれ、インスタンスの JVM 引数に `-agentpath:C:eminedogeminedog.dll` が足される
+5. ランチャーからゲームを起動し、Ctrl+I でメニューが開けば入っている
+
+対応しているランチャーは、公式ランチャー・Prism Launcher・MultiMC・MCSR Launcher（詳しくは下の「インストーラー」）。
+
+### 手で入れる
+
+1. リリースの Assets から `reminedog-<版>.dll` をダウンロードし、`reminedog.dll` に名前を変えて、パスに日本語も空白も含まないフォルダに置く（例：`C:eminedogeminedog.dll`）。
+   ダウンロードした DLL を Windows がブロックしているときは、ファイルのプロパティの「許可する」にチェックを付ける
+2. ランチャーのインスタンスの JVM 引数に `-agentpath:C:eminedogeminedog.dll` を足す（下の「使い方」の 2）
+
+### 版を上げる・外す
+
+- **版を上げる**：ゲームを閉じてから、インストーラーでインスタンスにチェックを付けて「最新版に更新」を押す（読み込んでいる DLL を、その場所のまま最新のリリースに置き換える）。
+  手で入れたときは、新しい `reminedog-<版>.dll` を同じ `reminedog.dll` に上書きする。JVM 引数は変えなくてよい
+- **今の版を確かめる**：`reminedog.dll` のプロパティの「詳細」の「ファイル バージョン」、メニューの「状態」の「ビルド」の行、ログの最初の行
+- **外す**：インストーラーで「アンインストール」を押す（JVM 引数から外す。DLL のファイルは消さない）。手で入れたときは、JVM 引数から `-agentpath:...` を消す。
+  JVM は DLL を読み込めないと起動しないので、ゲームが起動しなくなったときもこうして外す
+
 ## DLL の入手
 
-- **インストーラー**：`reminedog-installer.jar`（下の「インストーラー」）が、GitHub の最新のリリースから `reminedog.dll` をダウンロードする。
-  ダウンロードできるのは、リポジトリが公開されていて、リリースに `reminedog.dll` という名前のファイルが付いているときだけ（今はリポジトリが非公開で、リリースもない）
+- **リリース**：GitHub の Releases に、版ごとに `reminedog-<版>.dll`（と、落ちたときの調査用の `.pdb`）と `reminedog-installer-<版>.jar` がある。
+  DLL は `reminedog.dll` に名前を変えて置けば、JVM 引数を変えずに版を上げられる（版はファイルのプロパティの「詳細」と、ログの最初の行に出る）
+- **インストーラー**：`reminedog-installer-<版>.jar`（下の「インストーラー」）が、GitHub の最新のリリース（試験版を除く）の DLL をダウンロードし、`reminedog.dll` として置く。
+  ダウンロードできるのは、リポジトリが公開されているときだけ（今は非公開）
 - **GitHub Actions**：リポジトリの Actions タブ → 最新の `CI` の実行 → Artifacts の `reminedog-windows-x64` をダウンロードする
 - **自分でビルドする**（Windows）：[Rust](https://rustup.rs/) と Visual Studio Build Tools（C++ によるデスクトップ開発）を入れて、次を実行する
 
@@ -71,8 +102,8 @@ JVM は `-agentpath:` の DLL を読み込めないと起動をやめるので�
 
 ### インストーラー
 
-`reminedog-installer.jar` をダブルクリックする（Java 8 以降が要る。ダブルクリックで開かないときは `java -jar reminedog-installer.jar`）。
-入手先：Actions の Artifacts の `reminedog-installer`、または自分でビルドする（下の「開発」）。
+`reminedog-installer-<版>.jar` をダブルクリックする（Java 8 以降が要る。ダブルクリックで開かないときは `java -jar reminedog-installer-<版>.jar`）。版は画面のタイトルに出る。
+入手先：Releases、Actions の Artifacts の `reminedog-installer`（`reminedog-installer.jar`、版は `dev`）、または自分でビルドする（下の「開発」）。
 
 1. **reminedog の DLL**：「GitHub から最新版をダウンロードする」（保存するフォルダ。既定は `C:\reminedog`）か、「PC にある DLL を使う」を選ぶ。
    パスに空白・日本語・`=` が入っていると使えない（理由が赤字で出る）
@@ -248,6 +279,14 @@ rustup target add x86_64-pc-windows-gnu                           # 初回のみ
 cargo build -p reminedog-hook-win --target x86_64-pc-windows-gnu   # Linux から Windows 向けにビルド
 scripts/wine-smoke.sh --agent target/x86_64-pc-windows-gnu/debug/reminedog.dll --screenshot shot.png
 ```
+
+### リリース
+
+GitHub の Actions タブ → `Release` → 「Run workflow」で、版（`1.2.0`、試験版なら `1.2.0-beta.1`）を入れて実行する。
+
+- 実行したブランチの最新のコミットで、clippy とテストを通してから DLL とインストーラーをビルドし、下書き（Draft）のリリース `v<版>` を作る。版の名前は DLL とインストーラーのファイル名と中身（DLL のバージョン情報とログ、インストーラーの manifest とタイトル）に入る。リポジトリの `Cargo.toml` の版は変えない
+- 同じ版のタグかリリース（下書きを含む）がすでにあれば止まる
+- 下書きを確かめて、GitHub の画面で公開する。公開したときにタグができる。`-` を含む版は試験版（pre-release）になり、インストーラーの「最新版」には使われない
 
 `scripts/wine-smoke.sh` は Wine 上の Windows 版 Java で LWJGL のウィンドウを開き、エージェントを読み込ませて動作を確かめる。
 必要なもの：64 ビットの Wine、Xvfb（`xvfb-run`、Mesa の GLX）、JDK 9 以降の `javac`、pip の入った `python3`、`curl`、`flock` と `timeout`。
