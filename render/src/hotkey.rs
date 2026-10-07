@@ -34,6 +34,11 @@ impl Hotkey {
     pub const DEFAULT_ZOOM: Hotkey = Hotkey::plain(Trigger::Key(Key::Z));
     pub const DEFAULT_WAYPOINT: Hotkey = Hotkey::plain(Trigger::Key(Key::J));
     pub const DEFAULT_NAVIGATE: Hotkey = Hotkey::plain(Trigger::Key(Key::K));
+    pub const DEFAULT_BROWSER_PAGE_UP: Hotkey = Hotkey::plain(Trigger::Key(Key::PageUp));
+    pub const DEFAULT_BROWSER_PAGE_DOWN: Hotkey = Hotkey::plain(Trigger::Key(Key::PageDown));
+    pub const DEFAULT_BROWSER_PLAY_PAUSE: Hotkey = Hotkey::plain(Trigger::Key(Key::ArrowDown));
+    pub const DEFAULT_BROWSER_SEEK_BACK: Hotkey = Hotkey::plain(Trigger::Key(Key::ArrowLeft));
+    pub const DEFAULT_BROWSER_SEEK_FORWARD: Hotkey = Hotkey::plain(Trigger::Key(Key::ArrowRight));
 
     pub const fn plain(trigger: Trigger) -> Self {
         Self {

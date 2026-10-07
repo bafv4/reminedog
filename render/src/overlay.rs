@@ -11,6 +11,10 @@ use glow::HasContext as _;
 use reminedog_core::settings::ZOOM_FACTOR_RANGE;
 use reminedog_core::{InputId, Settings, input_label};
 
+use crate::browser::{
+    BrowserCommand, BrowserMenu, BrowserPixels, BrowserView, PageTexture, browser_section,
+    browser_ui,
+};
 use crate::font_metrics;
 use crate::hotkey::{Hotkey, Trigger, input_trigger};
 use crate::input::Captured;
@@ -55,6 +59,8 @@ pub struct FrameParams<'a> {
     pub time: f64,
     pub status: &'a [StatusLine],
     pub input: FrameInput,
+    /// The browser's newest picture; `None` keeps the last one.
+    pub browser_pixels: Option<BrowserPixels<'a>>,
 }
 
 /// How the zoom shows this frame.
@@ -96,6 +102,7 @@ pub struct FrameInput {
     /// Keys and buttons of the rebinding rules that the game's window library cannot report
     /// (as a source) or give the game (as an output); the menu notes the rules that use them.
     pub unsupported_inputs: Vec<InputId>,
+    pub browser: BrowserView,
 }
 
 /// What the platform hook has to act on after a frame.
@@ -113,6 +120,8 @@ pub struct FrameOutput {
     pub settings: Option<Settings>,
     /// Asked for in the menu's waypoint section, in order.
     pub waypoint_commands: Vec<WaypointCommand>,
+    /// For the browser, in order.
+    pub browser_commands: Vec<BrowserCommand>,
 }
 
 /// The user's hotkeys.
@@ -126,6 +135,20 @@ pub struct Hotkeys {
     pub waypoint: Hotkey,
     /// Refreshes the player's position and shows the way to the selected waypoint.
     pub navigate: Hotkey,
+    pub browser: BrowserKeys,
+}
+
+/// The browser's hotkeys; each may be unassigned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BrowserKeys {
+    /// Shows and hides the browser.
+    pub toggle: Option<Hotkey>,
+    /// The rest work while the browser shows.
+    pub page_up: Option<Hotkey>,
+    pub page_down: Option<Hotkey>,
+    pub play_pause: Option<Hotkey>,
+    pub seek_back: Option<Hotkey>,
+    pub seek_forward: Option<Hotkey>,
 }
 
 impl Hotkeys {
@@ -134,23 +157,60 @@ impl Hotkeys {
         zoom: Hotkey::DEFAULT_ZOOM,
         waypoint: Hotkey::DEFAULT_WAYPOINT,
         navigate: Hotkey::DEFAULT_NAVIGATE,
+        browser: BrowserKeys {
+            toggle: None,
+            page_up: Some(Hotkey::DEFAULT_BROWSER_PAGE_UP),
+            page_down: Some(Hotkey::DEFAULT_BROWSER_PAGE_DOWN),
+            play_pause: Some(Hotkey::DEFAULT_BROWSER_PLAY_PAUSE),
+            seek_back: Some(Hotkey::DEFAULT_BROWSER_SEEK_BACK),
+            seek_forward: Some(Hotkey::DEFAULT_BROWSER_SEEK_FORWARD),
+        },
     };
 
-    pub(crate) fn get(&self, action: Action) -> Hotkey {
+    /// The action's key; `None` only for an unassigned browser key.
+    pub(crate) fn get(&self, action: Action) -> Option<Hotkey> {
         match action {
-            Action::Menu => self.menu,
-            Action::Zoom => self.zoom,
-            Action::Waypoint => self.waypoint,
-            Action::Navigate => self.navigate,
+            Action::Menu => Some(self.menu),
+            Action::Zoom => Some(self.zoom),
+            Action::Waypoint => Some(self.waypoint),
+            Action::Navigate => Some(self.navigate),
+            Action::Browser(key) => *self.browser_key(key),
         }
     }
 
-    fn set(&mut self, action: Action, hotkey: Hotkey) {
-        match action {
-            Action::Menu => self.menu = hotkey,
-            Action::Zoom => self.zoom = hotkey,
-            Action::Waypoint => self.waypoint = hotkey,
-            Action::Navigate => self.navigate = hotkey,
+    /// Sets the action's key; `None` unassigns a browser key (the others keep theirs).
+    fn set(&mut self, action: Action, hotkey: Option<Hotkey>) {
+        match (action, hotkey) {
+            (Action::Menu, Some(hotkey)) => self.menu = hotkey,
+            (Action::Zoom, Some(hotkey)) => self.zoom = hotkey,
+            (Action::Waypoint, Some(hotkey)) => self.waypoint = hotkey,
+            (Action::Navigate, Some(hotkey)) => self.navigate = hotkey,
+            (Action::Browser(key), hotkey) => *self.browser_key_mut(key) = hotkey,
+            (_, None) => {}
+        }
+    }
+
+    fn browser_key(&self, key: BrowserKey) -> &Option<Hotkey> {
+        let keys = &self.browser;
+        match key {
+            BrowserKey::Toggle => &keys.toggle,
+            BrowserKey::PageUp => &keys.page_up,
+            BrowserKey::PageDown => &keys.page_down,
+            BrowserKey::PlayPause => &keys.play_pause,
+            BrowserKey::SeekBack => &keys.seek_back,
+            BrowserKey::SeekForward => &keys.seek_forward,
+        }
+    }
+
+    fn browser_key_mut(&mut self, key: BrowserKey) -> &mut Option<Hotkey> {
+        let keys = &mut self.browser;
+        match key {
+            BrowserKey::Toggle => &mut keys.toggle,
+            BrowserKey::PageUp => &mut keys.page_up,
+            BrowserKey::PageDown => &mut keys.page_down,
+            BrowserKey::PlayPause => &mut keys.play_pause,
+            BrowserKey::SeekBack => &mut keys.seek_back,
+            BrowserKey::SeekForward => &mut keys.seek_forward,
         }
     }
 }
@@ -163,23 +223,29 @@ impl Default for Hotkeys {
 
 /// The hotkeys in `settings`. Unreadable ones fall back to the defaults, and so does one an
 /// earlier hotkey would hide (see `hides`), which only a hand-edited or older settings file
-/// can have.
+/// can have. A browser key may be empty: unassigned.
 pub fn hotkeys(settings: &Settings) -> Hotkeys {
     let mut keys = Hotkeys::DEFAULT;
     for action in Action::ALL {
         let text = action.setting(settings);
         let default = action.default_hotkey();
-        let hotkey = Hotkey::parse(text).unwrap_or_else(|| {
+        if action.optional() && text.trim().is_empty() {
+            keys.set(action, None);
+            continue;
+        }
+        let hotkey = Hotkey::parse(text).or_else(|| {
             log::warn!(
-                "settings: unknown {} key {text:?}; using {default}",
-                action.id()
+                "settings: unknown {} key {text:?}; using {}",
+                action.id(),
+                label_or_none(default)
             );
             default
         });
-        let hotkey = if action.uses_f3c() && hotkey.ctrl {
+        let hotkey = if action.uses_f3c() && hotkey.is_some_and(|hotkey| hotkey.ctrl) {
             log::warn!(
-                "settings: the {} key {hotkey} needs Ctrl, which F3+C cannot be sent with; using {default}",
-                action.id()
+                "settings: the {} key {text} needs Ctrl, which F3+C cannot be sent with; using {}",
+                action.id(),
+                label_or_none(default)
             );
             default
         } else {
@@ -193,29 +259,51 @@ pub fn hotkeys(settings: &Settings) -> Hotkeys {
         };
         let default = action.default_hotkey();
         log::warn!(
-            "settings: the {} key {} is hidden by the {} key {}; using {default}",
+            "settings: the {} key {} is hidden by the {} key {}; using {}",
             action.id(),
-            keys.get(action),
+            label_or_none(keys.get(action)),
             earlier.id(),
-            keys.get(earlier)
+            label_or_none(keys.get(earlier)),
+            label_or_none(default)
         );
         keys.set(action, default);
-        if let Some(earlier) = hidden_by(&keys, action) {
+        let Some(earlier) = hidden_by(&keys, action) else {
+            continue;
+        };
+        if action.optional() {
             log::warn!(
-                "settings: the {} key {default} is hidden by the {} key {} too",
+                "settings: the {} key {} is hidden by the {} key too; unassigned",
                 action.id(),
+                label_or_none(default),
+                earlier.id()
+            );
+            keys.set(action, None);
+        } else {
+            log::warn!(
+                "settings: the {} key {} is hidden by the {} key {} too",
+                action.id(),
+                label_or_none(default),
                 earlier.id(),
-                keys.get(earlier)
+                label_or_none(keys.get(earlier))
             );
         }
     }
     keys
 }
 
+/// For the log.
+fn label_or_none(hotkey: Option<Hotkey>) -> String {
+    hotkey.map_or_else(|| "none".to_owned(), |hotkey| hotkey.to_string())
+}
+
 /// Whether `earlier`, which the input router checks first, takes every press of `later`:
 /// the same trigger, and no modifier `later` does not need too (extra modifiers still match).
-/// The zoom is checked last, so its match ignoring modifiers never hides another key.
-fn hides(earlier: Hotkey, later: Hotkey) -> bool {
+/// The zoom is checked last, so its match ignoring modifiers never hides another key. An
+/// unassigned key hides nothing and is never hidden.
+fn hides(earlier: Option<Hotkey>, later: Option<Hotkey>) -> bool {
+    let (Some(earlier), Some(later)) = (earlier, later) else {
+        return false;
+    };
     earlier.trigger == later.trigger
         && (!earlier.ctrl || later.ctrl)
         && (!earlier.shift || later.shift)
@@ -261,21 +349,61 @@ pub(crate) enum Action {
     Zoom,
     Waypoint,
     Navigate,
+    Browser(BrowserKey),
+}
+
+/// The browser's hotkeys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrowserKey {
+    Toggle,
+    PageUp,
+    PageDown,
+    PlayPause,
+    SeekBack,
+    SeekForward,
 }
 
 impl Action {
-    /// As listed in the menu.
-    pub(crate) const ALL: [Action; 4] = [
+    /// Every hotkey.
+    pub(crate) const ALL: [Action; 10] = [
+        Action::Menu,
+        Action::Zoom,
+        Action::Waypoint,
+        Action::Navigate,
+        Action::Browser(BrowserKey::Toggle),
+        Action::Browser(BrowserKey::PageUp),
+        Action::Browser(BrowserKey::PageDown),
+        Action::Browser(BrowserKey::PlayPause),
+        Action::Browser(BrowserKey::SeekBack),
+        Action::Browser(BrowserKey::SeekForward),
+    ];
+    /// As listed in the menu's keys.
+    pub(crate) const GENERAL: [Action; 4] = [
         Action::Menu,
         Action::Zoom,
         Action::Waypoint,
         Action::Navigate,
     ];
+    /// As listed in the menu's browser section.
+    pub(crate) const BROWSER: [Action; 6] = [
+        Action::Browser(BrowserKey::Toggle),
+        Action::Browser(BrowserKey::PageUp),
+        Action::Browser(BrowserKey::PageDown),
+        Action::Browser(BrowserKey::PlayPause),
+        Action::Browser(BrowserKey::SeekBack),
+        Action::Browser(BrowserKey::SeekForward),
+    ];
     /// The order in which the input router matches the hotkeys.
-    const ROUTER_ORDER: [Action; 4] = [
+    const ROUTER_ORDER: [Action; 10] = [
         Action::Menu,
         Action::Waypoint,
         Action::Navigate,
+        Action::Browser(BrowserKey::Toggle),
+        Action::Browser(BrowserKey::PageUp),
+        Action::Browser(BrowserKey::PageDown),
+        Action::Browser(BrowserKey::PlayPause),
+        Action::Browser(BrowserKey::SeekBack),
+        Action::Browser(BrowserKey::SeekForward),
         Action::Zoom,
     ];
 
@@ -285,6 +413,12 @@ impl Action {
             Action::Zoom => "ズーム",
             Action::Waypoint => "ウェイポイントを記録",
             Action::Navigate => "現在地を更新",
+            Action::Browser(BrowserKey::Toggle) => "ブラウザの表示／非表示",
+            Action::Browser(BrowserKey::PageUp) => "上へスクロール",
+            Action::Browser(BrowserKey::PageDown) => "下へスクロール",
+            Action::Browser(BrowserKey::PlayPause) => "再生／一時停止",
+            Action::Browser(BrowserKey::SeekBack) => "巻き戻し",
+            Action::Browser(BrowserKey::SeekForward) => "早送り",
         }
     }
 
@@ -295,11 +429,22 @@ impl Action {
             Action::Zoom => "zoom",
             Action::Waypoint => "waypoint",
             Action::Navigate => "navigate",
+            Action::Browser(BrowserKey::Toggle) => "browser toggle",
+            Action::Browser(BrowserKey::PageUp) => "browser page up",
+            Action::Browser(BrowserKey::PageDown) => "browser page down",
+            Action::Browser(BrowserKey::PlayPause) => "browser play/pause",
+            Action::Browser(BrowserKey::SeekBack) => "browser seek back",
+            Action::Browser(BrowserKey::SeekForward) => "browser seek forward",
         }
     }
 
-    fn default_hotkey(self) -> Hotkey {
+    fn default_hotkey(self) -> Option<Hotkey> {
         Hotkeys::DEFAULT.get(self)
+    }
+
+    /// The browser's keys can be unassigned.
+    pub(crate) fn optional(self) -> bool {
+        matches!(self, Action::Browser(_))
     }
 
     fn setting(self, settings: &Settings) -> &str {
@@ -308,6 +453,12 @@ impl Action {
             Action::Zoom => &settings.zoom_key,
             Action::Waypoint => &settings.waypoint_key,
             Action::Navigate => &settings.navigate_key,
+            Action::Browser(BrowserKey::Toggle) => &settings.browser_toggle_key,
+            Action::Browser(BrowserKey::PageUp) => &settings.browser_page_up_key,
+            Action::Browser(BrowserKey::PageDown) => &settings.browser_page_down_key,
+            Action::Browser(BrowserKey::PlayPause) => &settings.browser_play_pause_key,
+            Action::Browser(BrowserKey::SeekBack) => &settings.browser_seek_back_key,
+            Action::Browser(BrowserKey::SeekForward) => &settings.browser_seek_forward_key,
         }
     }
 
@@ -317,6 +468,12 @@ impl Action {
             Action::Zoom => &mut settings.zoom_key,
             Action::Waypoint => &mut settings.waypoint_key,
             Action::Navigate => &mut settings.navigate_key,
+            Action::Browser(BrowserKey::Toggle) => &mut settings.browser_toggle_key,
+            Action::Browser(BrowserKey::PageUp) => &mut settings.browser_page_up_key,
+            Action::Browser(BrowserKey::PageDown) => &mut settings.browser_page_down_key,
+            Action::Browser(BrowserKey::PlayPause) => &mut settings.browser_play_pause_key,
+            Action::Browser(BrowserKey::SeekBack) => &mut settings.browser_seek_back_key,
+            Action::Browser(BrowserKey::SeekForward) => &mut settings.browser_seek_forward_key,
         }
     }
 
@@ -336,8 +493,11 @@ struct UiState {
     capturing: Option<Action>,
     /// Why the last captured key was not taken.
     key_note: Option<String>,
+    /// [`Self::key_note`] is about a browser key (it shows in the browser's section).
+    key_note_browser: bool,
     waypoints: WaypointMenu,
     rebinds: RebindMenu,
+    browser: BrowserMenu,
     /// [`FrameInput::game_bindings`], [`FrameInput::rebind_note`] and
     /// [`FrameInput::unsupported_inputs`] of the current frame.
     game_bindings: Vec<(InputId, Vec<String>)>,
@@ -351,7 +511,7 @@ impl UiState {
         // What the router uses: a key that fell back to its default must not come back when
         // the key hiding it moves.
         for action in Action::ALL {
-            *action.setting_mut(&mut settings) = keys.get(action).to_string();
+            *action.setting_mut(&mut settings) = setting_text(keys.get(action));
         }
         Self {
             settings,
@@ -359,17 +519,27 @@ impl UiState {
             reserved_keys: Vec::new(),
             capturing: None,
             key_note: None,
+            key_note_browser: false,
             waypoints: WaypointMenu::default(),
             rebinds: RebindMenu::default(),
+            browser: BrowserMenu::default(),
             game_bindings: Vec::new(),
             rebind_note: None,
             unsupported_inputs: Vec::new(),
         }
     }
 
-    fn set_hotkey(&mut self, action: Action, hotkey: Hotkey) {
+    fn set_hotkey(&mut self, action: Action, hotkey: Option<Hotkey>) {
         self.keys.set(action, hotkey);
-        *action.setting_mut(&mut self.settings) = hotkey.to_string();
+        *action.setting_mut(&mut self.settings) = setting_text(self.keys.get(action));
+    }
+
+    /// Unassigns a browser key.
+    pub(crate) fn clear_hotkey(&mut self, action: Action) {
+        if action.optional() {
+            self.key_note = None;
+            self.set_hotkey(action, None);
+        }
     }
 
     /// Assigns a captured key unless another hotkey would become unreachable (the router
@@ -377,6 +547,7 @@ impl UiState {
     /// for an action that sends F3+C, or a rebinding rule's source (the router would take its
     /// presses for the hotkey before the rule).
     fn assign(&mut self, action: Action, hotkey: Hotkey) {
+        self.key_note_browser = action.optional();
         if action.uses_f3c()
             && self
                 .reserved_keys
@@ -405,7 +576,7 @@ impl UiState {
             return;
         }
         let mut keys = self.keys;
-        keys.set(action, hotkey);
+        keys.set(action, Some(hotkey));
         if let Some(other) = conflict(&keys, action) {
             self.key_note = Some(format!(
                 "{} は「{}」と重なるので使えない",
@@ -415,22 +586,28 @@ impl UiState {
             return;
         }
         self.key_note = None;
-        self.set_hotkey(action, hotkey);
+        self.set_hotkey(action, Some(hotkey));
     }
 
-    /// Puts the hotkeys back to their defaults, but as [`assign`](Self::assign) refuses a
-    /// rebinding rule's source: an action whose default is one keeps its key (with a note),
-    /// and so does one whose default would then hide it or be hidden by it.
-    fn reset_hotkeys(&mut self) {
+    /// Puts the hotkeys of `actions` back to their defaults, but as [`assign`](Self::assign)
+    /// refuses a rebinding rule's source: an action whose default is one keeps its key (with a
+    /// note), and so does one whose default would then hide another key or be hidden by it.
+    fn reset_hotkeys(&mut self, actions: &[Action]) {
+        self.key_note_browser = actions.iter().any(|action| action.optional());
         let mut note = None;
-        let mut keep: Vec<Action> = Vec::new();
-        for action in Action::ALL {
-            let default = action.default_hotkey();
+        let mut keep: Vec<Action> = Action::ALL
+            .into_iter()
+            .filter(|action| !actions.contains(action))
+            .collect();
+        for &action in actions {
+            let Some(default) = action.default_hotkey() else {
+                continue;
+            };
             if let Some(source) =
                 rule_sources(&self.settings).find(|&id| input_trigger(id) == Some(default.trigger))
             {
                 // Only a key that stays away from its default needs saying so.
-                if self.keys.get(action) != default {
+                if self.keys.get(action) != Some(default) {
                     note.get_or_insert_with(|| {
                         format!("{} は置き換えに使っている", input_label(source))
                     });
@@ -443,18 +620,80 @@ impl UiState {
             for &action in &keep {
                 keys.set(action, self.keys.get(action));
             }
-            match Action::ALL
-                .into_iter()
+            match actions
+                .iter()
+                .copied()
                 .find(|&action| !keep.contains(&action) && conflict(&keys, action).is_some())
             {
                 Some(action) => keep.push(action),
                 None => break keys,
             }
         };
-        for action in Action::ALL {
+        for &action in actions {
             self.set_hotkey(action, keys.get(action));
         }
         self.key_note = note;
+    }
+}
+
+/// A hotkey as the settings file has it; empty for none.
+fn setting_text(hotkey: Option<Hotkey>) -> String {
+    hotkey.map_or_else(String::new, |hotkey| hotkey.to_string())
+}
+
+/// The keys of `list`, each a button that waits for a new key, then what the last change
+/// said and a button that puts them back.
+fn key_grid(
+    ui: &mut egui::Ui,
+    state: &mut UiState,
+    actions: &mut MenuActions,
+    list: &[Action],
+    id: &str,
+) {
+    egui::Grid::new(id)
+        .num_columns(3)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            for &action in list {
+                ui.label(action.name());
+                let waiting = state.capturing == Some(action);
+                let text = if waiting {
+                    "キーを押す…".to_owned()
+                } else {
+                    state
+                        .keys
+                        .get(action)
+                        .map_or_else(|| "なし".to_owned(), |key| key.label())
+                };
+                if ui.add(egui::Button::new(text).selected(waiting)).clicked() {
+                    if waiting {
+                        state.capturing = None;
+                        actions.cancel_capture = true;
+                    } else {
+                        actions.capture = Some(action);
+                    }
+                }
+                if action.optional() && state.keys.get(action).is_some() && !waiting {
+                    if ui.small_button("外す").clicked() {
+                        state.clear_hotkey(action);
+                    }
+                } else {
+                    ui.label("");
+                }
+                ui.end_row();
+            }
+        });
+    let capturing_here = state.capturing.is_some_and(|action| list.contains(&action));
+    let note_here = state.key_note_browser == list.iter().any(|action| action.optional());
+    if capturing_here {
+        ui.label(RichText::new("割り当てるキーかマウスのボタンを押す（Esc で取り消し）").weak());
+    } else if let Some(note) = state.key_note.as_ref().filter(|_| note_here) {
+        ui.label(RichText::new(note).color(ui.visuals().warn_fg_color));
+    }
+    if ui.button("キーを元に戻す").clicked() {
+        state.capturing = None;
+        actions.cancel_capture = true;
+        state.reset_hotkeys(list);
     }
 }
 
@@ -467,6 +706,7 @@ struct MenuActions {
     capture_input: bool,
     cancel_capture: bool,
     waypoint_commands: Vec<WaypointCommand>,
+    browser_commands: Vec<BrowserCommand>,
 }
 
 /// egui running on the agent's own GL context, drawing into the default framebuffer.
@@ -476,6 +716,8 @@ pub struct Overlay {
     zoom: Zoom,
     state: UiState,
     notices: NoticeList,
+    /// The browser's page.
+    page: PageTexture,
     first_time: Option<f64>,
     last_time: Option<f64>,
     frames: u64,
@@ -501,6 +743,7 @@ impl Overlay {
             zoom,
             state: UiState::new(settings),
             notices: NoticeList::default(),
+            page: PageTexture::default(),
             first_time: None,
             last_time: None,
             frames: 0,
@@ -533,6 +776,9 @@ impl Overlay {
         let first_time = *self.first_time.get_or_insert(params.time);
         self.frames += 1;
         self.fps.tick(params.time);
+        // SAFETY: the caller guarantees our context is current.
+        unsafe { self.page.update(&mut self.painter, params.browser_pixels) };
+        let picture = self.page.picture();
 
         let input = params.input;
         let state = &mut self.state;
@@ -570,11 +816,17 @@ impl Overlay {
             }
         }
 
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(width as f32 / ppp, height as f32 / ppp));
+        let mut browser_commands = Vec::new();
+        state.browser.layout(
+            &state.settings,
+            screen,
+            ppp,
+            params.time,
+            &mut browser_commands,
+        );
         let mut raw = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(
-                Pos2::ZERO,
-                vec2(width as f32 / ppp, height as f32 / ppp),
-            )),
+            screen_rect: Some(screen),
             max_texture_side: Some(self.painter.max_texture_side()),
             time: Some(params.time),
             predicted_dt: dt,
@@ -609,10 +861,20 @@ impl Overlay {
                     params.status,
                     high_res_note,
                     &input.waypoints,
+                    &input.browser,
                 );
             } else if state.settings.show_status {
                 status_window(ui.ctx(), &info, params.status);
             }
+            browser_ui(
+                ui.ctx(),
+                &mut state.browser,
+                &input.browser,
+                &mut state.settings,
+                picture,
+                input.ui_open,
+                &mut browser_commands,
+            );
             match input.zoom {
                 ZoomView::Off => {}
                 ZoomView::Magnify => zoom_badge(ui.ctx(), state.settings.zoom_factor),
@@ -645,8 +907,10 @@ impl Overlay {
             close_ui: actions.close,
             cancel_capture: actions.cancel_capture,
             waypoint_commands: actions.waypoint_commands,
+            browser_commands,
             ..Default::default()
         };
+        out.browser_commands.extend(actions.browser_commands);
         if let Some(action) = actions.capture {
             state.capturing = Some(action);
             state.key_note = None;
@@ -765,6 +1029,7 @@ fn main_window(
     status: &[StatusLine],
     high_res_note: Option<&str>,
     waypoints: &WaypointView,
+    browser: &BrowserView,
 ) -> MenuActions {
     let mut actions = MenuActions::default();
     let mut open = true;
@@ -793,6 +1058,7 @@ fn main_window(
                         status,
                         high_res_note,
                         waypoints,
+                        browser,
                         &mut actions,
                     );
                 });
@@ -801,6 +1067,7 @@ fn main_window(
     actions
 }
 
+#[allow(clippy::too_many_arguments)]
 fn menu_contents(
     ui: &mut egui::Ui,
     state: &mut UiState,
@@ -808,6 +1075,7 @@ fn menu_contents(
     status: &[StatusLine],
     high_res_note: Option<&str>,
     waypoints: &WaypointView,
+    browser: &BrowserView,
     actions: &mut MenuActions,
 ) {
     ui.label(format!("{} か Esc で閉じる", state.keys.menu.label()));
@@ -839,39 +1107,7 @@ fn menu_contents(
     ui.separator();
 
     ui.label(RichText::new("キー").strong());
-    egui::Grid::new("reminedog-keys")
-        .num_columns(2)
-        .spacing([12.0, 4.0])
-        .show(ui, |ui| {
-            for action in Action::ALL {
-                ui.label(action.name());
-                let waiting = state.capturing == Some(action);
-                let text = if waiting {
-                    "キーを押す…".to_owned()
-                } else {
-                    state.keys.get(action).label()
-                };
-                if ui.add(egui::Button::new(text).selected(waiting)).clicked() {
-                    if waiting {
-                        state.capturing = None;
-                        actions.cancel_capture = true;
-                    } else {
-                        actions.capture = Some(action);
-                    }
-                }
-                ui.end_row();
-            }
-        });
-    if state.capturing.is_some() {
-        ui.label(RichText::new("割り当てるキーかマウスのボタンを押す（Esc で取り消し）").weak());
-    } else if let Some(note) = &state.key_note {
-        ui.label(RichText::new(note).color(ui.visuals().warn_fg_color));
-    }
-    if ui.button("キーを元に戻す").clicked() {
-        state.capturing = None;
-        actions.cancel_capture = true;
-        state.reset_hotkeys();
-    }
+    key_grid(ui, state, actions, &Action::GENERAL, "reminedog-keys");
     ui.separator();
 
     waypoint_section(
@@ -881,6 +1117,26 @@ fn menu_contents(
         &state.keys,
         &mut actions.waypoint_commands,
     );
+    ui.separator();
+
+    egui::CollapsingHeader::new("ブラウザ")
+        .id_salt("reminedog-browser-section")
+        .show(ui, |ui| {
+            browser_section(
+                ui,
+                browser,
+                &mut state.settings,
+                &mut actions.browser_commands,
+            );
+            ui.label(RichText::new("キー（ブラウザを表示していて、ゲーム中のとき）").strong());
+            key_grid(
+                ui,
+                state,
+                actions,
+                &Action::BROWSER,
+                "reminedog-browser-keys",
+            );
+        });
     ui.separator();
 
     let rebinds = rebind_section(
@@ -978,6 +1234,87 @@ impl Fps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_keys_load_unassigned_or_as_set() {
+        let keys = hotkeys(&Settings::default());
+        assert_eq!(keys.browser.toggle, None);
+        assert_eq!(
+            keys.browser.page_down,
+            Some(Hotkey::plain(Trigger::Key(egui::Key::PageDown)))
+        );
+        assert_eq!(
+            keys.browser.play_pause,
+            Some(Hotkey::plain(Trigger::Key(egui::Key::ArrowDown)))
+        );
+        let settings = Settings {
+            browser_toggle_key: "Ctrl+B".into(),
+            browser_page_up_key: String::new(),
+            browser_seek_back_key: "nonsense".into(),
+            ..Settings::default()
+        };
+        let keys = hotkeys(&settings);
+        assert_eq!(keys.browser.toggle, Hotkey::parse("Ctrl+B"));
+        assert_eq!(keys.browser.page_up, None);
+        assert_eq!(keys.browser.seek_back, Hotkeys::DEFAULT.browser.seek_back);
+        // The settings keep what the router uses.
+        let state = UiState::new(settings);
+        assert_eq!(state.settings.browser_toggle_key, "Ctrl+B");
+        assert_eq!(state.settings.browser_page_up_key, "");
+        assert_eq!(state.settings.browser_seek_back_key, "Left");
+        assert_eq!(state.settings.browser_play_pause_key, "Down");
+    }
+
+    #[test]
+    fn a_browser_key_hidden_by_another_falls_back_or_goes() {
+        // The waypoint key on Page Down hides the browser's: the default comes back.
+        let settings = Settings {
+            waypoint_key: "PageDown".into(),
+            browser_page_down_key: "Shift+PageDown".into(),
+            ..Settings::default()
+        };
+        let keys = hotkeys(&settings);
+        assert_eq!(keys.waypoint, Hotkey::parse("PageDown").unwrap());
+        assert_eq!(keys.browser.page_down, None, "the default is hidden too");
+        // The menu's key on End hides an unassigned-by-default toggle on End: none.
+        let settings = Settings {
+            menu_key: "End".into(),
+            browser_toggle_key: "End".into(),
+            ..Settings::default()
+        };
+        assert_eq!(hotkeys(&settings).browser.toggle, None);
+    }
+
+    #[test]
+    fn browser_keys_are_assigned_cleared_and_reset() {
+        let mut state = state();
+        let toggle = Hotkey::parse("Ctrl+B").unwrap();
+        let action = Action::Browser(BrowserKey::Toggle);
+        state.assign(action, toggle);
+        assert_eq!(state.keys.browser.toggle, Some(toggle));
+        assert_eq!(state.settings.browser_toggle_key, "Ctrl+B");
+        // Taken by another browser key.
+        let note = refused(&mut state, Action::Browser(BrowserKey::PlayPause), "Ctrl+B");
+        assert!(note.is_some_and(|note| note.contains("ブラウザの表示／非表示")));
+        assert!(state.key_note_browser);
+        // A browser key cannot take the zoom's.
+        assert!(refused(&mut state, Action::Browser(BrowserKey::PageUp), "Z").is_some());
+        // Cleared.
+        let page_up = Action::Browser(BrowserKey::PageUp);
+        state.clear_hotkey(page_up);
+        assert_eq!(state.keys.browser.page_up, None);
+        assert_eq!(state.settings.browser_page_up_key, "");
+        // The general keys cannot be cleared.
+        state.clear_hotkey(Action::Zoom);
+        assert_eq!(state.keys.zoom, Hotkey::DEFAULT_ZOOM);
+        // Resetting the browser's keys leaves the others alone.
+        state.assign(Action::Zoom, Hotkey::parse("X").unwrap());
+        state.reset_hotkeys(&Action::BROWSER);
+        assert_eq!(state.keys.browser, Hotkeys::DEFAULT.browser);
+        assert_eq!(state.keys.zoom, Hotkey::parse("X").unwrap());
+        assert_eq!(state.settings.browser_toggle_key, "");
+        assert_eq!(state.settings.browser_page_up_key, "PageUp");
+    }
 
     #[test]
     fn fps_averages_over_half_second() {
@@ -1190,7 +1527,15 @@ mod tests {
                 ..Default::default()
             };
             let mut output = ctx.run_ui(raw, |ui| {
-                main_window(ui.ctx(), state, &info, &[], None, waypoints);
+                main_window(
+                    ui.ctx(),
+                    state,
+                    &info,
+                    &[],
+                    None,
+                    waypoints,
+                    &BrowserView::default(),
+                );
             });
             output.textures_delta.clear();
         }
@@ -1284,7 +1629,15 @@ mod tests {
                 ..Default::default()
             };
             let mut output = ctx.run_ui(raw, |ui| {
-                main_window(ui.ctx(), &mut state, &info, &[], None, &many_waypoints());
+                main_window(
+                    ui.ctx(),
+                    &mut state,
+                    &info,
+                    &[],
+                    None,
+                    &many_waypoints(),
+                    &BrowserView::default(),
+                );
             });
             output.textures_delta.clear();
         }
@@ -1311,14 +1664,14 @@ mod tests {
             .settings
             .rebinds
             .push(rule("key.keyboard.z", "key.keyboard.left.shift"));
-        state.reset_hotkeys();
+        state.reset_hotkeys(&Action::GENERAL);
         assert_eq!(state.settings.zoom_key, "Mouse5");
         assert_eq!(state.settings.menu_key, "Ctrl+I");
         assert_eq!(state.key_note.as_deref(), Some("Z は置き換えに使っている"));
         assert_eq!(hotkeys(&state.settings), state.keys);
         // Nothing in the way: all back, no note.
         state.settings.rebinds.clear();
-        state.reset_hotkeys();
+        state.reset_hotkeys(&Action::GENERAL);
         assert_eq!(state.keys, Hotkeys::DEFAULT);
         assert_eq!(state.key_note, None);
         // A rule on the default's key that changes nothing (the menu is on Ctrl+I already):
@@ -1327,7 +1680,7 @@ mod tests {
             .settings
             .rebinds
             .push(rule("key.keyboard.i", "key.keyboard.o"));
-        state.reset_hotkeys();
+        state.reset_hotkeys(&Action::GENERAL);
         assert_eq!(state.keys, Hotkeys::DEFAULT);
         assert_eq!(state.key_note, None);
     }
@@ -1341,7 +1694,7 @@ mod tests {
             .settings
             .rebinds
             .push(rule("key.keyboard.z", "key.keyboard.c"));
-        state.reset_hotkeys();
+        state.reset_hotkeys(&Action::GENERAL);
         // The zoom stays on J, so the waypoint key cannot go back to J.
         assert_eq!(state.settings.zoom_key, "J");
         assert_eq!(state.settings.waypoint_key, "M");

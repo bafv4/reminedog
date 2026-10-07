@@ -4,6 +4,7 @@
 //! [`Overlay::render`] and switches back before the real buffer swap, so nothing here
 //! ever touches the game's GL state.
 
+mod browser;
 mod font_metrics;
 mod hotkey;
 mod input;
@@ -14,9 +15,10 @@ mod rebinds_ui;
 mod waypoints;
 mod zoom;
 
+pub use browser::{BrowserCommand, BrowserPixels, BrowserState, BrowserView, PageLayout};
 pub use egui::{Key, Modifiers, PointerButton};
 pub use hotkey::{Hotkey, Trigger};
-pub use input::{Captured, HotkeyAction, InputRouter, Route};
+pub use input::{BrowserAction, Captured, HotkeyAction, InputRouter, Route};
 pub use overlay::{
     FontSource, FrameInput, FrameOutput, FrameParams, Hotkeys, Overlay, OverlayError, StatusLine,
     ZoomView, gl_summary, hotkeys,

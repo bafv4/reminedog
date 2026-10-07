@@ -105,10 +105,9 @@ impl fmt::Display for Unused {
 /// The hotkey without modifiers on `source`, which takes every press of it.
 fn plain_hotkey_on(source: InputId, keys: &Hotkeys) -> Option<Action> {
     let trigger = input_trigger(source)?;
-    Action::ALL.into_iter().find(|&action| {
-        let hotkey = keys.get(action);
-        hotkey == Hotkey::plain(trigger)
-    })
+    Action::ALL
+        .into_iter()
+        .find(|&action| keys.get(action) == Some(Hotkey::plain(trigger)))
 }
 
 /// Each rule of the settings as the ids it uses, or why it is not used, in order: names that
@@ -198,7 +197,9 @@ fn hotkey_warnings(source: InputId, keys: &Hotkeys) -> Vec<String> {
     let modifier = modifier_kind(source).map(|(kind, _)| kind);
     let mut warnings = Vec::new();
     for action in Action::ALL {
-        let hotkey = keys.get(action);
+        let Some(hotkey) = keys.get(action) else {
+            continue;
+        };
         if trigger == Some(hotkey.trigger) {
             warnings.push(format!(
                 "{} は「{}」（{}）にも使っている",

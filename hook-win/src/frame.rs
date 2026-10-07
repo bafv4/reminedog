@@ -415,6 +415,8 @@ impl Runtime {
                     game_bindings,
                     rebind_note: self.rebind_note.clone(),
                     unsupported_inputs,
+                    // Until the browser exists.
+                    browser: Default::default(),
                 }
             };
             let output = self.overlay.render(FrameParams {
@@ -423,6 +425,7 @@ impl Runtime {
                 time: agent.start.elapsed().as_secs_f64(),
                 status: &self.status,
                 input,
+                browser_pixels: None,
             });
             // The rules again only when they or the hotkeys changed: resolving logs them (the
             // zoom's slider changes the settings every frame while dragged).

@@ -30,8 +30,67 @@ pub enum HotkeyAction {
     Navigate,
 }
 
+/// A browser hotkey, see [`InputRouter::take_browser_actions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserAction {
+    Toggle,
+    PageUp,
+    PageDown,
+    PlayPause,
+    SeekBack,
+    SeekForward,
+}
+
+impl BrowserAction {
+    /// Held down, the key acts again on each of its repeats.
+    fn repeats(self) -> bool {
+        matches!(
+            self,
+            BrowserAction::PageUp
+                | BrowserAction::PageDown
+                | BrowserAction::SeekBack
+                | BrowserAction::SeekForward
+        )
+    }
+}
+
 /// Actions kept until the next frame takes them.
 const MAX_ACTIONS: usize = 4;
+/// Browser actions kept until the next frame takes them (a held key repeats).
+const MAX_BROWSER_ACTIONS: usize = 8;
+
+/// The hotkeys acted on in game: the waypoint and navigate keys, then the browser's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InGame {
+    Hotkey(HotkeyAction),
+    Browser(BrowserAction),
+}
+
+const IN_GAME: [InGame; 8] = [
+    InGame::Hotkey(HotkeyAction::RecordWaypoint),
+    InGame::Hotkey(HotkeyAction::Navigate),
+    InGame::Browser(BrowserAction::Toggle),
+    InGame::Browser(BrowserAction::PageUp),
+    InGame::Browser(BrowserAction::PageDown),
+    InGame::Browser(BrowserAction::PlayPause),
+    InGame::Browser(BrowserAction::SeekBack),
+    InGame::Browser(BrowserAction::SeekForward),
+];
+
+/// The keys of [`IN_GAME`], in its order.
+fn in_game_keys(keys: &Hotkeys) -> [Option<Hotkey>; 8] {
+    let browser = &keys.browser;
+    [
+        Some(keys.waypoint),
+        Some(keys.navigate),
+        browser.toggle,
+        browser.page_up,
+        browser.page_down,
+        browser.play_pause,
+        browser.seek_back,
+        browser.seek_forward,
+    ]
+}
 
 /// The outcome of [`InputRouter::start_capture`] and [`InputRouter::start_input_capture`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,12 +141,16 @@ pub struct InputRouter {
     offset: (f64, f64),
     /// Applied to relative motion that moves the overlay's own cursor.
     pointer_speed: PointerSpeed,
-    /// `menu` toggles the UI; `zoom` zooms while held and `waypoint` / `navigate` queue an
-    /// action, these three in game (cursor captured) with the UI closed.
+    /// `menu` toggles the UI; `zoom` zooms while held, and the others ([`IN_GAME`]) queue an
+    /// action; these in game (cursor captured) with the UI closed.
     keys: Hotkeys,
-    /// The waypoint / navigate key was pressed and consumed, so its release is ours too.
-    action_held: [bool; 2],
+    /// The key of [`IN_GAME`] at the same index was pressed and consumed, so its release is
+    /// ours too.
+    action_held: [bool; 8],
     actions: Vec<HotkeyAction>,
+    browser_actions: Vec<BrowserAction>,
+    /// The browser shows: its keys other than the toggle are taken.
+    browser_shown: bool,
     /// Minecraft's debug modifier (F3 unless rebound in options.txt). While the game has it
     /// down the in-game hotkeys go to the game, so its F3+<key> combinations keep working.
     debug_modifier: Option<InputId>,
@@ -131,8 +194,10 @@ impl InputRouter {
             offset: (0.0, 0.0),
             pointer_speed: PointerSpeed::RAW,
             keys: Hotkeys::DEFAULT,
-            action_held: [false; 2],
+            action_held: [false; 8],
             actions: Vec::new(),
+            browser_actions: Vec::new(),
+            browser_shown: false,
             debug_modifier: Some(DEFAULT_DEBUG_MODIFIER),
             debug_held: false,
             capturing: None,
@@ -148,12 +213,13 @@ impl InputRouter {
         if !enabled {
             self.set_ui_open(false);
             self.zoom_held = false;
-            self.action_held = [false; 2];
+            self.action_held = [false; 8];
             self.debug_held = false;
             self.suppress_text = false;
             self.capture_held.clear();
             self.events.clear();
             self.actions.clear();
+            self.browser_actions.clear();
         }
         self.enabled = enabled;
     }
@@ -201,11 +267,11 @@ impl InputRouter {
         if keys.zoom != self.keys.zoom {
             self.zoom_held = false;
         }
-        if keys.waypoint != self.keys.waypoint {
-            self.action_held[0] = false;
-        }
-        if keys.navigate != self.keys.navigate {
-            self.action_held[1] = false;
+        let (old, new) = (in_game_keys(&self.keys), in_game_keys(&keys));
+        for (held, (old, new)) in self.action_held.iter_mut().zip(old.into_iter().zip(new)) {
+            if old != new {
+                *held = false;
+            }
         }
         self.keys = keys;
     }
@@ -270,6 +336,17 @@ impl InputRouter {
     /// The waypoint and navigate hotkeys pressed since the last call, oldest first.
     pub fn take_actions(&mut self) -> Vec<HotkeyAction> {
         std::mem::take(&mut self.actions)
+    }
+
+    /// The browser's hotkeys pressed (or repeated) since the last call, oldest first.
+    pub fn take_browser_actions(&mut self) -> Vec<BrowserAction> {
+        std::mem::take(&mut self.browser_actions)
+    }
+
+    /// Whether the browser shows: only then do its keys (other than the toggle) work. Set
+    /// every frame.
+    pub fn set_browser_shown(&mut self, shown: bool) {
+        self.browser_shown = shown;
     }
 
     /// Takes the next key (with its modifiers) or extra mouse button pressed while the UI
@@ -355,7 +432,7 @@ impl InputRouter {
         self.ui_changed = true;
         log::info!("ui {}", if open { "opened" } else { "closed" });
         self.zoom_held = false;
-        self.action_held = [false; 2];
+        self.action_held = [false; 8];
         self.cancel_capture();
         if open {
             if self.last_captured || self.pointer == Pos2::ZERO {
@@ -548,9 +625,10 @@ impl InputRouter {
         self.game_hotkey(Trigger::Key(key), raw, pressed, repeat, modifiers, captured)
     }
 
-    /// The in-game hotkeys (UI closed): the waypoint and navigate keys, then the zoom, whose
-    /// match ignores the modifiers. While the debug modifier is held new presses go to the
-    /// game; the releases of keys taken before are still ours.
+    /// The in-game hotkeys (UI closed): the waypoint and navigate keys, the browser's (other
+    /// than its toggle only while it shows), then the zoom, whose match ignores the modifiers.
+    /// While the debug modifier is held new presses go to the game; the releases of keys taken
+    /// before are still ours.
     fn game_hotkey(
         &mut self,
         trigger: Trigger,
@@ -560,30 +638,36 @@ impl InputRouter {
         modifiers: Modifiers,
         captured: bool,
     ) -> Route {
-        let actions = [
-            (HotkeyAction::RecordWaypoint, self.keys.waypoint),
-            (HotkeyAction::Navigate, self.keys.navigate),
-        ];
-        for (i, (action, hotkey)) in actions.into_iter().enumerate() {
-            if hotkey.trigger != trigger {
+        let keys = in_game_keys(&self.keys);
+        for (i, (action, hotkey)) in IN_GAME.into_iter().zip(keys).enumerate() {
+            let Some(hotkey) = hotkey.filter(|hotkey| hotkey.trigger == trigger) else {
                 continue;
-            }
+            };
             if !pressed {
                 if std::mem::take(&mut self.action_held[i]) {
                     return Route::Consume;
                 }
             } else if repeat {
                 if self.action_held[i] {
+                    if let InGame::Browser(action) = action
+                        && action.repeats()
+                    {
+                        self.queue(InGame::Browser(action));
+                    }
                     return Route::Consume;
                 }
-            } else if captured && !self.debug_held && hotkey.modifiers_held(modifiers) {
-                self.action_held[i] = true;
-                if self.actions.len() < MAX_ACTIONS {
-                    self.actions.push(action);
-                } else {
-                    log::debug!("hotkey {action:?} dropped: {MAX_ACTIONS} actions pending");
+            } else {
+                let active = match action {
+                    InGame::Browser(action) => {
+                        action == BrowserAction::Toggle || self.browser_shown
+                    }
+                    InGame::Hotkey(_) => true,
+                };
+                if active && captured && !self.debug_held && hotkey.modifiers_held(modifiers) {
+                    self.action_held[i] = true;
+                    self.queue(action);
+                    return Route::Consume;
                 }
-                return Route::Consume;
             }
         }
         // A zoom on the debug modifier itself is not a combination with it.
@@ -593,6 +677,21 @@ impl InputRouter {
             return self.zoom_input(pressed, repeat, modifiers, captured);
         }
         Route::Forward
+    }
+
+    fn queue(&mut self, action: InGame) {
+        let (len, max) = match action {
+            InGame::Hotkey(_) => (self.actions.len(), MAX_ACTIONS),
+            InGame::Browser(_) => (self.browser_actions.len(), MAX_BROWSER_ACTIONS),
+        };
+        if len >= max {
+            log::debug!("hotkey {action:?} dropped: {max} actions pending");
+            return;
+        }
+        match action {
+            InGame::Hotkey(action) => self.actions.push(action),
+            InGame::Browser(action) => self.browser_actions.push(action),
+        }
     }
 
     /// The zoom hotkey went down or up (UI closed). Only a fresh press starts it: a repeat of
@@ -785,7 +884,7 @@ impl InputRouter {
     #[must_use = "the releases must reach the game"]
     pub fn focus_lost(&mut self, platform_releases: impl Fn(InputId) -> bool) -> Vec<Output> {
         self.zoom_held = false;
-        self.action_held = [false; 2];
+        self.action_held = [false; 8];
         self.debug_held = false;
         self.suppress_text = false;
         self.rebinder.focus_lost(platform_releases)
@@ -1528,6 +1627,143 @@ mod tests {
         r.route_key(Some(Key::K), true, false, NONE, true);
         r.set_enabled(false);
         assert!(r.take_actions().is_empty(), "disabling drops them");
+    }
+
+    /// A press and its release in game.
+    fn tap(r: &mut InputRouter, key: Key) -> Route {
+        let route = r.route_key(Some(key), true, false, NONE, true);
+        assert_eq!(r.route_key(Some(key), false, false, NONE, true), route);
+        route
+    }
+
+    #[test]
+    fn browser_keys_work_in_game_while_it_shows() {
+        let mut r = router();
+        // Hidden: the arrows and Page Down are the game's.
+        assert_eq!(tap(&mut r, Key::PageDown), Route::Forward);
+        assert_eq!(tap(&mut r, Key::ArrowDown), Route::Forward);
+        assert!(r.take_browser_actions().is_empty());
+
+        r.set_browser_shown(true);
+        assert_eq!(tap(&mut r, Key::PageDown), Route::Consume);
+        assert_eq!(tap(&mut r, Key::PageUp), Route::Consume);
+        assert_eq!(tap(&mut r, Key::ArrowDown), Route::Consume);
+        assert_eq!(tap(&mut r, Key::ArrowLeft), Route::Consume);
+        assert_eq!(tap(&mut r, Key::ArrowRight), Route::Consume);
+        assert_eq!(
+            r.take_browser_actions(),
+            vec![
+                BrowserAction::PageDown,
+                BrowserAction::PageUp,
+                BrowserAction::PlayPause,
+                BrowserAction::SeekBack,
+                BrowserAction::SeekForward,
+            ]
+        );
+        assert!(r.take_actions().is_empty(), "not the waypoint queue");
+
+        // A game screen is open (the arrows move the caret in chat).
+        assert_eq!(
+            r.route_key(Some(Key::ArrowLeft), true, false, NONE, false),
+            Route::Forward
+        );
+        assert_eq!(
+            r.route_key(Some(Key::ArrowLeft), false, false, NONE, false),
+            Route::Forward
+        );
+        // F3 held: the game's.
+        r.route_key(Some(Key::F3), true, false, NONE, true);
+        assert_eq!(
+            r.route_key(Some(Key::PageDown), true, false, NONE, true),
+            Route::Forward
+        );
+        assert!(r.take_browser_actions().is_empty());
+    }
+
+    #[test]
+    fn scrolling_and_seeking_repeat_while_held() {
+        let mut r = router();
+        r.set_browser_shown(true);
+        for key in [Key::PageDown, Key::ArrowLeft, Key::ArrowDown] {
+            r.route_key(Some(key), true, false, NONE, true);
+            assert_eq!(
+                r.route_key(Some(key), true, true, NONE, true),
+                Route::Consume
+            );
+            r.route_key(Some(key), true, true, NONE, true);
+            r.route_key(Some(key), false, false, NONE, true);
+        }
+        assert_eq!(
+            r.take_browser_actions(),
+            vec![
+                BrowserAction::PageDown,
+                BrowserAction::PageDown,
+                BrowserAction::PageDown,
+                BrowserAction::SeekBack,
+                BrowserAction::SeekBack,
+                BrowserAction::SeekBack,
+                BrowserAction::PlayPause,
+            ]
+        );
+    }
+
+    #[test]
+    fn hiding_the_browser_mid_press_keeps_the_release_ours() {
+        let mut r = router();
+        r.set_browser_shown(true);
+        r.route_key(Some(Key::PageDown), true, false, NONE, true);
+        r.set_browser_shown(false);
+        assert_eq!(
+            r.route_key(Some(Key::PageDown), false, false, NONE, true),
+            Route::Consume
+        );
+    }
+
+    #[test]
+    fn the_browser_toggle_works_whether_it_shows_or_not() {
+        let mut r = router();
+        let toggle = Hotkey::parse("Ctrl+B").unwrap();
+        r.set_hotkeys(Hotkeys {
+            browser: crate::overlay::BrowserKeys {
+                toggle: Some(toggle),
+                page_down: None,
+                ..Hotkeys::DEFAULT.browser
+            },
+            ..Hotkeys::DEFAULT
+        });
+        assert_eq!(
+            r.route_key(Some(Key::B), true, false, CTRL, true),
+            Route::Consume
+        );
+        assert_eq!(
+            r.route_key(Some(Key::B), true, true, CTRL, true),
+            Route::Consume,
+            "repeats do nothing"
+        );
+        r.route_key(Some(Key::B), false, false, NONE, true);
+        assert_eq!(r.take_browser_actions(), vec![BrowserAction::Toggle]);
+        assert_eq!(
+            r.route_key(Some(Key::B), true, false, NONE, true),
+            Route::Forward,
+            "without Ctrl"
+        );
+        // An unassigned key is the game's even while the browser shows.
+        r.set_browser_shown(true);
+        assert_eq!(tap(&mut r, Key::PageDown), Route::Forward);
+    }
+
+    #[test]
+    fn at_most_eight_browser_actions_wait() {
+        let mut r = router();
+        r.set_browser_shown(true);
+        r.route_key(Some(Key::PageDown), true, false, NONE, true);
+        for _ in 0..20 {
+            r.route_key(Some(Key::PageDown), true, true, NONE, true);
+        }
+        assert_eq!(r.take_browser_actions().len(), 8);
+        r.route_key(Some(Key::PageDown), true, true, NONE, true);
+        r.set_enabled(false);
+        assert!(r.take_browser_actions().is_empty(), "disabling drops them");
     }
 
     #[test]
