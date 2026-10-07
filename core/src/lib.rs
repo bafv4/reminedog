@@ -1,5 +1,6 @@
 //! OS-independent logic shared by the platform hooks.
 //!
+//! - [`browser`]: the in-game browser's page input (as CDP calls), address bar and video scripts
 //! - [`location`]: parsing the F3+C clipboard text (`/execute in ... run tp @s x y z yaw pitch`)
 //! - [`waypoint`]: per-world waypoint files with atomic saves
 //! - [`world`]: world ids and file names, `latest.log` parsing and tailing, singleplayer detection
@@ -12,6 +13,7 @@
 //! - [`logfile`]: a file backend for the `log` crate
 //! - [`settings`]: the user's settings file
 
+pub mod browser;
 pub mod gamedir;
 pub mod keybinds;
 mod keytable;

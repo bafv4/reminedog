@@ -18,6 +18,12 @@ use crate::waypoint::{backup_path, copy_path, sync_parent_dir, tmp_path, unix_no
 
 /// Range of the zoom factor.
 pub const ZOOM_FACTOR_RANGE: (f32, f32) = (1.5, 8.0);
+/// Range of the browser's page zoom.
+pub const BROWSER_ZOOM_RANGE: (f32, f32) = (0.25, 3.0);
+/// Range of the browser's opacity while the menu is closed.
+pub const BROWSER_OPACITY_RANGE: (f32, f32) = (0.2, 1.0);
+/// Range of the seconds the browser's seek keys move a video by.
+pub const BROWSER_SEEK_RANGE: (f32, f32) = (1.0, 60.0);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -44,6 +50,25 @@ pub struct Settings {
     /// Keys and mouse buttons that reach the game as other ones while in game.
     #[serde(deserialize_with = "lenient_rebinds")]
     pub rebinds: Vec<Rebind>,
+    /// Shows and hides the browser; empty for none (the menu's button only).
+    pub browser_toggle_key: String,
+    /// The browser's keys while it shows and the game is played (empty for none).
+    pub browser_page_up_key: String,
+    pub browser_page_down_key: String,
+    pub browser_play_pause_key: String,
+    pub browser_seek_back_key: String,
+    pub browser_seek_forward_key: String,
+    /// The page the browser opens with: the last one shown.
+    pub browser_url: String,
+    /// Where the page is on the screen: left, top, width and height in points. `None` puts
+    /// it in the top right corner.
+    pub browser_rect: Option<[f32; 4]>,
+    /// The page's zoom (1.0 is 100 %).
+    pub browser_zoom: f32,
+    /// The page's opacity while the menu is closed.
+    pub browser_opacity: f32,
+    /// Seconds the seek keys move a video by.
+    pub browser_seek_seconds: f32,
     /// Where [`Settings::load`] copied the file because it dropped rebinding values or entries
     /// it could not read (the next save would lose them). Not saved.
     #[serde(skip)]
@@ -73,6 +98,17 @@ impl Default for Settings {
             navigate_key: "K".into(),
             rebinds_enabled: true,
             rebinds: Vec::new(),
+            browser_toggle_key: String::new(),
+            browser_page_up_key: "PageUp".into(),
+            browser_page_down_key: "PageDown".into(),
+            browser_play_pause_key: "Down".into(),
+            browser_seek_back_key: "Left".into(),
+            browser_seek_forward_key: "Right".into(),
+            browser_url: "https://www.google.com/".into(),
+            browser_rect: None,
+            browser_zoom: 1.0,
+            browser_opacity: 1.0,
+            browser_seek_seconds: 10.0,
             rebinds_kept_in: None,
         }
     }
@@ -122,12 +158,31 @@ fn lenient_rebinds<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Reb
 impl Settings {
     /// Brings values from a hand-edited file back into range.
     pub fn sanitized(mut self) -> Self {
-        let (lo, hi) = ZOOM_FACTOR_RANGE;
-        self.zoom_factor = if self.zoom_factor.is_finite() {
-            self.zoom_factor.clamp(lo, hi)
-        } else {
-            Settings::default().zoom_factor
+        let defaults = Settings::default();
+        let clamp = |value: f32, (lo, hi): (f32, f32), default: f32| {
+            if value.is_finite() {
+                value.clamp(lo, hi)
+            } else {
+                default
+            }
         };
+        self.zoom_factor = clamp(self.zoom_factor, ZOOM_FACTOR_RANGE, defaults.zoom_factor);
+        self.browser_zoom = clamp(self.browser_zoom, BROWSER_ZOOM_RANGE, defaults.browser_zoom);
+        self.browser_opacity = clamp(
+            self.browser_opacity,
+            BROWSER_OPACITY_RANGE,
+            defaults.browser_opacity,
+        );
+        self.browser_seek_seconds = clamp(
+            self.browser_seek_seconds,
+            BROWSER_SEEK_RANGE,
+            defaults.browser_seek_seconds,
+        );
+        if self.browser_rect.is_some_and(|rect| {
+            rect.iter().any(|v| !v.is_finite()) || rect[2] <= 0.0 || rect[3] <= 0.0
+        }) {
+            self.browser_rect = None;
+        }
         self
     }
 
@@ -280,6 +335,17 @@ mod tests {
                 rebind("key.mouse.4", "key.keyboard.f3"),
                 rebind("key.keyboard.caps.lock", "key.keyboard.left.control"),
             ],
+            browser_toggle_key: "Ctrl+B".into(),
+            browser_page_up_key: String::new(),
+            browser_page_down_key: "Mouse5".into(),
+            browser_play_pause_key: "End".into(),
+            browser_seek_back_key: "Home".into(),
+            browser_seek_forward_key: "Insert".into(),
+            browser_url: "https://example.com/".into(),
+            browser_rect: Some([1.5, 2.0, 300.0, 168.75]),
+            browser_zoom: 0.75,
+            browser_opacity: 0.5,
+            browser_seek_seconds: 5.0,
             rebinds_kept_in: None,
         };
         settings.save(&path).unwrap();
@@ -422,6 +488,11 @@ mod tests {
         // Files from before the waypoint keys existed get their defaults.
         assert_eq!(settings.waypoint_key, "J");
         assert_eq!(settings.navigate_key, "K");
+        // And from before the browser.
+        assert_eq!(settings.browser_toggle_key, "");
+        assert_eq!(settings.browser_page_down_key, "PageDown");
+        assert_eq!(settings.browser_play_pause_key, "Down");
+        assert_eq!(settings.browser_rect, None);
     }
 
     #[test]
@@ -432,6 +503,28 @@ mod tests {
         assert_eq!(Settings::load(&path).zoom_factor, ZOOM_FACTOR_RANGE.1);
         fs::write(&path, r#"{"zoom_factor": 0.1}"#).unwrap();
         assert_eq!(Settings::load(&path).zoom_factor, ZOOM_FACTOR_RANGE.0);
+        fs::write(
+            &path,
+            r#"{"browser_zoom": 9, "browser_opacity": 0, "browser_seek_seconds": 600}"#,
+        )
+        .unwrap();
+        let settings = Settings::load(&path);
+        assert_eq!(settings.browser_zoom, BROWSER_ZOOM_RANGE.1);
+        assert_eq!(settings.browser_opacity, BROWSER_OPACITY_RANGE.0);
+        assert_eq!(settings.browser_seek_seconds, BROWSER_SEEK_RANGE.1);
+    }
+
+    #[test]
+    fn a_browser_rect_without_a_size_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"browser_rect": [10, 20, 300, 200]}"#).unwrap();
+        assert_eq!(
+            Settings::load(&path).browser_rect,
+            Some([10.0, 20.0, 300.0, 200.0])
+        );
+        fs::write(&path, r#"{"browser_rect": [10, 20, 0, 200]}"#).unwrap();
+        assert_eq!(Settings::load(&path).browser_rect, None);
     }
 
     #[test]
