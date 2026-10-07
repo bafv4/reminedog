@@ -1,6 +1,7 @@
 //! Puts the version into reminedog.dll's version resource (Explorer's Properties > Details),
 //! since the file keeps its name across versions. The release workflow sets
-//! REMINEDOG_VERSION; other builds use the crate's version.
+//! REMINEDOG_VERSION; other builds use the crate's version. The code gets the same version
+//! and build id (`agent::VERSION`, `agent::BUILD_ID`) from here.
 
 use std::env;
 use std::fs;
@@ -9,12 +10,14 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rerun-if-env-changed=REMINEDOG_VERSION");
     println!("cargo:rerun-if-env-changed=REMINEDOG_BUILD_ID");
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
-        return;
-    }
     let version = env::var("REMINEDOG_VERSION")
         .unwrap_or_else(|_| env::var("CARGO_PKG_VERSION").expect("set by cargo"));
     let build = env::var("REMINEDOG_BUILD_ID").unwrap_or_else(|_| "local".into());
+    println!("cargo:rustc-env=REMINEDOG_VERSION={version}");
+    println!("cargo:rustc-env=REMINEDOG_BUILD_ID={build}");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
     let numbers = numeric_version(&version);
     let rc = format!(
         r#"1 VERSIONINFO
@@ -49,11 +52,14 @@ END
     );
     let path = PathBuf::from(env::var("OUT_DIR").expect("set by cargo")).join("version.rc");
     fs::write(&path, rc).expect("write version.rc");
-    // Without a resource compiler (a GNU build lacking windres) the DLL just has no version
-    // resource; the version still shows in the log.
     if let Err(e) =
         embed_resource::compile_for_cdylib(&path, embed_resource::NONE).manifest_optional()
     {
+        // MSVC brings its resource compiler. A GNU build may lack windres: its DLL just has
+        // no version resource (the version still shows in the log).
+        if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            panic!("cannot put the version resource in: {e}");
+        }
         println!("cargo:warning=no version resource: {e}");
     }
 }

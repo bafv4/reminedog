@@ -24,17 +24,12 @@ pub fn globals() -> Option<&'static Globals> {
     GLOBALS.get()
 }
 
-/// The version: the release's (the release workflow sets REMINEDOG_VERSION), otherwise the crate's.
-pub const VERSION: &str = match option_env!("REMINEDOG_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
-};
+/// The version: the release's (the release workflow sets REMINEDOG_VERSION), otherwise the
+/// crate's; as `build.rs` put it in the version resource.
+pub const VERSION: &str = env!("REMINEDOG_VERSION");
 
-/// Identifies the build in logs; CI sets it to the commit hash.
-pub const BUILD_ID: &str = match option_env!("REMINEDOG_BUILD_ID") {
-    Some(id) => id,
-    None => "local",
-};
+/// Identifies the build in logs; CI sets it to the commit hash ("local" otherwise).
+pub const BUILD_ID: &str = env!("REMINEDOG_BUILD_ID");
 
 pub fn on_load(raw_options: &str) {
     let start = Instant::now();
