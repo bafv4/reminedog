@@ -17,6 +17,29 @@ egui.workspace = true
 glow.workspace = true
 log.workspace = true
 minhook.workspace = true
+serde_json.workspace = true
+webview2-com.workspace = true
+windows-core.workspace = true
+windows-numerics.workspace = true
+windows = { workspace = true, features = [
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "System",
+    "UI_Composition",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_UI_WindowsAndMessaging",
+] }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Globalization",

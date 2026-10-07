@@ -14,6 +14,7 @@ use reminedog_render::{
 };
 
 use crate::agent::{self, Globals};
+use crate::browser;
 use crate::fonts;
 use crate::input;
 use crate::pointer;
@@ -384,10 +385,12 @@ impl Runtime {
             .tall
             .failure()
             .map(|reason| format!("高精細は使えない：{reason}"));
-        let waypoint_commands = {
+        let (waypoint_commands, browser_commands, browser_actions) = {
             let _current = self.context.make_current(wgl).map_err(FrameError::Failed)?;
             // Takes the router's hotkey actions, so before the router is locked below.
             let marks = waypoints::before_frame(&agent.game_dir, self.window, playing, ws.naming());
+            let (browser, browser_notices) = browser::before_frame();
+            let browser_shown = browser.shown;
             // Only the menu shows them.
             let (game_bindings, unsupported_inputs) = if ui_open {
                 (
@@ -397,11 +400,12 @@ impl Runtime {
             } else {
                 (Vec::new(), Vec::new())
             };
-            let input = {
+            let (input, browser_actions) = {
                 let mut router = input::router();
                 router.set_enabled(true);
                 router.set_screen([width as u32, height as u32], scale);
-                FrameInput {
+                router.set_browser_shown(browser_shown);
+                let input = FrameInput {
                     events: router.take_events(),
                     modifiers: router.modifiers(),
                     ui_open: router.ui_open(),
@@ -410,23 +414,27 @@ impl Runtime {
                     captured: router.take_captured(),
                     high_res_note,
                     waypoints: marks.view,
-                    notices: marks.notices,
+                    notices: marks.notices.into_iter().chain(browser_notices).collect(),
                     reserved_keys: marks.reserved_keys,
                     game_bindings,
                     rebind_note: self.rebind_note.clone(),
                     unsupported_inputs,
-                    // Until the browser exists.
-                    browser: Default::default(),
-                }
+                    browser,
+                };
+                (input, router.take_browser_actions())
             };
+            // The browser thread waits while the picture is uploaded; a picture it is writing
+            // right now waits for the next frame. Hidden, the last one stays.
+            let frame = browser_shown.then(browser::frame).flatten();
             let output = self.overlay.render(FrameParams {
                 framebuffer_size: [width as u32, height as u32],
                 pixels_per_point: scale,
                 time: agent.start.elapsed().as_secs_f64(),
                 status: &self.status,
                 input,
-                browser_pixels: None,
+                browser_pixels: frame.as_deref().map(browser::pixels),
             });
+            drop(frame);
             // The rules again only when they or the hotkeys changed: resolving logs them (the
             // zoom's slider changes the settings every frame while dragged).
             let changed = output.settings.as_ref().map(|settings| {
@@ -473,9 +481,19 @@ impl Runtime {
                 self.unsaved = Some(Instant::now());
             }
             self.log_gl_errors();
-            output.waypoint_commands
+            (
+                output.waypoint_commands,
+                output.browser_commands,
+                browser_actions,
+            )
         };
         waypoints::after_frame(waypoint_commands, self.window);
+        browser::after_frame(
+            browser_commands,
+            browser_actions,
+            &self.settings,
+            &agent.game_dir,
+        );
         self.save_settings_when_due();
         let cost_ms = started.elapsed().as_secs_f64() * 1000.0;
         self.cost_ms = if self.overlay.frames() <= 1 {

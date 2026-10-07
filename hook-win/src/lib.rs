@@ -11,6 +11,7 @@
 #![cfg(windows)]
 
 mod agent;
+mod browser;
 mod f3c;
 mod ffi;
 mod fonts;
