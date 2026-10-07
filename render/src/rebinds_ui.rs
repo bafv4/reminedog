@@ -372,10 +372,8 @@ fn source_refusal(id: InputId, settings: &Settings, keys: &Hotkeys) -> Option<St
         Unused::Source(id)
     } else if rule_sources(settings).any(|source| source == id) {
         Unused::Duplicate(id)
-    } else if let Some(action) = plain_hotkey_on(id, keys) {
-        Unused::Hotkey(id, action)
     } else {
-        return None;
+        Unused::Hotkey(id, plain_hotkey_on(id, keys)?)
     };
     Some(unused.note())
 }
