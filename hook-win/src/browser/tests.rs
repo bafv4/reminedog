@@ -331,3 +331,26 @@ fn the_media_keys_play_seek_and_hiding_pauses() {
     send(Command::Media(MediaCommand::PlayPause));
     wait_for("paused", Duration::from_secs(5), || paused() == "true");
 }
+
+#[test]
+#[ignore = "needs the WebView2 Runtime and a desktop session"]
+fn a_file_input_opens_no_dialog() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let data = tempfile::tempdir().unwrap();
+    let _running = start(
+        "data:text/html,<body style='margin:0'>\
+        <input type='file' id='file' style='position:absolute;left:0;top:0;width:200px;height:40px'>\
+        <script>window.cancelled = false;\
+        file.addEventListener('cancel', () => window.cancelled = true);</script>",
+        data.path(),
+    );
+    wait_for("a picture", Duration::from_secs(10), || {
+        center_pixel().is_some()
+    });
+    click([20.0, 20.0]);
+    // The page hears the dialog was cancelled. Had it opened (in this process, on the browser
+    // thread), the script would get no answer.
+    wait_for("the cancelled dialog", Duration::from_secs(10), || {
+        eval("window.cancelled") == "true"
+    });
+}

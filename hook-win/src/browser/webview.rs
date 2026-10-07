@@ -138,6 +138,14 @@ impl Browser {
         // The page gets its input without the system's focus; it is told it has it, so it
         // shows the caret and its focus styles.
         browser.cdp("Emulation.setFocusEmulationEnabled", r#"{"enabled":true}"#);
+        // A file input would open the system's file dialog in front of the game (on this
+        // thread, which it blocks): the dialog is cancelled instead, as if the user closed it.
+        // The interception needs the Page domain on.
+        browser.cdp("Page.enable", "{}");
+        browser.cdp(
+            "Page.setInterceptFileChooserDialog",
+            r#"{"enabled":true,"cancel":true}"#,
+        );
         Ok(browser)
     }
 
