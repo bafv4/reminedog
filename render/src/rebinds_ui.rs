@@ -369,13 +369,13 @@ impl RebindMenu {
 /// Why `id` cannot be the source of a new rule.
 fn source_refusal(id: InputId, settings: &Settings, keys: &Hotkeys) -> Option<String> {
     let unused = if refused_source(id) {
-        Unused::Source(id)
+        Some(Unused::Source(id))
     } else if rule_sources(settings).any(|source| source == id) {
-        Unused::Duplicate(id)
+        Some(Unused::Duplicate(id))
     } else {
-        Unused::Hotkey(id, plain_hotkey_on(id, keys)?)
+        plain_hotkey_on(id, keys).map(|action| Unused::Hotkey(id, action))
     };
-    Some(unused.note())
+    unused.map(|unused| unused.note())
 }
 
 /// Where the settings file was copied because rebinding entries in it could not be read.
