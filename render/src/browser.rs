@@ -206,6 +206,10 @@ pub(crate) struct BrowserMenu {
     placing: u8,
     /// Buttons that went down on the page and are not up yet ([`PageButton::bit`]).
     buttons: u8,
+    /// Keys that went down on the page and are not up yet.
+    keys: Vec<PageKey>,
+    /// Where the page last had the pointer, in CSS pixels.
+    pointer: [f32; 2],
     last_click: Option<Click>,
     /// The layout sent last, and when (seconds).
     sent: Option<(PageLayout, f64)>,
@@ -220,6 +224,35 @@ struct Click {
 }
 
 impl BrowserMenu {
+    /// Lets go of what the page still has down: it gets no more input once the window goes
+    /// (the menu closes or the browser hides).
+    fn release(&mut self, commands: &mut Vec<BrowserCommand>) {
+        self.release_keys(commands);
+        for button in PageButton::ALL {
+            if self.buttons & button.bit() != 0 {
+                self.buttons &= !button.bit();
+                commands.push(BrowserCommand::Input(PageInput::MouseUp {
+                    pos: self.pointer,
+                    button,
+                    clicks: 1,
+                    buttons: self.buttons,
+                    modifiers: PageModifiers::default(),
+                }));
+            }
+        }
+    }
+
+    /// Lets go of the keys the page still has down: it gets no more keys once it loses the
+    /// focus.
+    fn release_keys(&mut self, commands: &mut Vec<BrowserCommand>) {
+        for key in self.keys.drain(..) {
+            commands.push(BrowserCommand::Input(PageInput::KeyUp {
+                key,
+                modifiers: PageModifiers::default(),
+            }));
+        }
+    }
+
     /// Sends the page's size when it changed (at most every [`LAYOUT_INTERVAL`]).
     pub(crate) fn layout(
         &mut self,
@@ -290,10 +323,10 @@ pub(crate) fn browser_ui(
     if !(ui_open && view.shown) {
         // No window: it is placed again when it appears.
         menu.placing = 0;
+        menu.release(commands);
     }
     if !ui_open {
         menu.address = None;
-        menu.buttons = 0;
     }
     if !view.shown {
         return;
@@ -477,6 +510,9 @@ fn page(
         settings.browser_rect = Some([rect.min.x, rect.min.y, size.x, size.y]);
     }
 
+    if !response.has_focus() {
+        menu.release_keys(commands);
+    }
     if view.state == BrowserState::Ready {
         let input = PageArea {
             rect,
@@ -598,9 +634,10 @@ fn page_input(
                         count,
                     });
                     menu.buttons |= button.bit();
+                    menu.pointer = area.css(*pos);
                     pressed_on_page = true;
                     send(PageInput::MouseDown {
-                        pos: area.css(*pos),
+                        pos: menu.pointer,
                         button,
                         clicks: count,
                         buttons: menu.buttons,
@@ -608,9 +645,10 @@ fn page_input(
                     });
                 } else if menu.buttons & button.bit() != 0 {
                     menu.buttons &= !button.bit();
+                    menu.pointer = area.css(*pos);
                     let clicks = menu.last_click.map_or(1, |click| click.count);
                     send(PageInput::MouseUp {
-                        pos: area.css(*pos),
+                        pos: menu.pointer,
                         button,
                         clicks,
                         buttons: menu.buttons,
@@ -648,6 +686,11 @@ fn page_input(
                     continue;
                 };
                 let modifiers = page_modifiers(*held);
+                if !*pressed {
+                    menu.keys.retain(|held| *held != page_key);
+                } else if !menu.keys.contains(&page_key) {
+                    menu.keys.push(page_key);
+                }
                 send(if *pressed {
                     PageInput::KeyDown {
                         key: page_key,
@@ -666,8 +709,9 @@ fn page_input(
         }
     }
     if let Some(pos) = moved_to {
+        menu.pointer = area.css(pos);
         send(PageInput::MouseMove {
-            pos: area.css(pos),
+            pos: menu.pointer,
             buttons: menu.buttons,
             modifiers,
         });
@@ -1014,24 +1058,161 @@ mod tests {
         view: &BrowserView,
         events: Vec<Event>,
     ) -> Vec<BrowserCommand> {
-        let mut commands = Vec::new();
-        for frame in 0..4 {
-            commands.clear();
-            let raw = egui::RawInput {
-                screen_rect: Some(screen()),
-                events: if frame == 3 {
-                    events.clone()
-                } else {
-                    Vec::new()
-                },
-                ..Default::default()
-            };
-            let mut output = ctx.run_ui(raw, |ui| {
-                browser_ui(ui.ctx(), menu, view, settings, None, true, &mut commands);
-            });
-            output.textures_delta.clear();
+        for _ in 0..3 {
+            frame(ctx, menu, settings, view, true, Vec::new());
         }
+        frame(ctx, menu, settings, view, true, events)
+    }
+
+    /// One frame, with the menu open or not; its commands.
+    fn frame(
+        ctx: &egui::Context,
+        menu: &mut BrowserMenu,
+        settings: &mut Settings,
+        view: &BrowserView,
+        ui_open: bool,
+        events: Vec<Event>,
+    ) -> Vec<BrowserCommand> {
+        let mut commands = Vec::new();
+        let raw = egui::RawInput {
+            screen_rect: Some(screen()),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(raw, |ui| {
+            browser_ui(ui.ctx(), menu, view, settings, None, ui_open, &mut commands);
+        });
+        output.textures_delta.clear();
         commands
+    }
+
+    fn primary(pos: Pos2, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn key(key: Key, pressed: bool) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn closing_the_menu_lets_go_of_the_page() {
+        let ctx = egui::Context::default();
+        let mut menu = BrowserMenu::default();
+        let mut settings = Settings {
+            browser_rect: Some([300.0, 200.0, 400.0, 225.0]),
+            ..Settings::default()
+        };
+        let view = ready();
+        run(&ctx, &mut menu, &mut settings, &view, Vec::new());
+        let at = pos2(350.0, 250.0);
+        // A click gives the page the keys; then a key and a button go down on it.
+        frame(
+            &ctx,
+            &mut menu,
+            &mut settings,
+            &view,
+            true,
+            vec![
+                Event::PointerMoved(at),
+                primary(at, true),
+                primary(at, false),
+            ],
+        );
+        frame(
+            &ctx,
+            &mut menu,
+            &mut settings,
+            &view,
+            true,
+            vec![key(Key::ArrowRight, true), primary(at, true)],
+        );
+        let released = frame(&ctx, &mut menu, &mut settings, &view, false, Vec::new());
+        assert!(
+            released
+                .iter()
+                .any(|c| matches!(c, BrowserCommand::Input(PageInput::KeyUp { key, .. }) if key.code == "ArrowRight")),
+            "{released:?}"
+        );
+        assert!(
+            released.iter().any(|c| matches!(
+                c,
+                BrowserCommand::Input(PageInput::MouseUp {
+                    button: PageButton::Left,
+                    buttons: 0,
+                    ..
+                })
+            )),
+            "{released:?}"
+        );
+        // Their real releases (the game's now) send nothing more.
+        let later = frame(
+            &ctx,
+            &mut menu,
+            &mut settings,
+            &view,
+            false,
+            vec![key(Key::ArrowRight, false), primary(at, false)],
+        );
+        assert!(later.is_empty(), "{later:?}");
+    }
+
+    #[test]
+    fn a_key_down_on_the_page_is_let_go_when_it_loses_the_focus() {
+        let ctx = egui::Context::default();
+        let mut menu = BrowserMenu::default();
+        let mut settings = Settings {
+            browser_rect: Some([300.0, 200.0, 400.0, 225.0]),
+            ..Settings::default()
+        };
+        let view = ready();
+        run(&ctx, &mut menu, &mut settings, &view, Vec::new());
+        let at = pos2(350.0, 250.0);
+        frame(
+            &ctx,
+            &mut menu,
+            &mut settings,
+            &view,
+            true,
+            vec![
+                Event::PointerMoved(at),
+                primary(at, true),
+                primary(at, false),
+            ],
+        );
+        frame(
+            &ctx,
+            &mut menu,
+            &mut settings,
+            &view,
+            true,
+            vec![key(Key::A, true)],
+        );
+        // A click off the page takes the keys from it.
+        let away = pos2(50.0, 600.0);
+        let mut commands = Vec::new();
+        for events in [
+            vec![Event::PointerMoved(away), primary(away, true)],
+            vec![primary(away, false)],
+        ] {
+            commands.extend(frame(&ctx, &mut menu, &mut settings, &view, true, events));
+        }
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, BrowserCommand::Input(PageInput::KeyUp { key, .. }) if key.code == "KeyA")),
+            "{commands:?}"
+        );
     }
 
     fn ready() -> BrowserView {

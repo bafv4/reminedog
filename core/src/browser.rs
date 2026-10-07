@@ -19,6 +19,14 @@ pub enum PageButton {
 }
 
 impl PageButton {
+    pub const ALL: [PageButton; 5] = [
+        PageButton::Left,
+        PageButton::Middle,
+        PageButton::Right,
+        PageButton::Back,
+        PageButton::Forward,
+    ];
+
     /// CDP's name.
     fn name(self) -> &'static str {
         match self {
