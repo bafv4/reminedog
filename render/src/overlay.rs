@@ -17,7 +17,7 @@ use crate::browser::{
 };
 use crate::font_metrics;
 use crate::hotkey::{Hotkey, Trigger, input_trigger};
-use crate::input::Captured;
+use crate::input::{BrowserAction, Captured};
 use crate::rebinds_ui::{RebindMenu, rebind_section, rule_sources};
 use crate::waypoints::{
     Notice, NoticeList, WaypointCommand, WaypointMenu, WaypointView, draw_destination,
@@ -190,27 +190,27 @@ impl Hotkeys {
         }
     }
 
-    fn browser_key(&self, key: BrowserKey) -> &Option<Hotkey> {
+    fn browser_key(&self, key: BrowserAction) -> &Option<Hotkey> {
         let keys = &self.browser;
         match key {
-            BrowserKey::Toggle => &keys.toggle,
-            BrowserKey::PageUp => &keys.page_up,
-            BrowserKey::PageDown => &keys.page_down,
-            BrowserKey::PlayPause => &keys.play_pause,
-            BrowserKey::SeekBack => &keys.seek_back,
-            BrowserKey::SeekForward => &keys.seek_forward,
+            BrowserAction::Toggle => &keys.toggle,
+            BrowserAction::PageUp => &keys.page_up,
+            BrowserAction::PageDown => &keys.page_down,
+            BrowserAction::PlayPause => &keys.play_pause,
+            BrowserAction::SeekBack => &keys.seek_back,
+            BrowserAction::SeekForward => &keys.seek_forward,
         }
     }
 
-    fn browser_key_mut(&mut self, key: BrowserKey) -> &mut Option<Hotkey> {
+    fn browser_key_mut(&mut self, key: BrowserAction) -> &mut Option<Hotkey> {
         let keys = &mut self.browser;
         match key {
-            BrowserKey::Toggle => &mut keys.toggle,
-            BrowserKey::PageUp => &mut keys.page_up,
-            BrowserKey::PageDown => &mut keys.page_down,
-            BrowserKey::PlayPause => &mut keys.play_pause,
-            BrowserKey::SeekBack => &mut keys.seek_back,
-            BrowserKey::SeekForward => &mut keys.seek_forward,
+            BrowserAction::Toggle => &mut keys.toggle,
+            BrowserAction::PageUp => &mut keys.page_up,
+            BrowserAction::PageDown => &mut keys.page_down,
+            BrowserAction::PlayPause => &mut keys.play_pause,
+            BrowserAction::SeekBack => &mut keys.seek_back,
+            BrowserAction::SeekForward => &mut keys.seek_forward,
         }
     }
 }
@@ -349,18 +349,7 @@ pub(crate) enum Action {
     Zoom,
     Waypoint,
     Navigate,
-    Browser(BrowserKey),
-}
-
-/// The browser's hotkeys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BrowserKey {
-    Toggle,
-    PageUp,
-    PageDown,
-    PlayPause,
-    SeekBack,
-    SeekForward,
+    Browser(BrowserAction),
 }
 
 impl Action {
@@ -370,12 +359,12 @@ impl Action {
         Action::Zoom,
         Action::Waypoint,
         Action::Navigate,
-        Action::Browser(BrowserKey::Toggle),
-        Action::Browser(BrowserKey::PageUp),
-        Action::Browser(BrowserKey::PageDown),
-        Action::Browser(BrowserKey::PlayPause),
-        Action::Browser(BrowserKey::SeekBack),
-        Action::Browser(BrowserKey::SeekForward),
+        Action::Browser(BrowserAction::Toggle),
+        Action::Browser(BrowserAction::PageUp),
+        Action::Browser(BrowserAction::PageDown),
+        Action::Browser(BrowserAction::PlayPause),
+        Action::Browser(BrowserAction::SeekBack),
+        Action::Browser(BrowserAction::SeekForward),
     ];
     /// As listed in the menu's keys.
     pub(crate) const GENERAL: [Action; 4] = [
@@ -386,24 +375,24 @@ impl Action {
     ];
     /// As listed in the menu's browser section.
     pub(crate) const BROWSER: [Action; 6] = [
-        Action::Browser(BrowserKey::Toggle),
-        Action::Browser(BrowserKey::PageUp),
-        Action::Browser(BrowserKey::PageDown),
-        Action::Browser(BrowserKey::PlayPause),
-        Action::Browser(BrowserKey::SeekBack),
-        Action::Browser(BrowserKey::SeekForward),
+        Action::Browser(BrowserAction::Toggle),
+        Action::Browser(BrowserAction::PageUp),
+        Action::Browser(BrowserAction::PageDown),
+        Action::Browser(BrowserAction::PlayPause),
+        Action::Browser(BrowserAction::SeekBack),
+        Action::Browser(BrowserAction::SeekForward),
     ];
     /// The order in which the input router matches the hotkeys.
-    const ROUTER_ORDER: [Action; 10] = [
+    pub(crate) const ROUTER_ORDER: [Action; 10] = [
         Action::Menu,
         Action::Waypoint,
         Action::Navigate,
-        Action::Browser(BrowserKey::Toggle),
-        Action::Browser(BrowserKey::PageUp),
-        Action::Browser(BrowserKey::PageDown),
-        Action::Browser(BrowserKey::PlayPause),
-        Action::Browser(BrowserKey::SeekBack),
-        Action::Browser(BrowserKey::SeekForward),
+        Action::Browser(BrowserAction::Toggle),
+        Action::Browser(BrowserAction::PageUp),
+        Action::Browser(BrowserAction::PageDown),
+        Action::Browser(BrowserAction::PlayPause),
+        Action::Browser(BrowserAction::SeekBack),
+        Action::Browser(BrowserAction::SeekForward),
         Action::Zoom,
     ];
 
@@ -413,12 +402,12 @@ impl Action {
             Action::Zoom => "ズーム",
             Action::Waypoint => "ウェイポイントを記録",
             Action::Navigate => "現在地を更新",
-            Action::Browser(BrowserKey::Toggle) => "ブラウザの表示／非表示",
-            Action::Browser(BrowserKey::PageUp) => "上へスクロール",
-            Action::Browser(BrowserKey::PageDown) => "下へスクロール",
-            Action::Browser(BrowserKey::PlayPause) => "再生／一時停止",
-            Action::Browser(BrowserKey::SeekBack) => "巻き戻し",
-            Action::Browser(BrowserKey::SeekForward) => "早送り",
+            Action::Browser(BrowserAction::Toggle) => "ブラウザの表示／非表示",
+            Action::Browser(BrowserAction::PageUp) => "上へスクロール",
+            Action::Browser(BrowserAction::PageDown) => "下へスクロール",
+            Action::Browser(BrowserAction::PlayPause) => "再生／一時停止",
+            Action::Browser(BrowserAction::SeekBack) => "巻き戻し",
+            Action::Browser(BrowserAction::SeekForward) => "早送り",
         }
     }
 
@@ -429,12 +418,12 @@ impl Action {
             Action::Zoom => "zoom",
             Action::Waypoint => "waypoint",
             Action::Navigate => "navigate",
-            Action::Browser(BrowserKey::Toggle) => "browser toggle",
-            Action::Browser(BrowserKey::PageUp) => "browser page up",
-            Action::Browser(BrowserKey::PageDown) => "browser page down",
-            Action::Browser(BrowserKey::PlayPause) => "browser play/pause",
-            Action::Browser(BrowserKey::SeekBack) => "browser seek back",
-            Action::Browser(BrowserKey::SeekForward) => "browser seek forward",
+            Action::Browser(BrowserAction::Toggle) => "browser toggle",
+            Action::Browser(BrowserAction::PageUp) => "browser page up",
+            Action::Browser(BrowserAction::PageDown) => "browser page down",
+            Action::Browser(BrowserAction::PlayPause) => "browser play/pause",
+            Action::Browser(BrowserAction::SeekBack) => "browser seek back",
+            Action::Browser(BrowserAction::SeekForward) => "browser seek forward",
         }
     }
 
@@ -453,12 +442,12 @@ impl Action {
             Action::Zoom => &settings.zoom_key,
             Action::Waypoint => &settings.waypoint_key,
             Action::Navigate => &settings.navigate_key,
-            Action::Browser(BrowserKey::Toggle) => &settings.browser_toggle_key,
-            Action::Browser(BrowserKey::PageUp) => &settings.browser_page_up_key,
-            Action::Browser(BrowserKey::PageDown) => &settings.browser_page_down_key,
-            Action::Browser(BrowserKey::PlayPause) => &settings.browser_play_pause_key,
-            Action::Browser(BrowserKey::SeekBack) => &settings.browser_seek_back_key,
-            Action::Browser(BrowserKey::SeekForward) => &settings.browser_seek_forward_key,
+            Action::Browser(BrowserAction::Toggle) => &settings.browser_toggle_key,
+            Action::Browser(BrowserAction::PageUp) => &settings.browser_page_up_key,
+            Action::Browser(BrowserAction::PageDown) => &settings.browser_page_down_key,
+            Action::Browser(BrowserAction::PlayPause) => &settings.browser_play_pause_key,
+            Action::Browser(BrowserAction::SeekBack) => &settings.browser_seek_back_key,
+            Action::Browser(BrowserAction::SeekForward) => &settings.browser_seek_forward_key,
         }
     }
 
@@ -468,12 +457,12 @@ impl Action {
             Action::Zoom => &mut settings.zoom_key,
             Action::Waypoint => &mut settings.waypoint_key,
             Action::Navigate => &mut settings.navigate_key,
-            Action::Browser(BrowserKey::Toggle) => &mut settings.browser_toggle_key,
-            Action::Browser(BrowserKey::PageUp) => &mut settings.browser_page_up_key,
-            Action::Browser(BrowserKey::PageDown) => &mut settings.browser_page_down_key,
-            Action::Browser(BrowserKey::PlayPause) => &mut settings.browser_play_pause_key,
-            Action::Browser(BrowserKey::SeekBack) => &mut settings.browser_seek_back_key,
-            Action::Browser(BrowserKey::SeekForward) => &mut settings.browser_seek_forward_key,
+            Action::Browser(BrowserAction::Toggle) => &mut settings.browser_toggle_key,
+            Action::Browser(BrowserAction::PageUp) => &mut settings.browser_page_up_key,
+            Action::Browser(BrowserAction::PageDown) => &mut settings.browser_page_down_key,
+            Action::Browser(BrowserAction::PlayPause) => &mut settings.browser_play_pause_key,
+            Action::Browser(BrowserAction::SeekBack) => &mut settings.browser_seek_back_key,
+            Action::Browser(BrowserAction::SeekForward) => &mut settings.browser_seek_forward_key,
         }
     }
 
@@ -1289,18 +1278,22 @@ mod tests {
     fn browser_keys_are_assigned_cleared_and_reset() {
         let mut state = state();
         let toggle = Hotkey::parse("Ctrl+B").unwrap();
-        let action = Action::Browser(BrowserKey::Toggle);
+        let action = Action::Browser(BrowserAction::Toggle);
         state.assign(action, toggle);
         assert_eq!(state.keys.browser.toggle, Some(toggle));
         assert_eq!(state.settings.browser_toggle_key, "Ctrl+B");
         // Taken by another browser key.
-        let note = refused(&mut state, Action::Browser(BrowserKey::PlayPause), "Ctrl+B");
+        let note = refused(
+            &mut state,
+            Action::Browser(BrowserAction::PlayPause),
+            "Ctrl+B",
+        );
         assert!(note.is_some_and(|note| note.contains("ブラウザの表示／非表示")));
         assert!(state.key_note_browser);
         // A browser key cannot take the zoom's.
-        assert!(refused(&mut state, Action::Browser(BrowserKey::PageUp), "Z").is_some());
+        assert!(refused(&mut state, Action::Browser(BrowserAction::PageUp), "Z").is_some());
         // Cleared.
-        let page_up = Action::Browser(BrowserKey::PageUp);
+        let page_up = Action::Browser(BrowserAction::PageUp);
         state.clear_hotkey(page_up);
         assert_eq!(state.keys.browser.page_up, None);
         assert_eq!(state.settings.browser_page_up_key, "");

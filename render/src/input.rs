@@ -8,7 +8,7 @@
 //! game gets for the presses they leave to it (see [`crate::rebind`]).
 
 use crate::hotkey::{self, Hotkey, Trigger};
-use crate::overlay::Hotkeys;
+use crate::overlay::{Action, Hotkeys};
 use crate::pointer::PointerSpeed;
 use crate::rebind::{Delivery, Output, Phase, RebindState, Rebinder};
 use egui::{Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, pos2, vec2};
@@ -66,6 +66,17 @@ enum InGame {
     Browser(BrowserAction),
 }
 
+impl InGame {
+    fn action(self) -> Action {
+        match self {
+            InGame::Hotkey(HotkeyAction::RecordWaypoint) => Action::Waypoint,
+            InGame::Hotkey(HotkeyAction::Navigate) => Action::Navigate,
+            InGame::Browser(action) => Action::Browser(action),
+        }
+    }
+}
+
+/// In the order of [`Action::ROUTER_ORDER`], between the menu and the zoom.
 const IN_GAME: [InGame; 8] = [
     InGame::Hotkey(HotkeyAction::RecordWaypoint),
     InGame::Hotkey(HotkeyAction::Navigate),
@@ -78,18 +89,8 @@ const IN_GAME: [InGame; 8] = [
 ];
 
 /// The keys of [`IN_GAME`], in its order.
-fn in_game_keys(keys: &Hotkeys) -> [Option<Hotkey>; 8] {
-    let browser = &keys.browser;
-    [
-        Some(keys.waypoint),
-        Some(keys.navigate),
-        browser.toggle,
-        browser.page_up,
-        browser.page_down,
-        browser.play_pause,
-        browser.seek_back,
-        browser.seek_forward,
-    ]
+fn in_game_keys(keys: &Hotkeys) -> [Option<Hotkey>; IN_GAME.len()] {
+    IN_GAME.map(|action| keys.get(action.action()))
 }
 
 /// The outcome of [`InputRouter::start_capture`] and [`InputRouter::start_input_capture`].
@@ -146,7 +147,7 @@ pub struct InputRouter {
     keys: Hotkeys,
     /// The key of [`IN_GAME`] at the same index was pressed and consumed, so its release is
     /// ours too.
-    action_held: [bool; 8],
+    action_held: [bool; IN_GAME.len()],
     actions: Vec<HotkeyAction>,
     browser_actions: Vec<BrowserAction>,
     /// The browser shows: its keys other than the toggle are taken.
@@ -194,7 +195,7 @@ impl InputRouter {
             offset: (0.0, 0.0),
             pointer_speed: PointerSpeed::RAW,
             keys: Hotkeys::DEFAULT,
-            action_held: [false; 8],
+            action_held: [false; IN_GAME.len()],
             actions: Vec::new(),
             browser_actions: Vec::new(),
             browser_shown: false,
@@ -213,7 +214,7 @@ impl InputRouter {
         if !enabled {
             self.set_ui_open(false);
             self.zoom_held = false;
-            self.action_held = [false; 8];
+            self.action_held = [false; IN_GAME.len()];
             self.debug_held = false;
             self.suppress_text = false;
             self.capture_held.clear();
@@ -432,7 +433,7 @@ impl InputRouter {
         self.ui_changed = true;
         log::info!("ui {}", if open { "opened" } else { "closed" });
         self.zoom_held = false;
-        self.action_held = [false; 8];
+        self.action_held = [false; IN_GAME.len()];
         self.cancel_capture();
         if open {
             if self.last_captured || self.pointer == Pos2::ZERO {
@@ -884,7 +885,7 @@ impl InputRouter {
     #[must_use = "the releases must reach the game"]
     pub fn focus_lost(&mut self, platform_releases: impl Fn(InputId) -> bool) -> Vec<Output> {
         self.zoom_held = false;
-        self.action_held = [false; 8];
+        self.action_held = [false; IN_GAME.len()];
         self.debug_held = false;
         self.suppress_text = false;
         self.rebinder.focus_lost(platform_releases)
@@ -938,6 +939,15 @@ mod tests {
         r.set_screen([800, 600], 1.0);
         r.set_enabled(true);
         r
+    }
+
+    #[test]
+    fn in_game_hotkeys_match_in_the_menus_order() {
+        // The menu's overlap checks assume this order.
+        let order = Action::ROUTER_ORDER;
+        assert_eq!(order[0], Action::Menu);
+        assert_eq!(order[order.len() - 1], Action::Zoom);
+        assert_eq!(IN_GAME.map(InGame::action), order[1..order.len() - 1]);
     }
 
     /// The key the game knows for an egui key with the same name (letters, F-keys, Esc).
