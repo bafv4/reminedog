@@ -25,8 +25,8 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
 use windows_sys::Win32::UI::WindowsAndMessaging::IsIconic;
 
-/// Settings changed in the menu are saved after this long without further changes (or
-/// when the menu closes), so dragging a slider does not write the file every frame.
+/// Settings are saved after this long without further changes (or, changed in the menu, when
+/// it closes), so neither dragging a slider nor the browser's pages write the file each time.
 const SAVE_DELAY: Duration = Duration::from_secs(1);
 
 /// The menu's note when keys cannot be rebound.
@@ -203,8 +203,8 @@ struct Runtime {
     ui_was_open: bool,
     settings: Settings,
     settings_path: PathBuf,
-    /// When the settings last changed, if not saved since.
-    unsaved: Option<Instant>,
+    /// When the settings last changed, if not saved since, and whether the menu was open then.
+    unsaved: Option<(Instant, bool)>,
     tall: TallZoom,
     /// The router's hotkeys, from `settings`.
     hotkeys: Hotkeys,
@@ -478,7 +478,7 @@ impl Runtime {
             }
             if let Some(settings) = output.settings {
                 self.settings = settings;
-                self.unsaved = Some(Instant::now());
+                self.unsaved = Some((Instant::now(), ui_open));
             }
             self.log_gl_errors();
             (
@@ -517,10 +517,11 @@ impl Runtime {
     }
 
     fn save_settings_when_due(&mut self) {
-        let Some(changed) = self.unsaved else {
+        let Some((changed, in_menu)) = self.unsaved else {
             return;
         };
-        if changed.elapsed() < SAVE_DELAY && input::router().ui_open() {
+        let menu_closed = in_menu && !input::router().ui_open();
+        if changed.elapsed() < SAVE_DELAY && !menu_closed {
             return;
         }
         self.unsaved = None;
