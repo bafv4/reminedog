@@ -15,12 +15,17 @@ fun writeAtomically(file: Path, text: String) {
     val temp = file.resolveSibling("${file.fileName}.reminedog-tmp")
     try {
         Files.write(temp, text.toByteArray(Charsets.UTF_8))
-        try {
-            Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-        } catch (e: AtomicMoveNotSupportedException) {
-            Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING)
-        }
+        moveReplacing(temp, file)
     } finally {
         Files.deleteIfExists(temp)
+    }
+}
+
+/** Moves [source] over [target], in one step where the file system can. */
+fun moveReplacing(source: Path, target: Path) {
+    try {
+        Files.move(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+    } catch (e: AtomicMoveNotSupportedException) {
+        Files.move(source, target, StandardCopyOption.REPLACE_EXISTING)
     }
 }

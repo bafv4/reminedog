@@ -346,8 +346,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
                 try {
                     logLine("最新のリリースを確認しています…")
                     val release = Download.latest()
-                    logLine("reminedog ${release.tag} をダウンロードしています（${megabytes(release.size)} MB）…")
-                    val saved = Download.save(release, Paths.get(dll))
+                    val saved = Download.save(release, Paths.get(dll)) { logDownloading(release) }
                     logLine(if (saved) "$dll に保存しました" else "$dll はすでに ${release.tag} と同じです")
                 } catch (e: Exception) {
                     logLine("ダウンロードできませんでした：${message(e)}")
@@ -428,9 +427,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
             try {
                 logLine("最新のリリースを確認しています…")
                 release = Download.latest()
-                results = Download.replaceAll(release, targets) {
-                    logLine("reminedog ${release.tag} をダウンロードしています（${megabytes(release.size)} MB）…")
-                }
+                results = Download.replaceAll(release, targets) { logDownloading(release) }
             } catch (e: Exception) {
                 logLine("ダウンロードできませんでした：${message(e)}")
                 return@runInBackground Outcome.error("ダウンロードできません", "最新版をダウンロードできませんでした。DLL は変えていません。")
@@ -451,6 +448,10 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
                 else -> Outcome.done("reminedog を最新版（${release.tag}）にしました。")
             }
         }
+    }
+
+    private fun logDownloading(release: Download.Release) {
+        logLine("reminedog ${release.tag} をダウンロードしています（${megabytes(release.size)} MB）…")
     }
 
     /** Runs [task] off the event thread with the window busy, then shows the dialog it returns. */

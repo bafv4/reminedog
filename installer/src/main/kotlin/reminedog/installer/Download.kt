@@ -3,7 +3,6 @@ package reminedog.installer
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.FileSystemException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -60,10 +59,11 @@ object Download {
 
     /**
      * Puts the release's DLL at [target] (through a temporary file, checking its size and hash).
-     * Returns false when the file there is already the same.
+     * Returns false when the file there is already the same; [onDownload] runs just before
+     * downloading.
      */
-    fun save(release: Release, target: Path): Boolean =
-        when (val result = replaceAll(release, listOf(target)).single()) {
+    fun save(release: Release, target: Path, onDownload: () -> Unit = {}): Boolean =
+        when (val result = replaceAll(release, listOf(target), onDownload).single()) {
             is Replaced.Updated -> true
             is Replaced.AlreadyLatest -> false
             is Replaced.Failed -> throw IOException(result.reason, result.cause)
@@ -85,14 +85,14 @@ object Download {
      * has loaded it) fails alone; a failed download throws.
      */
     fun replaceAll(release: Release, targets: List<Path>, onDownload: () -> Unit = {}): List<Replaced> {
+        val hashes = targets.associateWith { hashOrNull(it) }
         val known = release.sha256
-        if (known != null && targets.all { hashOrNull(it) == known }) return targets.map { Replaced.AlreadyLatest(it) }
+        if (known != null && hashes.values.all { it == known }) return targets.map { Replaced.AlreadyLatest(it) }
         onDownload()
-        val dll = fetch(release)
+        val (dll, hash) = fetch(release)
         try {
-            val hash = sha256(dll)
             return targets.map { target ->
-                if (hashOrNull(target) == hash) {
+                if (hashes[target] == hash) {
                     Replaced.AlreadyLatest(target)
                 } else {
                     try {
@@ -108,8 +108,11 @@ object Download {
         }
     }
 
-    /** Downloads the release's DLL to a temporary file and checks it. The caller deletes the file. */
-    private fun fetch(release: Release): Path {
+    /**
+     * Downloads the release's DLL to a temporary file and checks it; the file and its SHA-256.
+     * The caller deletes the file.
+     */
+    private fun fetch(release: Release): Pair<Path, String> {
         val file = Files.createTempFile("reminedog-", ".dll")
         try {
             val connection = open(release.url)
@@ -117,8 +120,7 @@ object Download {
             val code = connection.responseCode
             if (code != 200) throw IOException("ダウンロードで HTTP $code が返りました")
             connection.inputStream.use { input -> Files.newOutputStream(file).use { input.copyTo(it) } }
-            check(release, file)
-            return file
+            return file to check(release, file)
         } catch (e: Exception) {
             Files.deleteIfExists(file)
             throw e
@@ -136,11 +138,7 @@ object Download {
                 throw IOException("${target.parent} に書き込めません（${e.reason ?: e.javaClass.simpleName}）", e)
             }
             try {
-                try {
-                    Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-                } catch (e: AtomicMoveNotSupportedException) {
-                    Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING)
-                }
+                moveReplacing(temp, target)
             } catch (e: FileSystemException) {
                 throw IOException("$target を置き換えられません。reminedog を読み込んだゲームが起動していたら閉じてください", e)
             }
@@ -159,12 +157,15 @@ object Download {
             null
         }
 
-    private fun check(release: Release, file: Path) {
+    /** Checks a downloaded DLL; its SHA-256. */
+    private fun check(release: Release, file: Path): String {
         val size = Files.size(file)
         if (size != release.size) throw IOException("ダウンロードが途中で切れました（$size / ${release.size} バイト）")
-        if (release.sha256 != null && release.sha256 != sha256(file)) throw IOException("ダウンロードした DLL のハッシュが合いません")
+        val hash = sha256(file)
+        if (release.sha256 != null && release.sha256 != hash) throw IOException("ダウンロードした DLL のハッシュが合いません")
         val head = Files.newInputStream(file).use { input -> ByteArray(2).also { if (input.read(it) != 2) it.fill(0) } }
         if (head[0] != 'M'.code.toByte() || head[1] != 'Z'.code.toByte()) throw IOException("ダウンロードしたファイルが DLL ではありません")
+        return hash
     }
 
     fun sha256(file: Path): String {
