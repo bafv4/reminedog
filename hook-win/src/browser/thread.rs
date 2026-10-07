@@ -146,6 +146,10 @@ fn run_commands(browser: &mut Browser, mailbox: &Mailbox) -> bool {
             Command::Eval(script, reply) => browser.eval(&script, move |json| {
                 let _ = reply.send(json.to_owned());
             }),
+            #[cfg(test)]
+            Command::IsMuted(reply) => {
+                let _ = reply.send(browser.is_muted());
+            }
         }
     }
     true

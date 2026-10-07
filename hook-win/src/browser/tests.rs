@@ -272,6 +272,12 @@ const AUDIO_PAGE: &str = "data:text/html,<body><script>\
     document.body.appendChild(a);\
     </script>";
 
+fn muted() -> bool {
+    let (tx, rx) = mpsc::channel();
+    send(Command::IsMuted(tx));
+    rx.recv_timeout(Duration::from_secs(10)).expect("no answer")
+}
+
 fn notices() -> Vec<String> {
     before_frame()
         .1
@@ -323,10 +329,13 @@ fn the_media_keys_play_seek_and_hiding_pauses() {
     wait_for("paused by hiding", Duration::from_secs(5), || {
         paused() == "true"
     });
+    // Players in frames of other sites are not paused, but muted.
+    assert!(muted());
     show(AUDIO_PAGE, data.path().to_path_buf());
     wait_for("playing again", Duration::from_secs(5), || {
         paused() == "false"
     });
+    assert!(!muted());
 
     send(Command::Media(MediaCommand::PlayPause));
     wait_for("paused", Duration::from_secs(5), || paused() == "true");

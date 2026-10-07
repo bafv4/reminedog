@@ -155,6 +155,9 @@ pub enum Command {
     /// Runs a script and sends back its value as JSON.
     #[cfg(test)]
     Eval(String, std::sync::mpsc::Sender<String>),
+    /// Sends back whether the page is muted.
+    #[cfg(test)]
+    IsMuted(std::sync::mpsc::Sender<bool>),
 }
 
 /// Commands for one browser thread.

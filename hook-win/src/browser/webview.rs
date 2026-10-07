@@ -15,11 +15,11 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_PERMISSION_STATE_DENY, COREWEBVIEW2_PROCESS_FAILED_KIND,
     COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED, COREWEBVIEW2_SCRIPT_DIALOG_KIND,
     COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT, COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD,
-    COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY, ICoreWebView2, ICoreWebView2_4, ICoreWebView2_10,
-    ICoreWebView2_18, ICoreWebView2CompositionController, ICoreWebView2Controller,
-    ICoreWebView2Controller2, ICoreWebView2Controller3, ICoreWebView2Environment,
-    ICoreWebView2Environment3, ICoreWebView2EnvironmentOptions, ICoreWebView2Settings3,
-    ICoreWebView2Settings4, ICoreWebView2Settings5, ICoreWebView2Settings6,
+    COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY, ICoreWebView2, ICoreWebView2_4, ICoreWebView2_8,
+    ICoreWebView2_10, ICoreWebView2_18, ICoreWebView2CompositionController,
+    ICoreWebView2Controller, ICoreWebView2Controller2, ICoreWebView2Controller3,
+    ICoreWebView2Environment, ICoreWebView2Environment3, ICoreWebView2EnvironmentOptions,
+    ICoreWebView2Settings3, ICoreWebView2Settings4, ICoreWebView2Settings5, ICoreWebView2Settings6,
 };
 use webview2_com::{
     AddScriptToExecuteOnDocumentCreatedCompletedHandler, BasicAuthenticationRequestedEventHandler,
@@ -155,6 +155,7 @@ impl Browser {
         }
         self.shown = true;
         self.apply_layout(true);
+        self.set_muted(false);
         self.media(MediaCommand::Resume);
     }
 
@@ -164,11 +165,36 @@ impl Browser {
         }
         self.shown = false;
         self.media(MediaCommand::PauseAll);
+        self.set_muted(true);
         self.capture.stop();
         // SAFETY: on the browser thread.
         if let Err(e) = unsafe { self.controller.SetIsVisible(false) } {
             log::debug!("browser: hiding failed: {e}");
         }
+    }
+
+    /// Mutes the page while it is hidden: the pause only reaches the page's own players, not
+    /// those in its frames (a video embedded from another site), which play on unheard.
+    fn set_muted(&self, muted: bool) {
+        // SAFETY: on the browser thread.
+        let result = self
+            .webview
+            .cast::<ICoreWebView2_8>()
+            .and_then(|webview| unsafe { webview.SetIsMuted(muted) });
+        if let Err(e) = result {
+            log::debug!("browser: muting failed: {e}");
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_muted(&self) -> bool {
+        let mut muted = BOOL::default();
+        // SAFETY: on the browser thread; a valid out parameter.
+        let _ = self
+            .webview
+            .cast::<ICoreWebView2_8>()
+            .and_then(|webview| unsafe { webview.IsMuted(&mut muted) });
+        muted.as_bool()
     }
 
     pub(super) fn set_layout(&mut self, layout: PageLayout) {
