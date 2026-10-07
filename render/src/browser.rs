@@ -397,7 +397,12 @@ fn browser_window(
         }
         menu.placing = PLACING_TRIES;
     }
-    let size = page_rect.size();
+    // The window moves the page; its size is the settings' (the corner may have just
+    // changed it).
+    let size = match settings.browser_rect {
+        Some([_, _, w, h]) => vec2(w, h),
+        None => page_rect.size(),
+    };
     let placed = [page_rect.min.x, page_rect.min.y, size.x, size.y];
     let moved = settings.browser_rect.is_none_or(|old| {
         old.iter()
@@ -1103,6 +1108,32 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         }
+    }
+
+    #[test]
+    fn the_corner_resizes_the_page() {
+        let ctx = egui::Context::default();
+        let mut menu = BrowserMenu::default();
+        let mut settings = Settings {
+            browser_rect: Some([300.0, 200.0, 400.0, 225.0]),
+            ..Settings::default()
+        };
+        let view = ready();
+        run(&ctx, &mut menu, &mut settings, &view, Vec::new());
+        let [x, y, w, h] = settings.browser_rect.unwrap();
+        let grip = pos2(x + w - 8.0, y + h - 8.0);
+        let end = grip + vec2(80.0, 50.0);
+        for events in [
+            vec![Event::PointerMoved(grip)],
+            vec![primary(grip, true)],
+            vec![Event::PointerMoved(end)],
+            vec![primary(end, false)],
+        ] {
+            frame(&ctx, &mut menu, &mut settings, &view, true, events);
+        }
+        let [x2, y2, w2, h2] = settings.browser_rect.unwrap();
+        assert_eq!([x2, y2], [x, y], "the page stays where it was");
+        assert!(w2 > w + 40.0 && h2 > h + 20.0, "{w2}x{h2}");
     }
 
     #[test]
