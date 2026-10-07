@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use reminedog_render::BrowserState;
+use windows::System::DispatcherQueueController;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -15,10 +16,11 @@ use windows::Win32::System::WinRT::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG,
-    RegisterClassExW, TranslateMessage, WINDOW_EX_STYLE, WNDCLASSEXW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    PostThreadMessageW, RegisterClassExW, TranslateMessage, WINDOW_EX_STYLE, WM_QUIT, WNDCLASSEXW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows_core::w;
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 use super::webview::Browser;
 use super::{Command, Mailbox, Start, WM_APP_COMMAND, WM_APP_FRAME, report, thread_ended};
@@ -56,25 +58,53 @@ fn run_in_apartment(generation: u64, mailbox: &Mailbox, start: Start) -> Browser
         threadType: DQTYPE_THREAD_CURRENT,
         apartmentType: DQTAT_COM_STA,
     };
-    // SAFETY: plain call; the controller lives until the end of the thread.
-    let _queue = match unsafe { CreateDispatcherQueueController(options) } {
+    // SAFETY: plain call; the queue is shut down below.
+    let queue = match unsafe { CreateDispatcherQueueController(options) } {
         Ok(queue) => queue,
         Err(e) => {
             log::error!("browser: CreateDispatcherQueueController failed: {e}");
             return BrowserState::Failed("ブラウザを起動できません".into());
         }
     };
-    let window = match host_window() {
-        Ok(window) => window,
+    let status = match host_window() {
+        Ok(window) => {
+            let status = run_with_window(generation, mailbox, start, window);
+            // SAFETY: our own window, on its thread.
+            let _ = unsafe { DestroyWindow(window) };
+            status
+        }
         Err(e) => {
             log::error!("browser: cannot create its window: {e}");
-            return BrowserState::Failed("ブラウザを起動できません".into());
+            BrowserState::Failed("ブラウザを起動できません".into())
         }
     };
-    let status = run_with_window(generation, mailbox, start, window);
-    // SAFETY: our own window, on its thread.
-    let _ = unsafe { DestroyWindow(window) };
+    shut_down(&queue);
     status
+}
+
+/// Shuts down the thread's DispatcherQueue, running this thread's messages until it is done:
+/// the thread that made it must, before it ends.
+fn shut_down(queue: &DispatcherQueueController) {
+    // SAFETY: plain call.
+    let thread = unsafe { GetCurrentThreadId() };
+    let quit_when_done = queue.ShutdownQueueAsync().and_then(|shutdown| {
+        shutdown.when(move |_| {
+            // SAFETY: plain call; ends the loop below.
+            let _ = unsafe { PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0)) };
+        })
+    });
+    if let Err(e) = quit_when_done {
+        log::warn!("browser: shutting down its DispatcherQueue failed: {e}");
+        return;
+    }
+    let mut msg = MSG::default();
+    // SAFETY: a valid out parameter; the messages are dispatched as they come.
+    while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
+        unsafe {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
 }
 
 fn run_with_window(generation: u64, mailbox: &Mailbox, start: Start, window: HWND) -> BrowserState {
