@@ -703,9 +703,12 @@ Java 18 以降向けの修正は 2024-07 に master に入ったが、リリー�
 - **ゲーム中の PageUp／PageDown は、ページの中央でホイールを 1 画面ぶん（高さの 7/8。Chromium のページ送りと同じ）回す。**
   CDP の PageDown キーは、ページを一度クリックするまで効かない（どのフレームにもフォーカスがない。`document.hasFocus()` は true でも）。`window.focus()` を流すと効くようになるが、ホストのウィンドウを前に出そうとするおそれがある（確かめていない）ので使わない。ホイールはフォーカスがなくても効く
 - 動画は `ExecuteScript` で操作する：再生中の `video`／`audio`、なければ表示されている（大きさのある）一番大きいもの。Wikipedia などは見えない再生器を置いているので、大きさのないものは選ばない。
-  非表示にするときは再生中のものをすべて止めて覚え（`window.__reminedogPaused`）、表示し直すときに再開する。自動再生の制限は `--autoplay-policy=no-user-gesture-required` で外す（ホットキーはページから見るとユーザーの操作ではない）
+  非表示にするときは再生中のものをすべて止めて覚え（`window.__reminedogPaused`）、表示し直すときに再開する。自動再生の制限は `--autoplay-policy=no-user-gesture-required` で外す（ホットキーはページから見るとユーザーの操作ではない）。
+  JS はトップのフレームでしか動かないので、iframe の中の再生器（記事に埋め込まれた YouTube など）は止まらない。そのため非表示の間は WebView2 ごとミュートする（`ICoreWebView2_8::SetIsMuted`。再生は続く）
 - **ゲームの前に別のウィンドウを出さない**：右クリックメニュー・開発者ツール・ステータスバー・既定のダイアログ・ブラウザのショートカット・パスワードと自動入力・ピンチとスワイプを無効にし、`window.print` は文書の作成時に空の関数にする。
-  `NewWindowRequested` は Handled にして同じビューで開く。`LaunchingExternalUriScheme`（`mailto:` など）・ダウンロード（通知を出す）・権限の要求・Basic 認証は取り消す。ダイアログは alert と「ページを離れますか」だけ Accept し、ほかは取り消し（confirm は false）。ホストオブジェクトと Web メッセージも無効
+  `NewWindowRequested` は Handled にして同じビューで開く。`LaunchingExternalUriScheme`（`mailto:` など）・ダウンロード（通知を出す）・権限の要求・Basic 認証は取り消す。ダイアログは alert と「ページを離れますか」だけ Accept し、ほかは取り消し（confirm は false）。ホストオブジェクトと Web メッセージも無効。
+  ファイルの選択（`<input type="file">`）は CDP の `Page.setInterceptFileChooserDialog`（`cancel: true`）で取り消す（ページには利用者が閉じたように見える）。`Page.enable` を先に呼ばないと効かない。
+  止めないと、「開く」のダイアログがゲームと同じプロセスのブラウザのスレッドで開き、ゲームの前に出るうえ、閉じるまでスレッドが止まる（テストで確かめた。既定のダイアログの設定は alert などだけが対象）
 - ユーザーデータ（クッキー、ログイン）は `%LOCALAPPDATA%\reminedog\WebView2`（なければ `<ゲームフォルダ>/reminedog/WebView2`）。すべてのインスタンスで共有する。同じ引数の WebView2 なら、2 つのゲームから同時に使ってもブラウザのプロセスを共有する
 - 親のウィンドウ：visual hosting は `HWND_MESSAGE` を受け付けないので、表示しない WS_POPUP（WS_EX_TOOLWINDOW・WS_EX_NOACTIVATE）を作る。隠れたウィンドウだと Chromium が描画を止めるのではと心配したが、`--disable-features=CalculateNativeWinOcclusion` を付けて、テストでは絵が届いた
 - URL はログに出さない（クエリにトークンが入りうる）。`=log=debug` でホスト名だけ
@@ -716,13 +719,17 @@ Java 18 以降向けの修正は 2024-07 に master に入ったが、リリー�
 - `render/src/browser.rs`：`BrowserView`（hook から）／`BrowserCommand`（hook へ）。メニューを開いているときの `egui::Window`（タイトル、⏴⏵⟳、アドレス欄、ページ、右下のつまみ）と、閉じているときの `Order::Background` の絵、メニューの欄、egui のキー → Windows の仮想キーと DOM の `code`／`key` の表。
   - 位置と大きさは settings の `browser_rect`（ページの部分、point）。窓は `auto_sized` で、ページの大きさは自分で決める（右下のつまみ）。窓が現れたとき（メニューを開いたとき、メニューを開いたまま表示したとき）は、ページが `browser_rect` に来るように窓を置く（窓の角からページまでのずれは描いてから測るので、合うまで最大 3 フレーム置き直す）
   - egui 0.36 の窓は、タイトルバーでドラッグする設定だと、`current_pos` より覚えている位置を優先する（`pivot_pos_before_begin`）ので、`WindowDrag::Anywhere` にしている（ページとつまみは自分のドラッグを取るので、動かせるのはタイトルと上の欄の空いたところ）
-  - ページの大きさ（画素・倍率・拡大率）は、変わったときに 0.1 秒に 1 回まで `Layout` で送る
+  - ページの大きさ（画素・倍率・拡大率）は、変わったときに 0.1 秒に 1 回まで `Layout` で送る。窓から settings に書き戻すのはページの位置だけで、大きさはつまみが書いたもの（同じフレームで古い大きさに戻さない）
+  - ページで押したボタンとキーは覚えておき、窓が消えたとき（メニューを閉じた、非表示にした）に離す（`mouseReleased`・`keyUp` を送る）。キーはページがフォーカスを失ったときにも離す。その後に届く本当の解放はゲームのもの
+  - ページの URL は settings の `browser_url` に書く。メニューを閉じている間に変わったもの（ページの移動）も、ほかの変更と同じく 1 秒置いてから保存する（メニューで変えたものは、メニューを閉じたときにすぐ保存する）
 - `render/src/input.rs`：`BrowserAction` と専用のキュー（`take_browser_actions`）。表示切替は「ゲーム中」だけ、ほかは「ゲーム中かつブラウザを表示中」（`set_browser_shown`）だけ取る。F3 の規則はほかのホットキーと同じ。スクロールと秒送りはリピートでも繰り返す
 - `render/src/overlay.rs`：ブラウザのキーは割り当てなし（`Option<Hotkey>`、settings では空文字列）を持てる。重なりの判定は割り当てのあるものだけで、照合の順は「現在地を更新」の後、ズームの前。メニューの「キー」の表は今までの 4 つ、ブラウザの 6 つは「ブラウザ」の欄の表（「外す」付き）。「キーを元に戻す」はそれぞれの表の分だけ戻す
 - `hook-win/src/browser.rs`：ゲームのスレッドから使う部分。`CONTROL`（世代、メールボックス、表示中か、ページの大きさ）・`SHARED`（状態、URL、タイトル、通知）・`FRAME`（最新の絵）。どれも末端のロック。
   表示で起動し（世代を 1 つ進める）、終了でメールボックスを捨てる。古い世代のスレッドは `SHARED`／`FRAME` に書かない。`frame.rs` は `FRAME` を `try_lock` して、取れたフレームだけ絵を上げる（ブラウザのスレッドが書いている最中なら前の絵のまま）
-- `hook-win/src/browser/thread.rs`：STA、`CreateDispatcherQueueController`、親のウィンドウ、`GetMessageW` のループ。`WM_APP+1` でメールボックスのコマンド、`WM_APP+2` で取り込んだ絵を処理する。WebView2 を作る間（`wait_with_pump` がメッセージを回す）に来たコマンドは、作り終えてから実行する
-- `hook-win/src/browser/webview.rs`：WebView2 の作成、設定、イベント、コマンド。`hook-win/src/browser/capture.rs`：D3D11 と取り込み。大きさが変わったら取り込みを作り直す。`SetMinUpdateInterval` で 60 fps まで（Windows 11 24H2 より前は効かない）
+- `hook-win/src/browser/thread.rs`：STA、`CreateDispatcherQueueController`、親のウィンドウ、`GetMessageW` のループ。`WM_APP+1` でメールボックスのコマンド、`WM_APP+2` で取り込んだ絵を処理する。WebView2 を作る間（`wait_with_pump` がメッセージを回す）に来たコマンドは、作り終えてから実行する。
+  終わるときは、DispatcherQueue を `ShutdownQueueAsync` で止め、終わるまでメッセージを回してから COM を閉じる（`DQTYPE_THREAD_CURRENT` で作ったスレッドがすること）
+- `hook-win/src/browser/webview.rs`：WebView2 の作成、設定、イベント、コマンド。`hook-win/src/browser/capture.rs`：D3D11 と取り込み。大きさが変わったら取り込みを作り直す。`SetMinUpdateInterval` で 60 fps まで（Windows 11 24H2 より前は効かない）。
+  絵はステージングテクスチャから自分のバッファに写し、`FRAME` のバッファと入れ替える（`FRAME` のロックを持つのは入れ替えの間だけ。ゲームのスレッドの `try_lock` が外れにくい）
 
 ### GNU のビルド
 
@@ -742,12 +749,19 @@ MSVC のリリースビルドの依存は `dumpbin /dependents` で確かめた�
   ページの検索ボタンのクリック・文字の入力（候補が出る）・Enter で検索。その間ずっと `GetForegroundWindow` はゲームのウィンドウのまま
 - render の単体テスト：既定の位置、画面に収める、ページの大きさを送る間隔、メニューの開閉で位置がずれない、メニューを開いたまま表示しても既定の位置に出る、クリック・ホイール・キー・文字の変換（CSS ピクセル）、アドレス欄の Enter。ルーターとキーの割り当てのテスト
 
+### 確かめたこと（2026-10-08、Windows）
+
+調査（`docs/BROWSER_AUDIT.md`）で見つかった問題を直し、テストで確かめた。
+
+- WebView2 を動かすテスト（4 件）：ファイルの入力欄を押しても「開く」のダイアログが出ず、ページに `cancel` が届く（直す前は、同じプロセスにダイアログが出てスレッドが止まった）。非表示でミュートし、表示でミュートを外す。終了で DispatcherQueue の終了が最後まで進む（一時的にログを出して確かめた）
+- render の単体テスト：つまみで大きさを変えると settings に新しい大きさが残る、ページでボタンとキーを押したままメニューを閉じると離す、ページの外を押してフォーカスが外れるとキーを離す（どれも直す前のコードでは落ちる）
+
 ### 確かめていないこと
 
 - 実機（1.21.11 の全画面＋Sodium、26.3 の SDL3）。特に、全画面でページを操作してもゲームがフォーカスを失わないこと、fps への影響。`docs/TESTING.md` の「ブラウザで確認すること」
 - 動画（YouTube）の再生と、そのときの CPU／GPU の負担（毎フレームの CPU へのコピーとアップロード）
 - `<select>` の候補や日付の選択など、ページの外に出るポップアップ（visual に描かれない可能性がある）。IME の変換中の文字（出ない）
-- iframe の中の動画のキー操作（JS はトップのフレームだけ。記事に埋め込まれた YouTube はクリックでしか操作できない）
+- iframe の中の動画のキー操作（JS はトップのフレームだけ。記事に埋め込まれた YouTube はクリックでしか操作できない）。非表示ではミュートするだけで、再生は続く
 - WebView2 ランタイムのない環境での表示（「WebView2 ランタイムが見つかりません」と出るはず）、ブラウザのプロセスが落ちたとき
 - GNU のビルドの clippy（手元に MinGW がない。CI で見る）
 
