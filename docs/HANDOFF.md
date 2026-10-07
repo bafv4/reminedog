@@ -677,3 +677,76 @@ Java 18 以降向けの修正は 2024-07 に master に入ったが、リリー�
 
 - 26.3 での見た目（ズームの判定の変え方は GLFW と共通で、SDL3 のスモークでは確かめた）
 - Sodium のほかの描画の変更とズームの組み合わせ（今回の原因は viewport の省略だけで説明がつき、スモークで再現・修正を確かめた）
+
+## 追記：ゲーム内ブラウザ（2026-10-07）
+
+記事や動画を見ながら遊べるように、ゲームの画面の上にウェブページを小さく表示する（ピクチャインピクチャ）。
+メニューを開いている間だけ、窓を動かし、大きさを変え、ページをマウスとキーボードで操作できる。閉じている間は表示だけで、ゲーム中に PageUp／PageDown でスクロール、↓ で再生／一時停止、←／→ で 10 秒戻す／進める（利用者が決めた既定。表示／非表示のキーは既定なし、非表示にすると動画を一時停止する）。
+
+### 方式
+
+**WebView2（Microsoft Edge）を画面に出さずに描かせ、その絵をテクスチャにしてオーバーレイに貼る。**
+
+- `CreateCoreWebView2CompositionController`（visual hosting）で作り、`RootVisualTarget` に Windows.UI.Composition の `ContainerVisual` を渡す。その visual を `GraphicsCaptureItem::CreateFromVisual` と `Direct3D11CaptureFramePool` で取り込み（[pabloko の gist](https://gist.github.com/pabloko/5b5bfb71ac52d20dfad714c666a0c428) と同じ）、D3D11 のステージングテクスチャから CPU のバッファに写す。
+  ゲームのスレッドは、新しい絵があればスワップのときに自前の GL コンテキストで `glTexSubImage2D`（BGRA）し、egui の `register_native_texture` で描く。egui_glow 0.36.2 は自前のテクスチャも sRGB ではない `RGBA8` として扱うので、色はそのまま合う
+- 採らなかった案：
+  - 別のウィンドウを重ねる：全画面では重ねられず（上の「採用しなかった案」）、フォーカスも奪う
+  - CEF：配布が 200 MB 前後になり、標準のビルドは H.264／AAC を再生できない（ニコニコ動画など）。WebView2 は Windows 11 に入っていて、コーデックもある
+  - CDP の `Page.startScreencast`・`CapturePreview`：JPEG／PNG を経由するので動画には重い
+  - GL と D3D の共有（`WGL_NV_DX_interop2`）：CPU を経由しないが、スレッドとドライバーの条件が増える。重ければ後で替える
+- **ページへの入力は CDP（`CallDevToolsProtocolMethod` の `Input.dispatchMouseEvent`・`Input.dispatchKeyEvent`・`Input.insertText`）で送る。**
+  visual hosting の `SendMouseInput` は、WebView2 の内部のウィンドウが OS のフォーカスを取るという報告がある（全画面のゲームは最小化される）。CDP なら OS のフォーカスに触れない。`Emulation.setFocusEmulationEnabled` でページにはフォーカスがあると思わせる（キャレットやフォーカスの見た目のため）
+- 座標：`BoundsMode` を生の画素、`RasterizationScale` をオーバーレイの倍率（`content_scale × scale=`）にするので、拡大率 100 % では CSS の 1 px が egui の 1 point。ページの拡大率は `ZoomFactor`。
+  CDP のマウスの座標はページの CSS ピクセル（拡大率をかけた後）なので、egui の座標を拡大率で割って送る（テストで確かめた：拡大率 1.5 でも、送った座標がそのまま `clientX/Y` になる）
+- キーは Windows のメッセージと同じ順に送る：`Event::Key` を `rawKeyDown`／`keyUp`、続く `Event::Text` を 1 文字なら `char`、それ以上（IME の確定）なら `insertText`。
+  Enter は文字（`\r`）で動くが、ルーターは制御文字を文字として渡さないので、Enter だけ `keyDown` に `text: "\r"` を付ける。Ctrl+C／V はページが OS のクリップボードを使う。Esc はルーターがメニューを閉じるのに使うので、ページには届かない
+- **ゲーム中の PageUp／PageDown は、ページの中央でホイールを 1 画面ぶん（高さの 7/8。Chromium のページ送りと同じ）回す。**
+  CDP の PageDown キーは、ページを一度クリックするまで効かない（どのフレームにもフォーカスがない。`document.hasFocus()` は true でも）。`window.focus()` を流すと効くようになるが、ホストのウィンドウを前に出そうとするおそれがある（確かめていない）ので使わない。ホイールはフォーカスがなくても効く
+- 動画は `ExecuteScript` で操作する：再生中の `video`／`audio`、なければ表示されている（大きさのある）一番大きいもの。Wikipedia などは見えない再生器を置いているので、大きさのないものは選ばない。
+  非表示にするときは再生中のものをすべて止めて覚え（`window.__reminedogPaused`）、表示し直すときに再開する。自動再生の制限は `--autoplay-policy=no-user-gesture-required` で外す（ホットキーはページから見るとユーザーの操作ではない）
+- **ゲームの前に別のウィンドウを出さない**：右クリックメニュー・開発者ツール・ステータスバー・既定のダイアログ・ブラウザのショートカット・パスワードと自動入力・ピンチとスワイプを無効にし、`window.print` は文書の作成時に空の関数にする。
+  `NewWindowRequested` は Handled にして同じビューで開く。`LaunchingExternalUriScheme`（`mailto:` など）・ダウンロード（通知を出す）・権限の要求・Basic 認証は取り消す。ダイアログは alert と「ページを離れますか」だけ Accept し、ほかは取り消し（confirm は false）。ホストオブジェクトと Web メッセージも無効
+- ユーザーデータ（クッキー、ログイン）は `%LOCALAPPDATA%\reminedog\WebView2`（なければ `<ゲームフォルダ>/reminedog/WebView2`）。すべてのインスタンスで共有する。同じ引数の WebView2 なら、2 つのゲームから同時に使ってもブラウザのプロセスを共有する
+- 親のウィンドウ：visual hosting は `HWND_MESSAGE` を受け付けないので、表示しない WS_POPUP（WS_EX_TOOLWINDOW・WS_EX_NOACTIVATE）を作る。隠れたウィンドウだと Chromium が描画を止めるのではと心配したが、`--disable-features=CalculateNativeWinOcclusion` を付けて、テストでは絵が届いた
+- URL はログに出さない（クエリにトークンが入りうる）。`=log=debug` でホスト名だけ
+
+### 構成
+
+- `core/src/browser.rs`：`PageInput`（マウス・ホイール・キー・文字）と CDP の JSON、アドレス欄の文字の URL への変換（スキームがなければ `https://`、ローカルは `http://`、ドメインでない言葉は Google の検索。`1.21` のような数字は検索）、動画の JS と通知の文言
+- `render/src/browser.rs`：`BrowserView`（hook から）／`BrowserCommand`（hook へ）。メニューを開いているときの `egui::Window`（タイトル、⏴⏵⟳、アドレス欄、ページ、右下のつまみ）と、閉じているときの `Order::Background` の絵、メニューの欄、egui のキー → Windows の仮想キーと DOM の `code`／`key` の表。
+  - 位置と大きさは settings の `browser_rect`（ページの部分、point）。窓は `auto_sized` で、ページの大きさは自分で決める（右下のつまみ）。窓が現れたとき（メニューを開いたとき、メニューを開いたまま表示したとき）は、ページが `browser_rect` に来るように窓を置く（窓の角からページまでのずれは描いてから測るので、合うまで最大 3 フレーム置き直す）
+  - egui 0.36 の窓は、タイトルバーでドラッグする設定だと、`current_pos` より覚えている位置を優先する（`pivot_pos_before_begin`）ので、`WindowDrag::Anywhere` にしている（ページとつまみは自分のドラッグを取るので、動かせるのはタイトルと上の欄の空いたところ）
+  - ページの大きさ（画素・倍率・拡大率）は、変わったときに 0.1 秒に 1 回まで `Layout` で送る
+- `render/src/input.rs`：`BrowserAction` と専用のキュー（`take_browser_actions`）。表示切替は「ゲーム中」だけ、ほかは「ゲーム中かつブラウザを表示中」（`set_browser_shown`）だけ取る。F3 の規則はほかのホットキーと同じ。スクロールと秒送りはリピートでも繰り返す
+- `render/src/overlay.rs`：ブラウザのキーは割り当てなし（`Option<Hotkey>`、settings では空文字列）を持てる。重なりの判定は割り当てのあるものだけで、照合の順は「現在地を更新」の後、ズームの前。メニューの「キー」の表は今までの 4 つ、ブラウザの 6 つは「ブラウザ」の欄の表（「外す」付き）。「キーを元に戻す」はそれぞれの表の分だけ戻す
+- `hook-win/src/browser.rs`：ゲームのスレッドから使う部分。`CONTROL`（世代、メールボックス、表示中か、ページの大きさ）・`SHARED`（状態、URL、タイトル、通知）・`FRAME`（最新の絵）。どれも末端のロック。
+  表示で起動し（世代を 1 つ進める）、終了でメールボックスを捨てる。古い世代のスレッドは `SHARED`／`FRAME` に書かない。`frame.rs` は `FRAME` を `try_lock` して、取れたフレームだけ絵を上げる（ブラウザのスレッドが書いている最中なら前の絵のまま）
+- `hook-win/src/browser/thread.rs`：STA、`CreateDispatcherQueueController`、親のウィンドウ、`GetMessageW` のループ。`WM_APP+1` でメールボックスのコマンド、`WM_APP+2` で取り込んだ絵を処理する。WebView2 を作る間（`wait_with_pump` がメッセージを回す）に来たコマンドは、作り終えてから実行する
+- `hook-win/src/browser/webview.rs`：WebView2 の作成、設定、イベント、コマンド。`hook-win/src/browser/capture.rs`：D3D11 と取り込み。大きさが変わったら取り込みを作り直す。`SetMinUpdateInterval` で 60 fps まで（Windows 11 24H2 より前は効かない）
+
+### GNU のビルド
+
+ブラウザのスレッドは Direct3D 11・WinRT・COM（`d3d11`、`CoreMessaging`、`combase`、`api-ms-win-core-winrt-l1-1-0`、`ole32`、`oleaut32`）を読み込み時に import する（windows クレートは raw-dylib）。
+Wine にそろっているか分からず、1 つでも欠けると DLL が読み込めず、JVM が起動をやめる。そのため GNU のビルド（Wine 用）では `thread`・`webview`・`capture` を外し、表示すると「この DLL（GNU でビルドしたもの）ではブラウザを使えません」と出す。
+また webview2-com-sys は GNU では `WebView2Loader.dll` を import する（MSVC では `WebView2LoaderStatic.lib` を静的にリンクする。この lib は CRT を指定していないので `+crt-static` と両立する）。
+MSVC のリリースビルドの依存は `dumpbin /dependents` で確かめた（vcruntime などはない）。
+これらは読み込み時に解決されるので、`CreateDispatcherQueueController` のない古い Windows 10（1709 より前と思われる。確かめていない）では DLL ごと読み込めなくなる。遅延読み込み（`/DELAYLOAD`）にすれば避けられるが、失敗すると例外になるので今はしていない
+
+### 確かめたこと（2026-10-07、Windows）
+
+- WebView2 を実際に動かすテスト（`cargo test -p reminedog-hook-win browser -- --ignored --test-threads=1`。3 件、3 回とも通る）：
+  赤いページの絵が届く、クリックの座標（拡大率 1.0・1.5、倍率 2.0 で `innerWidth` も）、入力欄への文字（1 文字ずつと IME の文字列）、クリックした後の PageDown のキー、`target=_blank` のリンクが同じビューで開く、非表示の間は絵が来ず表示し直すと来る、
+  クリックしていないページで PageDown のキーは効かず、ホイールのスクロールは効く（7/8 ページ）、音声の再生／一時停止・秒送り・非表示での一時停止と再開・通知の文言、見えない video を選ばない
+- 手元のスモーク（GLFW、854×480、表示スケール 125 %、`PostMessage` でキーとマウス。ナビゲーションのキーには拡張キーの印が要る）：
+  B（`browser_toggle_key`）で右上に Wikipedia が出る、PageDown でスクロール、↓ で通知、メニューを開くと窓のページがメニューを閉じていたときと同じ位置、メニューから「表示する」で右上に出る、
+  ページの検索ボタンのクリック・文字の入力（候補が出る）・Enter で検索。その間ずっと `GetForegroundWindow` はゲームのウィンドウのまま
+- render の単体テスト：既定の位置、画面に収める、ページの大きさを送る間隔、メニューの開閉で位置がずれない、メニューを開いたまま表示しても既定の位置に出る、クリック・ホイール・キー・文字の変換（CSS ピクセル）、アドレス欄の Enter。ルーターとキーの割り当てのテスト
+
+### 確かめていないこと
+
+- 実機（1.21.11 の全画面＋Sodium、26.3 の SDL3）。特に、全画面でページを操作してもゲームがフォーカスを失わないこと、fps への影響。`docs/TESTING.md` の「ブラウザで確認すること」
+- 動画（YouTube）の再生と、そのときの CPU／GPU の負担（毎フレームの CPU へのコピーとアップロード）
+- `<select>` の候補や日付の選択など、ページの外に出るポップアップ（visual に描かれない可能性がある）。IME の変換中の文字（出ない）
+- iframe の中の動画のキー操作（JS はトップのフレームだけ。記事に埋め込まれた YouTube はクリックでしか操作できない）
+- WebView2 ランタイムのない環境での表示（「WebView2 ランタイムが見つかりません」と出るはず）、ブラウザのプロセスが落ちたとき
+- GNU のビルドの clippy（手元に MinGW がない。CI で見る）
