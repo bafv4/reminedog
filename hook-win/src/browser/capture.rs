@@ -45,6 +45,9 @@ pub(super) struct Capture {
     pub(super) root: ContainerVisual,
     session: Option<Session>,
     staging: Option<Staging>,
+    /// The picture being copied out of the staging texture; swapped with [`FRAME`]'s, so the
+    /// game's thread never waits for the copy.
+    back: Vec<u8>,
     /// Which browser the pictures belong to ([`super::FrameSlot::generation`]).
     generation: u64,
     /// The thread's window, woken with [`WM_APP_FRAME`] when a picture arrives.
@@ -111,6 +114,7 @@ impl Capture {
             root,
             session: None,
             staging: None,
+            back: Vec::new(),
             generation,
             window: window.0 as usize,
             frames: 0,
@@ -207,24 +211,25 @@ impl Capture {
         }
         let pitch = mapped.RowPitch as usize;
         let row = width as usize * 4;
+        self.back.resize(row * height as usize, 0);
+        for (y, dst) in self.back.chunks_exact_mut(row).enumerate() {
+            // SAFETY: the mapping holds `RowPitch` bytes for each of the texture's rows, and a
+            // row of `width` pixels fits in one.
+            let src = unsafe {
+                std::slice::from_raw_parts(mapped.pData.cast::<u8>().add(y * pitch), row)
+            };
+            dst.copy_from_slice(src);
+        }
+        // SAFETY: mapped above.
+        unsafe { self.context.Unmap(&staging, 0) };
         {
             let mut slot = lock(&FRAME);
             if slot.generation == self.generation {
-                slot.bgra.resize(row * height as usize, 0);
-                for y in 0..height as usize {
-                    // SAFETY: the mapping holds `RowPitch` bytes for each of the texture's rows,
-                    // and a row of `width` pixels fits in one.
-                    let src = unsafe {
-                        std::slice::from_raw_parts(mapped.pData.cast::<u8>().add(y * pitch), row)
-                    };
-                    slot.bgra[y * row..(y + 1) * row].copy_from_slice(src);
-                }
+                std::mem::swap(&mut slot.bgra, &mut self.back);
                 slot.size = [width, height];
                 slot.seq += 1;
             }
         }
-        // SAFETY: mapped above.
-        unsafe { self.context.Unmap(&staging, 0) };
         self.frames += 1;
         if self.frames == 1 {
             let ms = self.started.map_or(0, |t| t.elapsed().as_millis());
