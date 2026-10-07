@@ -1,0 +1,149 @@
+name: Release
+
+# Run by hand from the Actions tab with a version. Builds the DLL and the installer with that
+# version in their names and inside them (the DLL's version resource and log, the installer's
+# manifest and window title), and creates a draft release v<version> on the commit it ran on.
+# Publishing the draft (on GitHub) creates the tag. The version numbers in the repository
+# (Cargo.toml) are not changed.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version, e.g. 1.2.0 or 1.2.0-beta.1 (the release is v<version>)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  check:
+    name: Check the version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the version and that it is not released yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$VERSION' is not a version like 1.2.0 or 1.2.0-beta.1"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" > /dev/null; then
+            echo "::error::the tag v$VERSION exists already"
+            exit 1
+          fi
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            echo "::error::a release v$VERSION exists already (maybe a draft)"
+            exit 1
+          fi
+
+  dll:
+    name: DLL (MSVC)
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Build agent DLL
+        env:
+          REMINEDOG_VERSION: ${{ env.VERSION }}
+          REMINEDOG_BUILD_ID: ${{ github.sha }}
+        run: cargo build --release -p reminedog-hook-win
+      - name: Check DLL exports, CRT linkage and version resource
+        run: ./ci/check-dll.ps1 -Dll target/release/reminedog.dll -Version $env:VERSION
+
+      - name: Stage files
+        run: |
+          $dist = Join-Path $env:RUNNER_TEMP dist
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item target\release\reminedog.dll (Join-Path $dist "reminedog-$env:VERSION.dll")
+          Copy-Item target\release\reminedog.pdb (Join-Path $dist "reminedog-$env:VERSION.pdb")
+          Get-ChildItem $dist | ForEach-Object Name
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dll
+          path: ${{ runner.temp }}/dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  installer:
+    name: Installer
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: installer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - name: Build and test
+        # Through sh: a commit from Windows may not carry gradlew's executable bit.
+        run: sh ./gradlew build --no-daemon "-PreminedogVersion=$VERSION"
+      - name: Check the jar's version
+        run: |
+          jar="build/libs/reminedog-installer-$VERSION.jar"
+          unzip -p "$jar" META-INF/MANIFEST.MF | tr -d '\r' | grep -Fx "Implementation-Version: $VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: installer/build/libs/reminedog-installer-${{ env.VERSION }}.jar
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Draft release
+    needs: [dll, installer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          # A version like 1.2.0-beta.1 is a pre-release, which the installer's "latest" skips.
+          prerelease=()
+          if [[ "$VERSION" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft "${prerelease[@]}" \
+            --target "$GITHUB_SHA" \
+            --title "reminedog $VERSION" \
+            --generate-notes \
+            "dist/reminedog-$VERSION.dll" \
+            "dist/reminedog-$VERSION.pdb" \
+            "dist/reminedog-installer-$VERSION.jar"
+          echo "Draft: $(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json url --jq .url)" >> "$GITHUB_STEP_SUMMARY"

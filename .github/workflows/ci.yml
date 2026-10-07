@@ -94,25 +94,8 @@ jobs:
           REMINEDOG_BUILD_ID: ${{ github.sha }}
         run: cargo build --release -p reminedog-hook-win
 
-      - name: Check DLL exports and CRT linkage
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
-          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
-          $dll = 'target\release\reminedog.dll'
-
-          $exports = & $dumpbin /nologo /exports $dll
-          if ($LASTEXITCODE -ne 0) { throw "dumpbin /exports failed ($LASTEXITCODE)" }
-          $exports
-          if (-not ($exports -match '\sAgent_OnLoad(\s|$)')) { throw "$dll does not export Agent_OnLoad" }
-
-          # Java 8 ships no vcruntime140.dll, so the CRT must be linked statically (.cargo/config.toml).
-          $deps = & $dumpbin /nologo /dependents $dll
-          if ($LASTEXITCODE -ne 0) { throw "dumpbin /dependents failed ($LASTEXITCODE)" }
-          $deps
-          $crt = $deps -match '^\s*(vcruntime|msvcp|ucrtbase|api-ms-win-crt-)'
-          if ($crt) { throw "$dll imports the dynamic CRT: $(($crt | ForEach-Object Trim) -join ', ')" }
+      - name: Check DLL exports, CRT linkage and version resource
+        run: ./ci/check-dll.ps1 -Dll target/release/reminedog.dll
 
       - name: Stage artifact
         run: |
