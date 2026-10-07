@@ -137,7 +137,9 @@ object Download {
                 throw IOException("$target を置き換えられません。reminedog を読み込んだゲームが起動していたら閉じてください", e)
             }
         } finally {
-            Files.deleteIfExists(temp)
+            // Where the folder cannot be written, removing the temporary file can fail too (on
+            // Linux, under a path that is a file); the error above says why, so this one goes.
+            runCatching { Files.deleteIfExists(temp) }
         }
     }
 
