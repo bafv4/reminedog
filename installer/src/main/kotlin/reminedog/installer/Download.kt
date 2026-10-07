@@ -13,8 +13,16 @@ import java.security.MessageDigest
 /** Downloads reminedog.dll from the latest GitHub release. */
 object Download {
     const val REPOSITORY = "bafv4/reminedog"
+
+    /** The DLL's name on the PC, whatever the version (JVM arguments keep naming the same file). */
     const val ASSET = "reminedog.dll"
+
+    /** A release's DLL: `reminedog-1.2.3.dll` (or `reminedog.dll`). */
+    private val RELEASE_DLL = Regex("""reminedog(-[0-9A-Za-z.+-]+)?\.dll""", RegexOption.IGNORE_CASE)
     private const val API = "https://api.github.com/repos/$REPOSITORY/releases/latest"
+
+    /** This installer's version, from its jar's manifest ("dev" when built without one). */
+    val INSTALLER_VERSION: String = Download::class.java.`package`?.implementationVersion ?: "dev"
 
     /** The DLL of a release. [sha256] is lowercase hex, or null when GitHub did not give one. */
     class Release(val tag: String, val url: String, val size: Long, val sha256: String?)
@@ -41,11 +49,11 @@ object Download {
         val tag = release["tag_name"] as? String ?: "?"
         val asset = release["assets"].asJsonArray()
             ?.mapNotNull { it.asJsonObject() }
-            ?.firstOrNull { (it["name"] as? String).equals(ASSET, ignoreCase = true) }
-            ?: throw IOException("リリース $tag に $ASSET がありません")
+            ?.firstOrNull { (it["name"] as? String)?.let(RELEASE_DLL::matches) == true }
+            ?: throw IOException("リリース $tag に reminedog の DLL がありません")
         val url = asset["browser_download_url"] as? String
         val size = (asset["size"] as? JsonNumber)?.text?.toLongOrNull()
-        if (url == null || size == null) throw IOException("リリース $tag の $ASSET の情報を読めません")
+        if (url == null || size == null) throw IOException("リリース $tag の DLL の情報を読めません")
         val sha256 = (asset["digest"] as? String)?.takeIf { it.startsWith("sha256:") }?.removePrefix("sha256:")?.lowercase()
         return Release(tag, url, size, sha256)
     }

@@ -42,7 +42,7 @@ import javax.swing.table.DefaultTableCellRenderer
 import kotlin.concurrent.thread
 
 /** The installer's window. */
-class InstallerFrame : JFrame("reminedog インストーラー") {
+class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTALLER_VERSION}") {
     private val downloadChoice = JRadioButton("GitHub から最新版をダウンロードする", true)
     private val folderField = JTextField(DEFAULT_FOLDER)
     private val folderButton = JButton("参照…")
@@ -123,7 +123,9 @@ class InstallerFrame : JFrame("reminedog インストーラー") {
     }
 
     private fun header() = vertical(
-        JLabel("reminedog インストーラー").apply { putClientProperty(FlatClientProperties.STYLE_CLASS, "h2") },
+        JLabel("reminedog インストーラー ${Download.INSTALLER_VERSION}").apply {
+            putClientProperty(FlatClientProperties.STYLE_CLASS, "h2")
+        },
         Box.createVerticalStrut(4),
         JLabel("ランチャーのインスタンスの JVM 引数に -agentpath を追加して、reminedog を読み込ませます。").apply {
             putClientProperty(FlatClientProperties.STYLE_CLASS, "light")

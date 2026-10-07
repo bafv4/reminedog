@@ -4,6 +4,10 @@ plugins {
     kotlin("jvm") version "2.4.20"
 }
 
+// The release workflow passes -PreminedogVersion=1.2.3; other builds are "dev".
+val reminedogVersion: String? = providers.gradleProperty("reminedogVersion").orNull
+version = reminedogVersion ?: "dev"
+
 repositories {
     mavenCentral()
 }
@@ -36,10 +40,12 @@ tasks.test {
 
 // One jar with the dependencies (FlatLaf and the Kotlin library), so that it runs by double-clicking.
 tasks.jar {
-    archiveFileName = "reminedog-installer.jar"
+    archiveFileName = reminedogVersion?.let { "reminedog-installer-$it.jar" } ?: "reminedog-installer.jar"
     manifest {
         attributes(
             "Main-Class" to "reminedog.installer.MainKt",
+            // Read back by Download.INSTALLER_VERSION.
+            "Implementation-Version" to project.version,
             // FlatLaf has classes for newer Java versions (a multi-release jar).
             "Multi-Release" to "true",
             // FlatLaf's native library (window title bar on Windows) uses JNI.

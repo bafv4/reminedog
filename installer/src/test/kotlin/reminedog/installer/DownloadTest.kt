@@ -72,7 +72,25 @@ class DownloadTest {
     }
 
     @Test
+    fun `the DLL of a release is found by its versioned name`() {
+        val release = Download.parse(
+            """
+            {"tag_name": "v1.2.3", "assets": [
+              {"name": "reminedog-installer-1.2.3.jar", "browser_download_url": "https://example.invalid/jar", "size": 3},
+              {"name": "reminedog-1.2.3.pdb", "browser_download_url": "https://example.invalid/pdb", "size": 2},
+              {"name": "reminedog-1.2.3-beta.1.dll", "browser_download_url": "https://example.invalid/dll", "size": 1}
+            ]}
+            """.trimIndent(),
+        )
+        assertEquals("https://example.invalid/dll", release.url)
+        assertEquals(null, release.sha256)
+    }
+
+    @Test
     fun `a release without the DLL is refused`() {
+        assertFailsWith<IOException> {
+            Download.parse("""{"tag_name": "v1", "assets": [{"name": "other.dll", "browser_download_url": "x", "size": 1}]}""")
+        }
         assertFailsWith<IOException> { Download.parse("""{"tag_name": "v1", "assets": []}""") }
     }
 
