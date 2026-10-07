@@ -67,11 +67,6 @@ pub struct PageKey {
 }
 
 impl PageKey {
-    pub const PAGE_UP: PageKey = PageKey {
-        vk: 0x21,
-        code: "PageUp",
-        key: "PageUp",
-    };
     pub const PAGE_DOWN: PageKey = PageKey {
         vk: 0x22,
         code: "PageDown",
@@ -395,7 +390,7 @@ pub fn media_notice(command: MediaCommand, result: &str) -> Option<String> {
 }
 
 /// `1:05`, `1:02:03`.
-pub fn format_time(seconds: f64) -> String {
+fn format_time(seconds: f64) -> String {
     let total = if seconds.is_finite() && seconds > 0.0 {
         seconds as u64
     } else {

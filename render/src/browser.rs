@@ -35,7 +35,6 @@ pub struct BrowserView {
     pub shown: bool,
     pub url: String,
     pub title: String,
-    pub loading: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
 }

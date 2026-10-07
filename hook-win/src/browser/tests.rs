@@ -32,8 +32,8 @@ fn wait_for(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
     }
 }
 
-fn shared_now() -> Shared {
-    SHARED.lock().unwrap().clone()
+fn shared_now() -> BrowserView {
+    lock(&SHARED).view.clone()
 }
 
 fn eval(script: &str) -> String {
@@ -52,6 +52,21 @@ impl Drop for Running {
         // Time to close the WebView before its folder goes.
         std::thread::sleep(Duration::from_secs(2));
     }
+}
+
+/// Starts the browser on `page` at 400×300 and waits until it is ready.
+fn start(page: &str, data: &std::path::Path) -> Running {
+    set_layout(PageLayout {
+        size: [400, 300],
+        scale: 1.0,
+        zoom: 1.0,
+    });
+    show(page, data.to_path_buf());
+    let running = Running;
+    wait_for("the browser", Duration::from_secs(30), || {
+        shared_now().state == BrowserState::Ready
+    });
+    running
 }
 
 /// Waits until the page stops scrolling (the wheel and the keys scroll smoothly).
@@ -101,7 +116,7 @@ fn click(pos: [f32; 2]) {
 fn browser_draws_and_takes_input() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let data = tempfile::tempdir().unwrap();
-    let layout = Layout {
+    let layout = PageLayout {
         size: [400, 300],
         scale: 1.0,
         zoom: 1.0,
@@ -110,7 +125,7 @@ fn browser_draws_and_takes_input() {
     show(PAGE, data.path().to_path_buf());
     let _running = Running;
     wait_for("the browser", Duration::from_secs(30), || {
-        shared_now().status == Status::Ready
+        shared_now().state == BrowserState::Ready
     });
 
     // The picture arrives, at the page's size, red.
@@ -129,7 +144,7 @@ fn browser_draws_and_takes_input() {
     // The page is as many CSS pixels wide as pixels over the scale and the zoom, and
     // positions stay the page's own CSS pixels.
     assert_eq!(eval("innerWidth"), "400");
-    set_layout(Layout {
+    set_layout(PageLayout {
         zoom: 1.5,
         ..layout
     });
@@ -141,7 +156,7 @@ fn browser_draws_and_takes_input() {
         eval("downs.length") == "2"
     });
     assert_eq!(eval("downs[1]"), "[100,50]");
-    set_layout(Layout {
+    set_layout(PageLayout {
         scale: 2.0,
         ..layout
     });
@@ -207,7 +222,7 @@ fn browser_draws_and_takes_input() {
     });
 
     quit();
-    assert_eq!(shared_now().status, Status::Off);
+    assert_eq!(shared_now().state, BrowserState::Off);
     assert_eq!(FRAME.lock().unwrap().seq, 0);
 }
 
@@ -216,19 +231,10 @@ fn browser_draws_and_takes_input() {
 fn the_scroll_keys_work_on_a_page_never_clicked() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let data = tempfile::tempdir().unwrap();
-    set_layout(Layout {
-        size: [400, 300],
-        scale: 1.0,
-        zoom: 1.0,
-    });
-    show(
+    let _running = start(
         "data:text/html,<body style='height:5000px;background:linear-gradient(red,blue)'>",
-        data.path().to_path_buf(),
+        data.path(),
     );
-    let _running = Running;
-    wait_for("the browser", Duration::from_secs(30), || {
-        shared_now().status == Status::Ready
-    });
     wait_for("a picture", Duration::from_secs(10), || {
         center_pixel().is_some()
     });
@@ -267,7 +273,11 @@ const AUDIO_PAGE: &str = "data:text/html,<body><script>\
     </script>";
 
 fn notices() -> Vec<String> {
-    shared().notices.into_iter().map(|(text, _)| text).collect()
+    before_frame()
+        .1
+        .into_iter()
+        .map(|notice| notice.text)
+        .collect()
 }
 
 #[test]
@@ -275,16 +285,7 @@ fn notices() -> Vec<String> {
 fn the_media_keys_play_seek_and_hiding_pauses() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let data = tempfile::tempdir().unwrap();
-    set_layout(Layout {
-        size: [400, 300],
-        scale: 1.0,
-        zoom: 1.0,
-    });
-    show(AUDIO_PAGE, data.path().to_path_buf());
-    let _running = Running;
-    wait_for("the browser", Duration::from_secs(30), || {
-        shared_now().status == Status::Ready
-    });
+    let _running = start(AUDIO_PAGE, data.path());
     wait_for("the audio", Duration::from_secs(10), || {
         eval("document.querySelector('audio') && document.querySelector('audio').readyState")
             .parse::<u32>()

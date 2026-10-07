@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use reminedog_core::browser::{MediaCommand, PageInput, PageModifiers, media_notice, media_script};
+use reminedog_render::{BrowserState, PageLayout};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_BOUNDS_MODE_USE_RAW_PIXELS, COREWEBVIEW2_COLOR,
     COREWEBVIEW2_PERMISSION_STATE_DENY, COREWEBVIEW2_PROCESS_FAILED_KIND,
@@ -26,15 +27,14 @@ use webview2_com::{
     CreateCoreWebView2CompositionControllerCompletedHandler, DocumentTitleChangedEventHandler,
     DownloadStartingEventHandler, ExecuteScriptCompletedHandler, HistoryChangedEventHandler,
     LaunchingExternalUriSchemeEventHandler, NavigationCompletedEventHandler,
-    NavigationStartingEventHandler, NewWindowRequestedEventHandler,
-    PermissionRequestedEventHandler, ProcessFailedEventHandler, ScriptDialogOpeningEventHandler,
-    SourceChangedEventHandler, take_pwstr,
+    NewWindowRequestedEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
+    ScriptDialogOpeningEventHandler, SourceChangedEventHandler, take_pwstr,
 };
 use windows::Win32::Foundation::{HWND, RECT};
 use windows_core::{BOOL, HSTRING, Interface, PCWSTR, PWSTR};
 
 use super::capture::Capture;
-use super::{Layout, Status, report};
+use super::{notice, report};
 
 /// Edge's switches: video plays without a click first (the hotkeys start it), and the page
 /// keeps drawing though its host window is never on the screen.
@@ -65,7 +65,7 @@ pub(super) struct Browser {
     _composition: ICoreWebView2CompositionController,
     webview: ICoreWebView2,
     capture: Capture,
-    layout: Layout,
+    layout: PageLayout,
     shown: bool,
 }
 
@@ -84,7 +84,7 @@ impl Browser {
         generation: u64,
         window: HWND,
         url: &str,
-        layout: Layout,
+        layout: PageLayout,
         data_dir: &Path,
     ) -> Result<Self, StartError> {
         let capture = Capture::new(generation, window)
@@ -96,7 +96,7 @@ impl Browser {
             .map_err(|e| StartError::new("ブラウザを設定できません", e))?;
         browser.navigate(url);
         browser.shown = true;
-        browser.apply_layout(layout, true);
+        browser.apply_layout(true);
         Ok(browser)
     }
 
@@ -104,7 +104,7 @@ impl Browser {
         generation: u64,
         composition: ICoreWebView2CompositionController,
         capture: Capture,
-        layout: Layout,
+        layout: PageLayout,
     ) -> windows_core::Result<Self> {
         let controller: ICoreWebView2Controller = composition.cast()?;
         // SAFETY: COM calls on the thread that created the controller.
@@ -146,7 +146,7 @@ impl Browser {
             return;
         }
         self.shown = true;
-        self.apply_layout(self.layout, true);
+        self.apply_layout(true);
         self.media(MediaCommand::Resume);
     }
 
@@ -163,21 +163,23 @@ impl Browser {
         }
     }
 
-    pub(super) fn set_layout(&mut self, layout: Layout) {
+    pub(super) fn set_layout(&mut self, layout: PageLayout) {
         let resized = layout.size != self.layout.size;
         self.layout = layout;
-        self.apply_layout(layout, resized);
+        self.apply_layout(resized);
     }
 
-    /// Sizes the WebView; a new size (or showing it) restarts the capture at that size.
-    fn apply_layout(&mut self, layout: Layout, restart: bool) {
+    /// Sizes the WebView as [`Self::layout`] says; a new size (or showing it) restarts the
+    /// capture at that size.
+    fn apply_layout(&mut self, restart: bool) {
+        let layout = self.layout;
         let [width, height] = layout.size.map(|v| v.max(1) as i32);
         // SAFETY: on the browser thread.
         let result = unsafe {
             let controller3: windows_core::Result<ICoreWebView2Controller3> =
                 self.controller.cast();
             controller3
-                .and_then(|c| c.SetRasterizationScale(layout.scale))
+                .and_then(|c| c.SetRasterizationScale(f64::from(layout.scale)))
                 .and_then(|()| {
                     self.controller.SetBounds(RECT {
                         left: 0,
@@ -186,7 +188,7 @@ impl Browser {
                         bottom: height,
                     })
                 })
-                .and_then(|()| self.controller.SetZoomFactor(layout.zoom))
+                .and_then(|()| self.controller.SetZoomFactor(f64::from(layout.zoom)))
                 .and_then(|()| self.controller.SetIsVisible(self.shown))
         };
         if let Err(e) = result {
@@ -229,20 +231,21 @@ impl Browser {
     }
 
     /// Calls a DevTools Protocol method, not waiting for its result.
-    pub(super) fn cdp(&self, method: &str, params: &str) {
-        let what = method.to_owned();
+    pub(super) fn cdp(&self, method: &'static str, params: &str) {
         let handler =
             CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, _json| {
                 if let Err(e) = result {
-                    log::debug!("browser: {what} failed: {e}");
+                    log::debug!("browser: {method} failed: {e}");
                 }
                 Ok(())
             }));
-        let (method, params) = (HSTRING::from(method), HSTRING::from(params));
         // SAFETY: on the browser thread; the strings outlive the call (WebView2 copies them).
         if let Err(e) = unsafe {
-            self.webview
-                .CallDevToolsProtocolMethod(&method, &params, &handler)
+            self.webview.CallDevToolsProtocolMethod(
+                &HSTRING::from(method),
+                &HSTRING::from(params),
+                &handler,
+            )
         } {
             log::debug!("browser: calling {method} failed: {e}");
         }
@@ -253,7 +256,7 @@ impl Browser {
     /// none of its frames has the focus. The wheel needs none.
     pub(super) fn scroll(&self, pages: f32) {
         let layout = self.layout;
-        let css = |pixels: u32| (f64::from(pixels) / (layout.scale * layout.zoom)) as f32;
+        let css = |pixels: u32| pixels as f32 / (layout.scale * layout.zoom);
         let [width, height] = layout.size.map(css);
         let wheel = PageInput::Wheel {
             pos: [width / 2.0, height / 2.0],
@@ -269,8 +272,10 @@ impl Browser {
     pub(super) fn media(&self, command: MediaCommand) {
         let generation = self.generation;
         self.eval(&media_script(command), move |json| {
-            if let Some(notice) = media_notice(command, json) {
-                report(generation, |shared| shared.notices.push((notice, false)));
+            if let Some(text) = media_notice(command, json) {
+                report(generation, |shared| {
+                    shared.notices.push(notice(text, false))
+                });
             }
         });
     }
@@ -438,16 +443,8 @@ fn subscribe(webview: &ICoreWebView2, generation: u64) -> windows_core::Result<(
             })),
             &mut token,
         )?;
-        webview.add_NavigationStarting(
-            &NavigationStartingEventHandler::create(Box::new(move |_, _| {
-                report(generation, |shared| shared.loading = true);
-                Ok(())
-            })),
-            &mut token,
-        )?;
         webview.add_NavigationCompleted(
             &NavigationCompletedEventHandler::create(Box::new(move |sender, _| {
-                report(generation, |shared| shared.loading = false);
                 refresh(sender, generation);
                 Ok(())
             })),
@@ -501,15 +498,15 @@ fn subscribe(webview: &ICoreWebView2, generation: u64) -> windows_core::Result<(
                 log::warn!("browser: a browser process failed ({})", kind.0);
                 if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED {
                     report(generation, |shared| {
-                        shared.status = Status::Failed(
+                        shared.view.state = BrowserState::Failed(
                             "ブラウザのプロセスが終了しました（終了してから表示し直してください）"
                                 .into(),
                         );
                     });
                 } else {
                     report(generation, |shared| {
-                        shared.notices.push((
-                            "ページが応答しなくなりました。再読み込みしてください".into(),
+                        shared.notices.push(notice(
+                            "ページが応答しなくなりました。再読み込みしてください",
                             true,
                         ));
                     });
@@ -526,7 +523,7 @@ fn subscribe(webview: &ICoreWebView2, generation: u64) -> windows_core::Result<(
                         report(generation, |shared| {
                             shared
                                 .notices
-                                .push(("ブラウザではダウンロードできません".into(), true));
+                                .push(notice("ブラウザではダウンロードできません", true));
                         });
                     }
                     Ok(())
@@ -584,14 +581,15 @@ fn refresh(webview: Option<ICoreWebView2>, generation: u64) {
         )
     };
     report(generation, |shared| {
-        if shared.url != url {
+        let view = &mut shared.view;
+        if view.url != url {
             // The address can hold tokens: the log gets the host only.
             log::debug!("browser: now on {}", host_of(&url));
         }
-        shared.url = url;
-        shared.title = title;
-        shared.can_go_back = back;
-        shared.can_go_forward = forward;
+        view.url = url;
+        view.title = title;
+        view.can_go_back = back;
+        view.can_go_forward = forward;
     });
 }
 

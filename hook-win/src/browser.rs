@@ -48,7 +48,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use reminedog_core::Settings;
 use reminedog_core::browser::{MediaCommand, PageInput};
 use reminedog_render::{
-    BrowserAction, BrowserCommand, BrowserPixels, BrowserState, BrowserView, Notice,
+    BrowserAction, BrowserCommand, BrowserPixels, BrowserState, BrowserView, Notice, PageLayout,
 };
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
@@ -77,65 +77,64 @@ static FRAME: Mutex<FrameSlot> = Mutex::new(FrameSlot {
     seq: 0,
 });
 
-/// How far the browser got.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Status {
-    /// Not running.
-    Off,
-    Starting,
-    Ready,
-    /// It could not start or stopped working (for the menu).
-    Failed(String),
-}
-
 /// What the browser thread reports.
 #[derive(Debug, Clone)]
-pub struct Shared {
+struct Shared {
     generation: u64,
-    pub status: Status,
-    pub url: String,
-    pub title: String,
-    pub loading: bool,
-    pub can_go_back: bool,
-    pub can_go_forward: bool,
-    /// For the overlay's notices: the text, and whether it is a warning.
-    pub notices: Vec<(String, bool)>,
+    /// All but `shown`, which the game's thread knows ([`Control::shown`]).
+    view: BrowserView,
+    notices: Vec<Notice>,
 }
 
 impl Shared {
-    const fn new(generation: u64, status: Status) -> Self {
+    const fn new(generation: u64, state: BrowserState) -> Self {
         Self {
             generation,
-            status,
-            url: String::new(),
-            title: String::new(),
-            loading: false,
-            can_go_back: false,
-            can_go_forward: false,
+            view: BrowserView {
+                state,
+                shown: false,
+                url: String::new(),
+                title: String::new(),
+                can_go_back: false,
+                can_go_forward: false,
+            },
             notices: Vec::new(),
         }
     }
 }
 
-static SHARED: Mutex<Shared> = Mutex::new(Shared::new(0, Status::Off));
+static SHARED: Mutex<Shared> = Mutex::new(Shared::new(0, BrowserState::Off));
 
 /// Updates the shared state if `generation` is still the current browser.
 fn report(generation: u64, update: impl FnOnce(&mut Shared)) {
-    let mut shared = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut shared = lock(&SHARED);
     if shared.generation == generation {
         update(&mut shared);
     }
 }
 
-/// The page's size and scale.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Layout {
-    /// Pixels.
-    pub size: [u32; 2],
-    /// Pixels per CSS pixel at 100 %: the overlay's scale.
-    pub scale: f64,
-    /// The page's zoom (1.0 is 100 %).
-    pub zoom: f64,
+/// How long the browser's notices show, in seconds.
+const NOTICE_SECONDS: f64 = 2.5;
+
+fn notice(text: impl Into<String>, warn: bool) -> Notice {
+    Notice {
+        text: text.into(),
+        warn,
+        seconds: NOTICE_SECONDS,
+        arrow: None,
+    }
+}
+
+/// Locks one of the module's statics (a panic while holding it left nothing half done).
+fn lock<T>(mutex: &'static Mutex<T>) -> MutexGuard<'static, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Posts `message` to a window of the browser thread; once the window is gone the call fails
+/// harmlessly.
+fn post(window: usize, message: u32) {
+    // SAFETY: plain call; the system checks the handle.
+    let _ = unsafe { PostMessageW(Some(HWND(window as *mut _)), message, WPARAM(0), LPARAM(0)) };
 }
 
 /// What the browser thread is asked to do.
@@ -147,7 +146,7 @@ pub enum Command {
     Back,
     Forward,
     Reload,
-    Layout(Layout),
+    Layout(PageLayout),
     Input(PageInput),
     Media(MediaCommand),
     /// Scrolls by this many pages (negative: up).
@@ -171,21 +170,9 @@ impl Mailbox {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(command);
-        self.wake();
-    }
-
-    fn wake(&self) {
         let window = self.window.load(Ordering::Acquire);
         if window != 0 {
-            // SAFETY: a window of the browser thread; once it is gone the call fails harmlessly.
-            let _ = unsafe {
-                PostMessageW(
-                    Some(HWND(window as *mut _)),
-                    WM_APP_COMMAND,
-                    WPARAM(0),
-                    LPARAM(0),
-                )
-            };
+            post(window, WM_APP_COMMAND);
         }
     }
 
@@ -202,7 +189,7 @@ struct Control {
     generation: u64,
     mailbox: Option<Arc<Mailbox>>,
     shown: bool,
-    layout: Layout,
+    layout: PageLayout,
 }
 
 static CONTROL: Mutex<Control> = Mutex::new(Control {
@@ -210,7 +197,7 @@ static CONTROL: Mutex<Control> = Mutex::new(Control {
     mailbox: None,
     shown: false,
     // Until the overlay sends the page's.
-    layout: Layout {
+    layout: PageLayout {
         size: [800, 450],
         scale: 1.0,
         zoom: 1.0,
@@ -218,13 +205,13 @@ static CONTROL: Mutex<Control> = Mutex::new(Control {
 });
 
 fn control() -> MutexGuard<'static, Control> {
-    CONTROL.lock().unwrap_or_else(|e| e.into_inner())
+    lock(&CONTROL)
 }
 
 /// What the browser thread needs to start.
 struct Start {
     url: String,
-    layout: Layout,
+    layout: PageLayout,
     /// WebView2's user data folder (cookies, cache).
     data_dir: PathBuf,
 }
@@ -250,9 +237,9 @@ pub fn show(url: &str, data_dir: PathBuf) {
         data_dir,
     };
     drop(control);
-    *SHARED.lock().unwrap_or_else(|e| e.into_inner()) = Shared::new(generation, Status::Starting);
+    *lock(&SHARED) = Shared::new(generation, BrowserState::Starting);
     {
-        let mut frame = FRAME.lock().unwrap_or_else(|e| e.into_inner());
+        let mut frame = lock(&FRAME);
         frame.generation = generation;
         frame.seq = 0;
     }
@@ -264,7 +251,7 @@ pub fn show(url: &str, data_dir: PathBuf) {
             log::error!("browser: cannot start its thread: {e}");
             "ブラウザのスレッドを起動できません"
         };
-        thread_ended(generation, Status::Failed(why.into()));
+        thread_ended(generation, BrowserState::Failed(why.into()));
     }
 }
 
@@ -285,12 +272,12 @@ pub fn quit() {
         mailbox.post(Command::Quit);
         let generation = control.generation;
         drop(control);
-        stopped(generation, Status::Off);
+        stopped(generation, BrowserState::Off);
     }
 }
 
 /// Sets the page's size and scale, now or for the next start.
-pub fn set_layout(layout: Layout) {
+pub fn set_layout(layout: PageLayout) {
     let mut control = control();
     if control.layout == layout {
         return;
@@ -313,14 +300,6 @@ pub fn shown() -> bool {
     control().shown
 }
 
-/// A copy of what the browser reports, taking its notices.
-pub fn shared() -> Shared {
-    let mut shared = SHARED.lock().unwrap_or_else(|e| e.into_inner());
-    let copy = shared.clone();
-    shared.notices.clear();
-    copy
-}
-
 /// The newest picture, unless the browser thread is writing it right now (then the last one
 /// uploaded stays).
 pub fn frame() -> Option<MutexGuard<'static, FrameSlot>> {
@@ -331,39 +310,15 @@ pub fn frame() -> Option<MutexGuard<'static, FrameSlot>> {
     }
 }
 
-/// How long the browser's notices show, in seconds.
-const NOTICE_SECONDS: f64 = 2.5;
-
 /// What the overlay shows of the browser this frame, and the browser's new notices.
 pub fn before_frame() -> (BrowserView, Vec<Notice>) {
     let shown = shown();
-    let shared = shared();
-    let state = match shared.status {
-        Status::Off => BrowserState::Off,
-        Status::Starting => BrowserState::Starting,
-        Status::Ready => BrowserState::Ready,
-        Status::Failed(why) => BrowserState::Failed(why),
-    };
-    let notices = shared
-        .notices
-        .into_iter()
-        .map(|(text, warn)| Notice {
-            text,
-            warn,
-            seconds: NOTICE_SECONDS,
-            arrow: None,
-        })
-        .collect();
+    let mut shared = lock(&SHARED);
     let view = BrowserView {
-        state,
         shown,
-        url: shared.url,
-        title: shared.title,
-        loading: shared.loading,
-        can_go_back: shared.can_go_back,
-        can_go_forward: shared.can_go_forward,
+        ..shared.view.clone()
     };
-    (view, notices)
+    (view, std::mem::take(&mut shared.notices))
 }
 
 /// The picture for the overlay, from a [`frame`] guard.
@@ -392,11 +347,7 @@ pub fn after_frame(
             BrowserCommand::Back => send(Command::Back),
             BrowserCommand::Forward => send(Command::Forward),
             BrowserCommand::Reload => send(Command::Reload),
-            BrowserCommand::Layout(layout) => set_layout(Layout {
-                size: layout.size,
-                scale: f64::from(layout.scale),
-                zoom: f64::from(layout.zoom),
-            }),
+            BrowserCommand::Layout(layout) => set_layout(layout),
             BrowserCommand::Input(input) => send(Command::Input(input)),
         }
     }
@@ -423,33 +374,33 @@ fn data_dir(game_dir: &Path) -> PathBuf {
     }
 }
 
-/// Generation `generation` is over: the picture goes and the state says `status`.
-fn stopped(generation: u64, status: Status) {
+/// Generation `generation` is over: the picture goes and the state says `state`.
+fn stopped(generation: u64, state: BrowserState) {
     {
-        let mut frame = FRAME.lock().unwrap_or_else(|e| e.into_inner());
+        let mut frame = lock(&FRAME);
         if frame.generation == generation {
             frame.generation = 0;
             frame.seq = 0;
             frame.bgra = Vec::new();
         }
     }
-    let mut shared = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut shared = lock(&SHARED);
     if shared.generation == generation {
         // Generation 0: the ending thread can no longer write here.
-        *shared = Shared::new(0, status);
+        *shared = Shared::new(0, state);
     }
 }
 
 /// The browser thread `generation` ended on its own (it failed): forget it, so the next
 /// show starts a new one.
-fn thread_ended(generation: u64, status: Status) {
+fn thread_ended(generation: u64, state: BrowserState) {
     {
         let mut control = control();
         if control.generation == generation {
             control.mailbox = None;
         }
     }
-    stopped(generation, status);
+    stopped(generation, state);
 }
 
 #[cfg(all(test, target_env = "msvc"))]

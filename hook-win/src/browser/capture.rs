@@ -16,7 +16,7 @@ use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
 use windows::UI::Composition::{Compositor, ContainerVisual, Visual};
-use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HMODULE, HWND};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
@@ -27,11 +27,10 @@ use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
-use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows_core::Interface;
 use windows_numerics::Vector2;
 
-use super::{FRAME, WM_APP_FRAME};
+use super::{FRAME, WM_APP_FRAME, lock, post};
 
 /// The shortest time between two pictures (a 60 Hz cap, in 100 ns units). Windows before
 /// 11 24H2 ignores it and hands over a picture on every refresh of the screen.
@@ -145,15 +144,7 @@ impl Capture {
         // Raised on this thread (the pool was made with its DispatcherQueue); the message
         // lets the loop pick the picture up with the capture at hand.
         pool.FrameArrived(&TypedEventHandler::new(move |_, _| {
-            // SAFETY: posting to a window of this thread; a closed window drops the message.
-            let _ = unsafe {
-                PostMessageW(
-                    Some(HWND(window as *mut _)),
-                    WM_APP_FRAME,
-                    WPARAM(0),
-                    LPARAM(0),
-                )
-            };
+            post(window, WM_APP_FRAME);
             Ok(())
         }))?;
         session.StartCapture()?;
@@ -217,7 +208,7 @@ impl Capture {
         let pitch = mapped.RowPitch as usize;
         let row = width as usize * 4;
         {
-            let mut slot = FRAME.lock().unwrap_or_else(|e| e.into_inner());
+            let mut slot = lock(&FRAME);
             if slot.generation == self.generation {
                 slot.bgra.resize(row * height as usize, 0);
                 for y in 0..height as usize {

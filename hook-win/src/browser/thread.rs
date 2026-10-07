@@ -6,6 +6,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use reminedog_render::BrowserState;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -20,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_core::w;
 
 use super::webview::Browser;
-use super::{Command, Mailbox, Start, Status, WM_APP_COMMAND, WM_APP_FRAME, report, thread_ended};
+use super::{Command, Mailbox, Start, WM_APP_COMMAND, WM_APP_FRAME, report, thread_ended};
 use crate::ffi;
 
 pub(super) fn spawn(generation: u64, mailbox: Arc<Mailbox>, start: Start) -> io::Result<()> {
@@ -28,7 +29,7 @@ pub(super) fn spawn(generation: u64, mailbox: Arc<Mailbox>, start: Start) -> io:
         .name("reminedog-browser".into())
         .spawn(move || {
             let status = ffi::catch("the browser thread", || run(generation, &mailbox, start))
-                .unwrap_or_else(|| Status::Failed("ブラウザが異常終了しました".into()));
+                .unwrap_or_else(|| BrowserState::Failed("ブラウザが異常終了しました".into()));
             mailbox.window.store(0, Ordering::Release);
             thread_ended(generation, status);
             log::info!("browser: stopped");
@@ -37,11 +38,11 @@ pub(super) fn spawn(generation: u64, mailbox: Arc<Mailbox>, start: Start) -> io:
 }
 
 /// The thread's life; the status it ends with.
-fn run(generation: u64, mailbox: &Mailbox, start: Start) -> Status {
+fn run(generation: u64, mailbox: &Mailbox, start: Start) -> BrowserState {
     // SAFETY: initializes COM for this thread, undone below.
     if let Err(e) = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok() {
         log::error!("browser: CoInitializeEx failed: {e}");
-        return Status::Failed("ブラウザを起動できません".into());
+        return BrowserState::Failed("ブラウザを起動できません".into());
     }
     let status = run_in_apartment(generation, mailbox, start);
     // SAFETY: balances CoInitializeEx; everything COM was dropped in `run_in_apartment`.
@@ -49,7 +50,7 @@ fn run(generation: u64, mailbox: &Mailbox, start: Start) -> Status {
     status
 }
 
-fn run_in_apartment(generation: u64, mailbox: &Mailbox, start: Start) -> Status {
+fn run_in_apartment(generation: u64, mailbox: &Mailbox, start: Start) -> BrowserState {
     let options = DispatcherQueueOptions {
         dwSize: size_of::<DispatcherQueueOptions>() as u32,
         threadType: DQTYPE_THREAD_CURRENT,
@@ -60,14 +61,14 @@ fn run_in_apartment(generation: u64, mailbox: &Mailbox, start: Start) -> Status 
         Ok(queue) => queue,
         Err(e) => {
             log::error!("browser: CreateDispatcherQueueController failed: {e}");
-            return Status::Failed("ブラウザを起動できません".into());
+            return BrowserState::Failed("ブラウザを起動できません".into());
         }
     };
     let window = match host_window() {
         Ok(window) => window,
         Err(e) => {
             log::error!("browser: cannot create its window: {e}");
-            return Status::Failed("ブラウザを起動できません".into());
+            return BrowserState::Failed("ブラウザを起動できません".into());
         }
     };
     let status = run_with_window(generation, mailbox, start, window);
@@ -76,7 +77,7 @@ fn run_in_apartment(generation: u64, mailbox: &Mailbox, start: Start) -> Status 
     status
 }
 
-fn run_with_window(generation: u64, mailbox: &Mailbox, start: Start, window: HWND) -> Status {
+fn run_with_window(generation: u64, mailbox: &Mailbox, start: Start, window: HWND) -> BrowserState {
     log::info!("browser: starting");
     let mut browser = match Browser::create(
         generation,
@@ -88,16 +89,16 @@ fn run_with_window(generation: u64, mailbox: &Mailbox, start: Start, window: HWN
         Ok(browser) => browser,
         Err(e) => {
             log::error!("browser: {}: {}", e.message, e.detail);
-            return Status::Failed(e.message);
+            return BrowserState::Failed(e.message);
         }
     };
-    report(generation, |shared| shared.status = Status::Ready);
+    report(generation, |shared| shared.view.state = BrowserState::Ready);
     log::info!("browser: ready");
     // From here on the game's thread wakes the loop; commands queued while the WebView was
     // being made (their wake-ups went unhandled) run first.
     mailbox.window.store(window.0 as usize, Ordering::Release);
     if !run_commands(&mut browser, mailbox) {
-        return Status::Off;
+        return BrowserState::Off;
     }
     let mut msg = MSG::default();
     loop {
@@ -105,11 +106,11 @@ fn run_with_window(generation: u64, mailbox: &Mailbox, start: Start, window: HWN
         let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
         if got.0 <= 0 {
             // WM_QUIT (nobody posts it) or an error.
-            return Status::Off;
+            return BrowserState::Off;
         }
         if msg.hwnd == window && msg.message == WM_APP_COMMAND {
             if !run_commands(&mut browser, mailbox) {
-                return Status::Off;
+                return BrowserState::Off;
             }
         } else if msg.hwnd == window && msg.message == WM_APP_FRAME {
             browser.on_frame();
