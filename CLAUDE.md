@@ -22,8 +22,9 @@ Mod ではなく、JVM に `-agentpath:` で読み込ませる Rust 製のネイ
 core/      OS に依存しない処理（テストあり）
   location.rs  F3+C のクリップボードの文字列のパース
   waypoint.rs  ワールドごとのウェイポイントの JSON（アトミックな保存）
-  world.rs     ワールドの判定（latest.log の追跡、シングルプレイのワールド）
-  session.rs   WorldWatcher（今のワールド）と WaypointBook（今のワールドのウェイポイント。変更のたびに保存）
+  world.rs     ワールドの判定（latest.log の追跡、シングルプレイのワールド、level.dat のワールド名）。WorldId（マルチはラベル付き）
+  session.rs   WorldWatcher（今のワールド）、WaypointBook（今のワールドのウェイポイント。変更のたびに保存。deferred なら SaveJob を別スレッドへ）、
+               ServerLabels（サーバーのアドレスごとの最後のラベル）
   keybinds.rs  options.txt の F3+C のキー（修飾キー、座標のコピー、クラッシュ）と、コピーのキーを共有する操作、各キーの割り当て（bindings_by_key）。
                InputId（キーは SDL のスキャンコード、マウスは SDL の番号）と、名前（Naming で 1.21 と 26.x を読み分ける）・ラベル・GLFW／SDL のコードの変換
   keytable.rs  26.3 と 1.21.11 のキーの名前の表（jar から抜き出した TSV から生成）
@@ -54,13 +55,15 @@ hook-win/  Windows のエージェント（reminedog.dll）
   sdl.rs, sdl_input.rs    SDL3（Minecraft 26.x）：SDL_GL_SwapWindow、SDL_PollEvent のフィルタ。F3+C（SDL_SetClipboardText のフック、キーのイベントの注入）。
                           キーの置き換え（イベントをその場で書き換える、mod の補正、SDL_GetKeyboardState の偽装）
   rebind_state.rs  ゲームから見えるキーの状態の表（ロックなし、512 項目）と、元のキーの解放を取り逃したときの安全網
-  frame.rs     スワップのたびの処理：自前の WGL コンテキストに切り替えてオーバーレイを描く。設定の読み込みと保存
+  frame.rs     スワップのたびの処理：自前の WGL コンテキストに切り替えてオーバーレイを描く。設定の読み込みと保存（saver へ）、メニューのクリップボード
+  saver.rs     ファイルの書き込みのスレッド（設定・地点・ラベル。渡した順に書き、結果は Pending で受け取る）
+  clipboard.rs メニューの貼り付け・コピー用の Win32 のクリップボード（GLFW・SDL の関数は F3+C でフックしているので使わない）
   f3c.rs       F3+C の要求と結果（ウィンドウのライブラリに依存しない）。送った F3+C の書き込みは握りつぶし、利用者の F3+C は通す
   waypoints.rs ワールドの追跡、options.txt（デバッグのキーと、メニューに出す各キーの割り当て）、F3+C の要求と結果、通知（frame.rs から毎フレーム）
   tall.rs      高精細のズーム（下で説明）
   wgl.rs       opengl32 の関数表、自前のコンテキスト
   pointer.rs   Windows のマウスの設定の読み取り
-  fonts.rs     日本語フォント（游ゴシック → メイリオ → MS ゴシック）
+  fonts.rs     日本語フォント（游ゴシック → メイリオ → MS ゴシック）。読み込みの直後に別スレッドで読み、プロセスの間持つ
   browser.rs   ゲーム内ブラウザ（WebView2）のゲームのスレッド側：表示・非表示・終了、コマンドのメールボックス、状態、最新の絵（FRAME）。frame.rs から毎フレーム
   browser/     ブラウザのスレッド（thread.rs）、WebView2 の作成・設定・イベント（webview.rs）、画面の取り込み（capture.rs）。MSVC のビルドだけ（GNU では外す）
 installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）。Java 8 以降で動く 1 つの jar（reminedog-installer.jar）
@@ -74,8 +77,9 @@ installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）。Java 8
   McsrLauncher.kt    MCSR Launcher（instance.json の options）
   Launchers.kt       いつもの場所の検出と、選んだフォルダの判定
   Ini.kt, Json.kt    設定ファイルの読み書き（Qt の INI と MultiMC の INI を行単位で、JSON はキーの順序と数値の書き方を保つ）
-  Download.kt        GitHub の最新のリリースの reminedog.dll（サイズ・SHA-256・MZ を確かめてから置き換える）。replaceAll で複数の DLL を 1 回のダウンロードで置き換える
-  Processes.kt       起動中のランチャーの判定（tasklist）
+  Download.kt        GitHub の最新のリリースの reminedog.dll（サイズ・SHA-256（必須）・MZ を確かめてから置き換える）。replaceAll で複数の DLL を 1 回のダウンロードで置き換える
+  Acl.kt             新しく作るフォルダの ACL（自分・SYSTEM・Administrators）と、ほかのユーザーが書ける場所の判定
+  Processes.kt       起動中のランチャーの判定（%SystemRoot%\System32\tasklist.exe、裏のスレッドで）
 ci/smoke/  LWJGL で Minecraft と同じようにウィンドウを作るテスト用の Java（GLFW 版 Smoke、SDL3 版 SmokeSdl）。F3+C の真似（--world、--f3c-refuse、--f3c-events）。
            キーの置き換えの確認（SMOKE_VERBOSE=1 で受け取ったイベント、--screen-key・--watch-keys で画面を閉じたときのキーの状態）
 scripts/   wine-smoke.sh（Linux 上で Wine を使って動かす）、fetch-wine-jre.sh
@@ -92,7 +96,7 @@ cargo clippy --workspace --all-targets
 cd installer; .\gradlew.bat build                  # インストーラーのテストと installer\build\libs\reminedog-installer.jar
 ```
 
-- Rust 1.95 以降（egui 0.36 の要件。今は 1.98）、edition 2024
+- Rust 1.95 以降（egui 0.36 の要件。今は 1.99。CI とリリースはワークフローの `RUST_TOOLCHAIN` で固定）、edition 2024
 - MSVC では CRT を静的にリンクする（`.cargo/config.toml` の `+crt-static`。Java 8 に vcruntime140 がないため）
 - Linux からは `--target x86_64-pc-windows-gnu` で DLL をビルドし、`scripts/wine-smoke.sh` で試せる（README の「開発」）。Windows では DLL を置いてゲームで確かめるのが早い
 - テスト用プログラムを Windows で直接動かすなら、`ci/smoke/*.java` を LWJGL の jar と一緒にコンパイルし、`java -agentpath:...\reminedog.dll -cp ... Smoke --seconds=20 --capture --mc` のように動かす（`.github/workflows/ci.yml` の `smoke-windows` ジョブが手順の見本）。
@@ -108,8 +112,11 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
     PageUp／PageDown・矢印などの拡張キーを `PostMessage` で送るときは lParam の 24 ビット目を立てる（立てないと GLFW がテンキーとして受け取る）。メニューのマウス操作は `--capture` なしで `WM_MOUSEMOVE`・`WM_LBUTTONDOWN` を送る
 - インストーラーは Gradle 9.8（ラッパー。JDK 17 以降で動く。手元は JDK 25）、Kotlin 2.4、FlatLaf 3.7。Kotlin は `jvmTarget` 1.8 と `-Xjdk-release=1.8`（Java 8 の API だけを使う）、警告はエラー。
   画面を確かめるなら、利用者の設定ファイルの写しを scratchpad に作り、`APPDATA`・`LOCALAPPDATA` をそこに向けて起動する（本物のランチャーの設定を書き換えない）
-- CI（GitHub Actions）：Linux（fmt、clippy、テスト、mingw での clippy）、インストーラー（テスト、成果物 `reminedog-installer`）、Windows（clippy、テスト、リリースビルド、`ci/check-dll.ps1` で DLL の確認、成果物 `reminedog-windows-x64`）、Windows のスモークテスト（LWJGL 3.2.2/Java 8、3.3.3/Java 21、3.4.3/Java 25 の SDL3。Mesa の llvmpipe で描く）
-- リリース（`.github/workflows/release.yml`）：Actions から版を入れて手で実行する。版は環境変数 `REMINEDOG_VERSION`（DLL：`agent::VERSION` とログ・状態の行、`hook-win/build.rs` が embed-resource で埋めるバージョン情報）と Gradle の `-PreminedogVersion`（jar の名前と manifest の `Implementation-Version`、画面のタイトル）で入れる。
+- CI（GitHub Actions。push は main だけ、ほかは pull request）：Linux（fmt、clippy、テスト、mingw での clippy）、インストーラー（ラッパーの確認、テスト、成果物 `reminedog-installer`）、Windows（clippy、テスト）、
+  Windows の DLL（リリースビルド、`ci/check-dll.ps1` で x64・export・読み込む DLL の許可リスト・バージョン情報、成果物 `reminedog-windows-x64`）、Windows のスモークテスト（LWJGL 3.2.2/Java 8、3.3.3/Java 21、3.4.3/Java 25 の SDL3。Mesa の llvmpipe で描く。
+  Mesa は `MESA_TAG` と `MESA_SHA256`、LWJGL の jar は `ci/smoke/lwjgl.sha256` で確かめる）。アクションはコミットの SHA で固定（`.github/dependabot.yml`）、cargo は `--locked`。
+  DLL が新しい DLL を読み込むようになったら check-dll.ps1 の許可リストに足す（どの Windows にもあるものだけ）
+- リリース（`.github/workflows/release.yml`）：Actions から版を入れて、main で手で実行する（そのコミットで CI が通っていること。キャッシュは使わない）。版は環境変数 `REMINEDOG_VERSION`（DLL：`agent::VERSION` とログ・状態の行、`hook-win/build.rs` が embed-resource で埋めるバージョン情報）と Gradle の `-PreminedogVersion`（jar の名前と manifest の `Implementation-Version`、画面のタイトル）で入れる。
   リポジトリの `Cargo.toml` の版は変えない（版を渡さないビルドでは、DLL は Cargo の版、インストーラーは `dev`）。成果物は `reminedog-<版>.dll`・`.pdb`・`reminedog-installer-<版>.jar` の下書きのリリース。利用者の PC では DLL は `reminedog.dll` のまま（インストーラーが名前を変えて置く。`Download` は `reminedog-<版>.dll` を探す）
 
 コミットする前に `cargo fmt --all`、clippy（警告 0）、テストを通す。
@@ -143,6 +150,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 | キーの置き換え（キーとマウスのボタン、ゲーム中だけ。メニューの「キーの置き換え」） | 手元のスモーク（GLFW・SDL3）で確認済み。実機では未確認 |
 | ゲーム内ブラウザ（WebView2。メニューで表示・移動・大きさの変更・ページの操作、ゲーム中の PageUp／PageDown と ↓←→ の動画の操作） | WebView2 を動かすテストと手元のスモーク（GLFW）で確認済み。実機では未確認 |
 | インストーラー（公式ランチャー、MultiMC、Prism Launcher、MCSR Launcher） | 設定ファイルの写しに対して画面から操作して確認済み、Java 8・17・21・25 で表示を確認。本物のランチャーでは未確認。ダウンロードと「最新版に更新」はリリースがないので失敗する（置き換えは単体テストで確認） |
+| 監査（`docs/AUDIT-2026-10-09.md`）の全件の修正 | テスト・clippy・インストーラーのビルドで確認。実機では未確認（`docs/TESTING.md` の「監査の修正で確認すること」）。設計は HANDOFF.md の「追記：監査の修正」 |
 
 ### 高精細のズームの仕組み（`hook-win/src/tall.rs`）
 
@@ -157,10 +165,12 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 
 ### ウェイポイントの仕組み（`hook-win/src/f3c.rs`、`waypoints.rs`）
 
-1. J・K（またはメニューのボタン）で、`waypoints.rs` が F3+C の要求を出す。キーは options.txt（修飾キー・座標のコピー・クラッシュ）から 5 秒ごとに読む
+1. J・K（またはメニューのボタン）で、`waypoints.rs` が F3+C の要求を出す。キーは options.txt（修飾キー・座標のコピー・クラッシュ）から読む（5 秒ごとと要求の直前に更新時刻と大きさを見て、変わっていれば）
 2. GLFW はスワップの後にゲームのキーコールバックを直接呼び、SDL3 は `SDL_PollEvent` の注入のキューから、修飾キーの押下 → コピーの押下 → コピーの解放 → 修飾キーの解放を送る（GLFW は 1.16 向けに、その間だけ `glfwGetKey` に修飾キーを押していると答える）
 3. その間の `glfwSetClipboardString`／`SDL_SetClipboardText` を横取りして `parse_f3c` で読み、OS には渡さない。書き込みがなければ拒否（デバッグ情報の制限）で、F3 画面を戻すために修飾キーをもう一度押して離し、そのワールドでは送るのをやめる
-4. 座標は `WaypointBook`（ワールドは `WorldWatcher`）に保存し、通知と方角・距離（`guide`）を出す。利用者自身の F3+C も、コピーのキーをゲームに渡す間の書き込みから拾う（こちらは OS に渡す）
+4. 座標は `WaypointBook`（ワールドは `WorldWatcher`。マルチは `ServerLabels` のラベル付き）に入れ、保存は `saver` のスレッドで行い、通知と方角・距離（`guide`）を出す。
+   利用者自身の F3+C も、ゲームから見て修飾キーを押しているときにコピーのキーをゲームに渡す間の書き込みから拾う（こちらは OS に渡す）。
+   ゲーム中（前のポーリングからずっとカーソルを捕まえていた）に読んだワールドの行は捨てる（サーバーの文字で偽の行を作れるため）
 
 ゲームの挙動（1.16.1、1.21.11、26.3 の jar で確かめたこと）と、確かめていないことは HANDOFF.md の「追記：プロトタイプ 3」。
 
@@ -200,6 +210,6 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 - 利用者の 1.16.1 はスピードラン用の Mod（SeedQueue など）を入れた構成で、バニラの挙動の確認には使えない。
   1.21.11 も 2026-10-05 から Fabric＋Sodium 0.8・Iris 1.10（シェーダーパックは未選択で無効）・Lithium・fabric-regrowth を入れていて、フルスクリーン、GUI の大きさ 5。
   1.21.11 の描画の不具合は、まず Sodium の変更を疑う（Mod の jar は `minecraft\mods` にある。調べるときは scratchpad に展開して `javap`）
-- 利用者のキー設定（チェックリストを書くとき）：26.3 は「アイテムを捨てる」が C、ホットバー 1 が Q、「オフハンドと交換」が CapsLock、ダッシュが M（トグル）、チャットが Backspace。1.21.11 は捨てるが Q、ダッシュが左 Ctrl、「ホットバーの保存」が C。どちらでも空いているキーは B・H・N・U・Y（B・H・N は F3 との組み合わせだけ）。キーボードは US 配列（kbd101）なので、JIS のキーは確かめられない
+- 利用者のキー設定（チェックリストを書くとき）：26.3 は「アイテムを捨てる」が C、ホットバー 1 が Q、「オフハンドと交換」が CapsLock、ダッシュが M（トグル）、チャットが Backspace。1.21.11 は捨てるが Q、ダッシュが左 Ctrl、「ホットバーの保存」が C。どちらでも空いているキーは B・H・N・Y（B・H・N は F3 との組み合わせだけ。U は 1.21.11 では Iris の「シェーダーの再読み込み」、K は「シェーダーの切り替え」）。キーボードは US 配列（kbd101）なので、JIS のキーは確かめられない
 - SendInput でスモークに送るときは、利用者が操作していないこととスモークのウィンドウが前面にあることを確かめてから送る（`--screen-key` ではカーソルをウィンドウの中央に動かす）。PC がロックされていると SendInput は届かない（自分のウィンドウへの PostMessage なら届くが、SDL3 はキーボードのフォーカスがないとキーのイベントの windowID が 0 になる）。
   右 Ctrl・右 Alt・矢印・Insert などの拡張キーには `KEYEVENTF_EXTENDEDKEY` を付け、マウスの X ボタンは `mouseData` で指定する。CapsLock を送ったら、ロックの状態を元に戻す
