@@ -182,7 +182,9 @@ public final class SmokeSdl {
         GL.createCapabilities();
         // The game's WGL context must stay current across the agent's swaps (it draws with its
         // own context and switches back).
-        long wglContext = Platform.get() == Platform.WINDOWS ? WGL.wglGetCurrentContext() : 0;
+        // LWJGL 3.4 takes a buffer for the call's GetLastError.
+        IntBuffer lastError = BufferUtils.createIntBuffer(1);
+        long wglContext = Platform.get() == Platform.WINDOWS ? WGL.wglGetCurrentContext(lastError) : 0;
         System.out.println("GL_VERSION " + glGetString(GL_VERSION));
         System.out.println("GL_RENDERER " + glGetString(GL_RENDERER));
 
@@ -230,7 +232,7 @@ public final class SmokeSdl {
                 if (!SDL_GL_SwapWindow(window)) {
                     throw new Fail("frame " + frame + ": SDL_GL_SwapWindow failed: " + SDL_GetError());
                 }
-                if (wglContext != 0 && WGL.wglGetCurrentContext() != wglContext) {
+                if (wglContext != 0 && WGL.wglGetCurrentContext(lastError) != wglContext) {
                     throw new Fail("frame " + frame + ": WGL context is no longer current after swap");
                 }
                 while (SDL_PollEvent(event)) {
