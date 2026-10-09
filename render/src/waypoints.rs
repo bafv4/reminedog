@@ -2,6 +2,8 @@
 //! section, the notices above the crosshair, and the Japanese texts for directions and
 //! distances.
 
+use std::sync::Arc;
+
 use egui::RichText;
 use reminedog_core::location::{OVERWORLD, THE_END, THE_NETHER};
 use reminedog_core::{Cardinal, Guide, Location, Waypoint, guide};
@@ -26,7 +28,11 @@ pub enum WorldLabel {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WaypointView {
     pub world: WorldLabel,
-    pub waypoints: Vec<Waypoint>,
+    /// On a server: the label that tells apart worlds behind its address (a network's lobby
+    /// and survival), `None` for the address alone.
+    pub label: Option<String>,
+    /// Shared with the platform hook, which builds it again only when the waypoints change.
+    pub waypoints: Arc<[Waypoint]>,
     /// The destination.
     pub selected: Option<u64>,
     /// The player's last known position.
@@ -52,6 +58,32 @@ pub struct Notice {
     pub seconds: f64,
     /// An arrow before the text, turned this many degrees right of up (see [`turn_to`]).
     pub arrow: Option<f32>,
+    /// A notice of the same kind still showing is replaced, not stacked under this one (the
+    /// way to the destination from an older position, an older position of a video).
+    pub replaces: Option<&'static str>,
+}
+
+impl Notice {
+    /// The kind of the way to the destination.
+    pub const NAVIGATION: &'static str = "navigation";
+    /// The kind of a video's state.
+    pub const MEDIA: &'static str = "media";
+
+    pub fn new(text: impl Into<String>, warn: bool, seconds: f64) -> Self {
+        Self {
+            text: text.into(),
+            warn,
+            seconds,
+            arrow: None,
+            replaces: None,
+        }
+    }
+
+    /// Replaces a notice of `kind` that still shows.
+    pub fn replacing(mut self, kind: &'static str) -> Self {
+        self.replaces = Some(kind);
+        self
+    }
 }
 
 /// What the menu asks the platform hook to do with the waypoints.
@@ -70,10 +102,18 @@ pub enum WaypointCommand {
     Delete(u64),
     /// Allow F3+C again in the world where the game refused it.
     Unblock,
+    /// On a server: keep the waypoints under this label from now on (`None`: the address
+    /// alone).
+    SetLabel(Option<String>),
 }
 
 /// Longest waypoint name the menu lets the user type, in characters.
 const NAME_LIMIT: usize = 64;
+/// Longest label of a server's world, in characters.
+const LABEL_LIMIT: usize = 32;
+/// A second click on 「もう一度押すと削除」 closer than this (seconds) is the same double
+/// click, not a confirmation.
+const CONFIRM_DELAY: f64 = 0.5;
 /// Height of the waypoint list before it scrolls, in points.
 const LIST_HEIGHT: f32 = 220.0;
 /// Closer than this (horizontally, in blocks) the player is at the waypoint.
@@ -324,13 +364,25 @@ impl NoticeList {
     const AREAS: u64 = 8;
 
     /// Drops the expired notices and adds `new` ones for their `seconds` from `now`, keeping
-    /// the newest three.
+    /// the newest three. A new notice replaces one of its kind ([`Notice::replaces`]); one
+    /// with the same text as a notice still showing only keeps that one longer.
     pub(crate) fn update(&mut self, new: Vec<Notice>, now: f64) {
         self.shown.retain(|shown| shown.until > now);
         for shown in &mut self.shown {
             shown.fresh = false;
         }
         for notice in new {
+            if let Some(kind) = notice.replaces {
+                self.shown
+                    .retain(|shown| shown.notice.replaces != Some(kind));
+            } else if let Some(same) = self
+                .shown
+                .iter_mut()
+                .find(|shown| shown.notice.text == notice.text && shown.notice.warn == notice.warn)
+            {
+                same.until = same.until.max(now + notice.seconds);
+                continue;
+            }
             self.shown.push(Shown {
                 until: now + notice.seconds,
                 notice,
@@ -366,16 +418,17 @@ pub(crate) fn draw_notices(ctx: &egui::Context, notices: &NoticeList) {
             .show(ctx, |ui| {
                 ui.set_max_width(screen.width() * 0.8);
                 egui::Frame::popup(&ctx.global_style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if let Some(turn) = shown.notice.arrow {
                             arrow(ui, turn, ARROW_TEXT);
                         }
                         let text = RichText::new(&shown.notice.text);
-                        ui.label(if shown.notice.warn {
+                        let text = if shown.notice.warn {
                             text.color(ui.visuals().warn_fg_color)
                         } else {
                             text
-                        });
+                        };
+                        ui.add(egui::Label::new(text).wrap());
                     });
                 });
             })
@@ -452,8 +505,10 @@ pub(crate) struct WaypointMenu {
     renaming: Option<(u64, String)>,
     /// Put the cursor in the name field on the next frame.
     focus_name: bool,
-    /// The waypoint whose delete button was pressed once.
-    confirm_delete: Option<u64>,
+    /// The waypoint whose delete button was pressed once, and when (seconds).
+    confirm_delete: Option<(u64, f64)>,
+    /// The server's world label being edited.
+    label: Option<String>,
     world: WorldLabel,
 }
 
@@ -463,13 +518,14 @@ impl WaypointMenu {
             self.renaming = None;
             self.focus_name = false;
             self.confirm_delete = None;
+            self.label = None;
             self.world.clone_from(&view.world);
         }
         let exists = |id: u64| view.waypoints.iter().any(|wp| wp.id == id);
         if self.renaming.as_ref().is_some_and(|(id, _)| !exists(*id)) {
             self.renaming = None;
         }
-        if self.confirm_delete.is_some_and(|id| !exists(id)) {
+        if self.confirm_delete.is_some_and(|(id, _)| !exists(id)) {
             self.confirm_delete = None;
         }
     }
@@ -491,11 +547,23 @@ pub(crate) fn waypoint_section(
         keys.navigate.label()
     ));
     match &view.world {
-        WorldLabel::NotInWorld => ui.label("ワールドに入っていない"),
-        WorldLabel::Unknown => ui.label(RichText::new("ワールドを判定できていない").color(warn)),
-        WorldLabel::Singleplayer(name) => ui.label(format!("ワールド：{name}")),
-        WorldLabel::Multiplayer(host) => ui.label(format!("サーバー：{host}")),
-    };
+        WorldLabel::NotInWorld => {
+            ui.label("ワールドに入っていない（ワールドに入ると使える）");
+        }
+        WorldLabel::Unknown => {
+            ui.label(
+                RichText::new("ワールドを判定できていない（ワールドに入り直すと判定できる）")
+                    .color(warn),
+            );
+        }
+        WorldLabel::Singleplayer(name) => {
+            ui.label(format!("ワールド：{name}"));
+        }
+        WorldLabel::Multiplayer(host) => {
+            ui.label(format!("サーバー：{host}"));
+            label_row(ui, menu, view, commands);
+        }
+    }
     // The menu keeps the game's cursor captured, so these work with it open.
     let usable = view.playing && !view.busy;
     ui.horizontal(|ui| {
@@ -512,7 +580,7 @@ pub(crate) fn waypoint_section(
             commands.push(WaypointCommand::Refresh);
         }
     });
-    if !view.playing {
+    if !view.playing && view.world != WorldLabel::NotInWorld {
         ui.label(RichText::new("ゲームの画面を閉じると使える").weak());
     }
     ui.label(location_text(view.location.as_ref(), view.location_age));
@@ -530,7 +598,9 @@ pub(crate) fn waypoint_section(
     }
 
     if view.waypoints.is_empty() {
-        ui.label(RichText::new("記録した地点はまだない").weak());
+        if view.problems.is_empty() && view.world != WorldLabel::NotInWorld {
+            ui.label(RichText::new("記録した地点はまだない").weak());
+        }
         return;
     }
     ui.label(RichText::new("名前を押すと目的地になる").weak());
@@ -541,10 +611,57 @@ pub(crate) fn waypoint_section(
         .id_salt("reminedog-waypoints")
         .max_height(LIST_HEIGHT)
         .show(ui, |ui| {
-            for wp in &view.waypoints {
+            for wp in view.waypoints.iter() {
                 ui.push_id(wp.id, |ui| waypoint_row(ui, menu, view, wp, commands));
             }
         });
+}
+
+/// A server's world label: what it is, and a field to change it. Worlds behind the same
+/// address (a network's lobby and survival) cannot be told apart from the log; a label keeps
+/// their waypoints apart.
+fn label_row(
+    ui: &mut egui::Ui,
+    menu: &mut WaypointMenu,
+    view: &WaypointView,
+    commands: &mut Vec<WaypointCommand>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("ワールドのラベル：");
+        let mut text = menu
+            .label
+            .clone()
+            .unwrap_or_else(|| view.label.clone().unwrap_or_default());
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut text)
+                .char_limit(LABEL_LIMIT)
+                .desired_width(120.0)
+                .hint_text("なし"),
+        );
+        let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if edit.has_focus() {
+            menu.label = Some(text.clone());
+        }
+        let label = Some(text.trim().to_owned()).filter(|label| !label.is_empty());
+        let changed = label != view.label;
+        if (ui
+            .add_enabled(changed, egui::Button::new("変える"))
+            .clicked()
+            || entered)
+            && changed
+        {
+            commands.push(WaypointCommand::SetLabel(label));
+            menu.label = None;
+        } else if !edit.has_focus() && !changed {
+            menu.label = None;
+        }
+    });
+    ui.label(
+        RichText::new(
+            "地点はアドレスとラベルごとに保存する。同じアドレスで別のワールドに入ったら（サーバー網のロビーとサバイバル など）、ラベルを変えると地点を分けられる",
+        )
+        .weak(),
+    );
 }
 
 fn waypoint_row(
@@ -565,7 +682,7 @@ fn waypoint_row(
         return;
     }
     let selected = view.selected == Some(wp.id);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let hover = if selected {
             "目的地から外す"
         } else {
@@ -580,7 +697,7 @@ fn waypoint_row(
         }
         ui.label(RichText::new(place).weak());
     });
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if let Some(from) = &view.location {
             if let Some(turn) = turn_to(from, wp) {
                 arrow(ui, turn, ARROW_TEXT);
@@ -592,18 +709,22 @@ fn waypoint_row(
             menu.focus_name = true;
             menu.confirm_delete = None;
         }
-        let confirming = menu.confirm_delete == Some(wp.id);
-        let label = if confirming {
+        let now = ui.input(|i| i.time);
+        let confirming = menu.confirm_delete.filter(|&(id, _)| id == wp.id);
+        let label = if confirming.is_some() {
             "もう一度押すと削除"
         } else {
             "削除"
         };
         if ui.button(label).clicked() {
-            if confirming {
-                commands.push(WaypointCommand::Delete(wp.id));
-                menu.confirm_delete = None;
-            } else {
-                menu.confirm_delete = Some(wp.id);
+            match confirming {
+                // The second click of a double click: not a confirmation yet.
+                Some((_, at)) if now - at < CONFIRM_DELAY => {}
+                Some(_) => {
+                    commands.push(WaypointCommand::Delete(wp.id));
+                    menu.confirm_delete = None;
+                }
+                None => menu.confirm_delete = Some((wp.id, now)),
             }
         }
     });
@@ -863,12 +984,23 @@ mod tests {
     }
 
     fn notice(text: &str, seconds: f64) -> Notice {
-        Notice {
-            text: text.to_owned(),
-            warn: false,
-            seconds,
-            arrow: None,
-        }
+        Notice::new(text, false, seconds)
+    }
+
+    #[test]
+    fn a_notice_replaces_its_kind_and_the_same_text_shows_once() {
+        let mut list = NoticeList::default();
+        let way = |text: &str| notice(text, 8.0).replacing(Notice::NAVIGATION);
+        list.update(vec![way("北 120 m"), notice("記録した", 6.0)], 0.0);
+        list.update(vec![way("北 100 m")], 2.0);
+        assert_eq!(list.texts(), ["記録した", "北 100 m"]);
+        // The same warning again only keeps the one showing longer.
+        list.update(vec![notice("取得できない", 6.0)], 3.0);
+        list.update(vec![notice("取得できない", 6.0)], 5.0);
+        assert_eq!(list.texts(), ["記録した", "北 100 m", "取得できない"]);
+        // 9 s: the first notice (6 s) is gone, the warning kept on (until 11 s) is not.
+        list.update(vec![], 9.0);
+        assert_eq!(list.texts(), ["北 100 m", "取得できない"]);
     }
 
     #[test]
@@ -914,7 +1046,8 @@ mod tests {
             waypoints: ids
                 .iter()
                 .map(|&id| waypoint(id, OVERWORLD, 0.0, 0.0, 0.0))
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
             ..WaypointView::default()
         }
     }
@@ -926,7 +1059,7 @@ mod tests {
         let mut menu = WaypointMenu::default();
         menu.sync(true, &view(world_a.clone(), &[1, 2]));
         menu.renaming = Some((1, "新しい名前".into()));
-        menu.confirm_delete = Some(2);
+        menu.confirm_delete = Some((2, 0.0));
         menu.sync(true, &view(world_a.clone(), &[1, 2]));
         assert!(menu.renaming.is_some() && menu.confirm_delete.is_some());
         // The menu closed.
@@ -935,12 +1068,12 @@ mod tests {
         // Another world with the same ids.
         menu.sync(true, &view(world_a.clone(), &[1, 2]));
         menu.renaming = Some((1, "x".into()));
-        menu.confirm_delete = Some(2);
+        menu.confirm_delete = Some((2, 0.0));
         menu.sync(true, &view(world_b, &[1, 2]));
         assert!(menu.renaming.is_none() && menu.confirm_delete.is_none());
         // The waypoint went away.
         menu.renaming = Some((1, "x".into()));
-        menu.confirm_delete = Some(1);
+        menu.confirm_delete = Some((1, 0.0));
         let world_b = WorldLabel::Singleplayer("B".into());
         menu.sync(true, &view(world_b, &[2]));
         assert!(menu.renaming.is_none() && menu.confirm_delete.is_none());

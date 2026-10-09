@@ -72,6 +72,11 @@ impl Unused {
             }
             Unused::SameKey => "同じキーには置き換えられない".to_owned(),
             Unused::Duplicate(id) => format!("{} はもう置き換えている", input_label(*id)),
+            Unused::Hotkey(id, action @ Action::Browser(_)) => format!(
+                "{} はブラウザの「{}」に使っているので置き換えられない（メニューの「ブラウザ」の欄の「外す」で空けられる）",
+                input_label(*id),
+                action.name()
+            ),
             Unused::Hotkey(id, action) => format!(
                 "{} は「{}」に使っているので置き換えられない",
                 input_label(*id),
@@ -226,17 +231,55 @@ fn hotkey_warnings(source: InputId, keys: &Hotkeys) -> Vec<String> {
     warnings
 }
 
+/// The game's mappings on `id`, from its key bindings, by name.
+fn mapping_names(id: InputId, bindings: &[(InputId, Vec<String>)]) -> Vec<String> {
+    bindings
+        .iter()
+        .find(|(key, _)| *key == id)
+        .map(|(_, mappings)| mappings.iter().map(|m| mapping_label(m)).collect())
+        .unwrap_or_default()
+}
+
 /// What the game does with `id`, from its key bindings: "（前進）", "（デバッグ修飾キー・オーバーレイの
 /// 切り替え）", or nothing when nothing is bound to it.
 fn mappings_text(id: InputId, bindings: &[(InputId, Vec<String>)]) -> String {
-    let Some((_, mappings)) = bindings.iter().find(|(key, _)| *key == id) else {
-        return String::new();
-    };
-    if mappings.is_empty() {
+    let names = mapping_names(id, bindings);
+    if names.is_empty() {
         return String::new();
     }
-    let labels: Vec<String> = mappings.iter().map(|m| mapping_label(m)).collect();
-    format!("（{}）", labels.join("・"))
+    format!("（{}）", names.join("・"))
+}
+
+/// Notes for a rule in use: what the game no longer gets from the source while it is
+/// rebound, and a hotkey the output would not set off (hotkeys go by the physical key).
+fn rule_notes(
+    from: InputId,
+    to: InputId,
+    keys: &Hotkeys,
+    bindings: &[(InputId, Vec<String>)],
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    let lost = mapping_names(from, bindings);
+    if !lost.is_empty() {
+        notes.push(format!(
+            "{} の「{}」は、ゲーム中は使えなくなる",
+            input_label(from),
+            lost.join("」「")
+        ));
+    }
+    if let Some(trigger) = input_trigger(to)
+        && let Some(action) = Action::ALL.into_iter().find(|&action| {
+            keys.get(action)
+                .is_some_and(|hotkey| hotkey.trigger == trigger)
+        })
+    {
+        notes.push(format!(
+            "{} を送っても reminedog の「{}」は動かない（ゲームにだけ届く）",
+            input_label(to),
+            action.name()
+        ));
+    }
+    notes
 }
 
 /// A row of the list: "マウスのボタン4 → F3（デバッグ修飾キー・オーバーレイの切り替え）".
@@ -448,26 +491,34 @@ fn section_body(
     }
     let checks = check_rules(&settings.rebinds, keys, unsupported);
     let mut delete = None;
-    ui.add_enabled_ui(settings.rebinds_enabled, |ui| {
-        for (i, (rule, check)) in settings.rebinds.iter().zip(&checks).enumerate() {
-            ui.push_id(i, |ui| {
-                // Wrapped, so a long row does not widen the menu.
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(row_text(rule, check, bindings));
-                    if ui.button("削除").clicked() {
-                        delete = Some(i);
-                    }
-                });
-                let warnings = match check {
-                    Ok((from, _)) => hotkey_warnings(*from, keys),
-                    Err(unused) => vec![unused.note()],
+    let enabled = settings.rebinds_enabled;
+    for (i, (rule, check)) in settings.rebinds.iter().zip(&checks).enumerate() {
+        ui.push_id(i, |ui| {
+            // Wrapped, so a long row does not widen the menu. A rule can be deleted while
+            // the rebinding is off.
+            ui.horizontal_wrapped(|ui| {
+                ui.add_enabled(enabled, egui::Label::new(row_text(rule, check, bindings)));
+                if ui.button("削除").clicked() {
+                    delete = Some(i);
+                }
+            });
+            ui.add_enabled_ui(enabled, |ui| {
+                let (warnings, notes) = match check {
+                    Ok((from, to)) => (
+                        hotkey_warnings(*from, keys),
+                        rule_notes(*from, *to, keys, bindings),
+                    ),
+                    Err(unused) => (vec![unused.note()], Vec::new()),
                 };
                 for warning in warnings {
                     ui.label(RichText::new(warning).color(warn));
                 }
+                for note in notes {
+                    ui.label(RichText::new(note).weak());
+                }
             });
-        }
-    });
+        });
+    }
     if let Some(i) = delete {
         settings.rebinds.remove(i);
     }
@@ -489,7 +540,10 @@ fn section_body(
         }
         Adding::Source => {
             ui.label(
-                RichText::new("置き換えるキーかマウスのボタンを押す（Esc で取り消し）").weak(),
+                RichText::new(
+                    "置き換えるキーかマウスのボタンを押す（左右のクリックは選べない。Esc で取り消し）",
+                )
+                .weak(),
             );
             if ui.button("取り消し").clicked() {
                 menu.cancel();

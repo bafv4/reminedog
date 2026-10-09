@@ -94,6 +94,11 @@ const DOUBLE_CLICK_DISTANCE: f32 = 4.0;
 const WHEEL_STEP: f32 = 100.0;
 /// Frames to get the window where the page was when it appears.
 const PLACING_TRIES: u8 = 3;
+/// The most characters of the page's address the address bar shows (pages can make their
+/// address megabytes long).
+const MAX_ADDRESS_CHARS: usize = 2048;
+/// Where the page is told the pointer went when it leaves (outside its view).
+const OUTSIDE: [f32; 2] = [-1.0, -1.0];
 
 /// The page's picture as a GL texture of the overlay's context.
 #[derive(Default)]
@@ -210,6 +215,9 @@ pub(crate) struct BrowserMenu {
     keys: Vec<PageKey>,
     /// Where the page last had the pointer, in CSS pixels.
     pointer: [f32; 2],
+    /// The page was last told the pointer is over it: it must hear when it leaves (or its
+    /// hover menus and previews stay).
+    pointer_inside: bool,
     last_click: Option<Click>,
     /// The layout sent last, and when (seconds).
     sent: Option<(PageLayout, f64)>,
@@ -228,6 +236,7 @@ impl BrowserMenu {
     /// (the menu closes or the browser hides).
     fn release(&mut self, commands: &mut Vec<BrowserCommand>) {
         self.release_keys(commands);
+        self.leave(commands);
         for button in PageButton::ALL {
             if self.buttons & button.bit() != 0 {
                 self.buttons &= !button.bit();
@@ -239,6 +248,17 @@ impl BrowserMenu {
                     modifiers: PageModifiers::default(),
                 }));
             }
+        }
+    }
+
+    /// Tells the page the pointer left it.
+    fn leave(&mut self, commands: &mut Vec<BrowserCommand>) {
+        if std::mem::take(&mut self.pointer_inside) && self.buttons == 0 {
+            commands.push(BrowserCommand::Input(PageInput::MouseMove {
+                pos: OUTSIDE,
+                buttons: 0,
+                modifiers: PageModifiers::default(),
+            }));
         }
     }
 
@@ -331,12 +351,6 @@ pub(crate) fn browser_ui(
     if !view.shown {
         return;
     }
-    if view.state == BrowserState::Ready
-        && view.url.starts_with("http")
-        && view.url != settings.browser_url
-    {
-        settings.browser_url = view.url.clone();
-    }
     let rect = page_rect(settings, ctx.content_rect());
     if !ui_open {
         let painter = ctx.layer_painter(LayerId::new(
@@ -424,15 +438,22 @@ fn window_title(view: &BrowserView, width: f32) -> String {
     };
     // A full-width character is about 14 points wide.
     let room = ((width - 80.0) / 14.0).max(4.0) as usize;
-    let mut text: String = title.chars().take(room).collect();
-    if title.chars().count() > room {
-        text.push('…');
-    }
+    let text = shorten(title, room);
     if text.is_empty() {
         "ブラウザ".to_owned()
     } else {
         format!("ブラウザ：{text}")
     }
+}
+
+/// The first `max` characters of `text`, with "…" when there are more (reading no further).
+fn shorten(text: &str, max: usize) -> String {
+    let mut chars = text.chars();
+    let mut short: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        short.push('…');
+    }
+    short
 }
 
 /// Back, forward, reload and the address bar.
@@ -466,22 +487,33 @@ fn toolbar(
         {
             commands.push(BrowserCommand::Reload);
         }
-        let mut text = menu.address.clone().unwrap_or_else(|| view.url.clone());
+        let shown = shorten(&view.url, MAX_ADDRESS_CHARS);
+        let mut text = menu.address.clone().unwrap_or_else(|| shown.clone());
         let room = (width - (ui.min_rect().width() + ui.spacing().item_spacing.x)).max(60.0);
-        let edit = ui.add(
+        // Without a running browser there is nothing to open the address in.
+        let usable = matches!(view.state, BrowserState::Ready | BrowserState::Starting);
+        let edit = ui.add_enabled(
+            usable,
             egui::TextEdit::singleline(&mut text)
                 .id(Id::new("reminedog-browser-address"))
                 .desired_width(room)
+                .char_limit(MAX_ADDRESS_CHARS)
                 .hint_text("URL か検索する言葉"),
         );
         if edit.has_focus() {
             menu.address = Some(text);
         } else if edit.lost_focus() {
             menu.address = None;
-            if ui.input(|i| i.key_pressed(Key::Enter))
-                && let Some(url) = normalize_url(&text)
-            {
-                commands.push(BrowserCommand::Navigate(url));
+            if ui.input(|i| i.key_pressed(Key::Enter)) {
+                // Enter on the address as it was opens it again (all of it, if shortened).
+                let url = if text == shown {
+                    Some(view.url.clone()).filter(|url| !url.is_empty())
+                } else {
+                    normalize_url(&text)
+                };
+                if let Some(url) = url {
+                    commands.push(BrowserCommand::Navigate(url));
+                }
             }
         }
     });
@@ -582,7 +614,9 @@ impl PageArea {
     }
 }
 
-/// Turns this frame's events into the page's input; whether a button went down on the page.
+/// Turns this frame's events into the page's input, in their order; whether a button went
+/// down on the page. Moves between two other events are sent before the second one (one per
+/// run of moves), so a drag reaches the page between its press and release.
 #[allow(clippy::too_many_arguments)]
 fn page_input(
     ctx: &egui::Context,
@@ -595,15 +629,47 @@ fn page_input(
     commands: &mut Vec<BrowserCommand>,
 ) -> bool {
     let mut pressed_on_page = false;
-    let mut moved_to = None;
-    let mut modifiers = PageModifiers::default();
-    let mut send = |input| commands.push(BrowserCommand::Input(input));
+    let mut moved_to: Option<Pos2> = None;
+    // The modifiers held now (moves carry no modifiers of their own).
+    let modifiers = ctx.input(|i| page_modifiers(i.modifiers));
+    let send = |commands: &mut Vec<BrowserCommand>, input| {
+        commands.push(BrowserCommand::Input(input));
+    };
+    let flush_move = |menu: &mut BrowserMenu,
+                      commands: &mut Vec<BrowserCommand>,
+                      moved_to: &mut Option<Pos2>| {
+        if let Some(pos) = moved_to.take() {
+            menu.pointer = area.css(pos);
+            menu.pointer_inside = true;
+            send(
+                commands,
+                PageInput::MouseMove {
+                    pos: menu.pointer,
+                    buttons: menu.buttons,
+                    modifiers,
+                },
+            );
+        }
+    };
     for event in events {
         match event {
             Event::PointerMoved(pos) => {
-                if area.rect.contains(*pos) || menu.buttons != 0 {
+                let over = area.rect.contains(*pos) && ctx.layer_id_at(*pos) == Some(area.layer);
+                if over || menu.buttons != 0 {
                     moved_to = Some(*pos);
+                } else {
+                    moved_to = None;
+                    menu.leave(commands);
                 }
+            }
+            Event::PointerGone => {
+                moved_to = None;
+                menu.leave(commands);
+            }
+            Event::WindowFocused(false) => {
+                // The releases of what is held now will not come.
+                moved_to = None;
+                menu.release(commands);
             }
             Event::PointerButton {
                 pos,
@@ -614,7 +680,8 @@ fn page_input(
                 let Some(button) = page_button(*button) else {
                     continue;
                 };
-                modifiers = page_modifiers(*held);
+                flush_move(menu, commands, &mut moved_to);
+                let modifiers = page_modifiers(*held);
                 if *pressed {
                     let on_page = area.rect.contains(*pos)
                         && !area.grip.contains(*pos)
@@ -640,25 +707,35 @@ fn page_input(
                     });
                     menu.buttons |= button.bit();
                     menu.pointer = area.css(*pos);
+                    menu.pointer_inside = true;
                     pressed_on_page = true;
-                    send(PageInput::MouseDown {
-                        pos: menu.pointer,
-                        button,
-                        clicks: count,
-                        buttons: menu.buttons,
-                        modifiers,
-                    });
+                    send(
+                        commands,
+                        PageInput::MouseDown {
+                            pos: menu.pointer,
+                            button,
+                            clicks: count,
+                            buttons: menu.buttons,
+                            modifiers,
+                        },
+                    );
                 } else if menu.buttons & button.bit() != 0 {
                     menu.buttons &= !button.bit();
                     menu.pointer = area.css(*pos);
                     let clicks = menu.last_click.map_or(1, |click| click.count);
-                    send(PageInput::MouseUp {
-                        pos: menu.pointer,
-                        button,
-                        clicks,
-                        buttons: menu.buttons,
-                        modifiers,
-                    });
+                    send(
+                        commands,
+                        PageInput::MouseUp {
+                            pos: menu.pointer,
+                            button,
+                            clicks,
+                            buttons: menu.buttons,
+                            modifiers,
+                        },
+                    );
+                    if !area.rect.contains(*pos) {
+                        menu.leave(commands);
+                    }
                 }
             }
             Event::MouseWheel {
@@ -667,18 +744,22 @@ fn page_input(
                 modifiers: held,
                 ..
             } if hovered => {
+                flush_move(menu, commands, &mut moved_to);
                 let step = match unit {
                     egui::MouseWheelUnit::Point => 1.0,
                     egui::MouseWheelUnit::Line => WHEEL_STEP,
                     egui::MouseWheelUnit::Page => area.rect.height() / area.zoom,
                 };
                 let pos = ctx.pointer_latest_pos().unwrap_or(area.rect.center());
-                send(PageInput::Wheel {
-                    pos: area.css(pos),
-                    // egui's delta moves the content; the page's scrolls the view.
-                    delta: [-delta.x * step, -delta.y * step],
-                    modifiers: page_modifiers(*held),
-                });
+                send(
+                    commands,
+                    PageInput::Wheel {
+                        pos: area.css(pos),
+                        // egui's delta moves the content; the page's scrolls the view.
+                        delta: [-delta.x * step, -delta.y * step],
+                        modifiers: page_modifiers(*held),
+                    },
+                );
             }
             Event::Key {
                 key,
@@ -696,31 +777,27 @@ fn page_input(
                 } else if !menu.keys.contains(&page_key) {
                     menu.keys.push(page_key);
                 }
-                send(if *pressed {
-                    PageInput::KeyDown {
-                        key: page_key,
-                        repeat: *repeat,
-                        modifiers,
-                    }
-                } else {
-                    PageInput::KeyUp {
-                        key: page_key,
-                        modifiers,
-                    }
-                });
+                send(
+                    commands,
+                    if *pressed {
+                        PageInput::KeyDown {
+                            key: page_key,
+                            repeat: *repeat,
+                            modifiers,
+                        }
+                    } else {
+                        PageInput::KeyUp {
+                            key: page_key,
+                            modifiers,
+                        }
+                    },
+                );
             }
-            Event::Text(text) if focused => send(PageInput::Text(text.clone())),
+            Event::Text(text) if focused => send(commands, PageInput::Text(text.clone())),
             _ => {}
         }
     }
-    if let Some(pos) = moved_to {
-        menu.pointer = area.css(pos);
-        send(PageInput::MouseMove {
-            pos: menu.pointer,
-            buttons: menu.buttons,
-            modifiers,
-        });
-    }
+    flush_move(menu, commands, &mut moved_to);
     pressed_on_page
 }
 
@@ -830,7 +907,8 @@ pub(crate) fn page_key(key: Key) -> Option<PageKey> {
     }
 }
 
-/// The picture, or while there is none what the browser is doing.
+/// The picture, or while there is none what the browser is doing. A failure shows over the
+/// last picture too (which no longer changes).
 fn paint_page(
     painter: &egui::Painter,
     rect: Rect,
@@ -838,26 +916,29 @@ fn paint_page(
     view: &BrowserView,
     tint: Color32,
 ) {
-    match picture {
-        Some(texture) => {
+    let failed = match &view.state {
+        BrowserState::Failed(why) => Some(why.as_str()),
+        _ => None,
+    };
+    let text = match (picture, failed) {
+        (Some(texture), _) => {
             let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
             painter.image(texture, rect, uv, tint);
+            failed
         }
-        None => {
-            painter.rect_filled(rect, 0.0, Color32::from_black_alpha(200));
-            let text = match &view.state {
-                BrowserState::Failed(why) => why.as_str(),
-                BrowserState::Ready => "読み込み中…",
-                BrowserState::Starting | BrowserState::Off => "ブラウザを起動しています…",
-            };
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                text,
-                egui::FontId::proportional(14.0),
-                Color32::LIGHT_GRAY,
-            );
-        }
+        (None, Some(why)) => Some(why),
+        (None, None) if view.state == BrowserState::Ready => Some("読み込み中…"),
+        (None, None) => Some("ブラウザを起動しています…"),
+    };
+    if let Some(text) = text {
+        painter.rect_filled(rect, 0.0, Color32::from_black_alpha(200));
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(14.0),
+            Color32::LIGHT_GRAY,
+        );
     }
     painter.rect_stroke(
         rect,
@@ -922,7 +1003,7 @@ pub(crate) fn browser_section(
             ui.label(RichText::new("表示中").weak());
         }
         BrowserState::Ready => {
-            ui.label(RichText::new("非表示（動画は一時停止している）").weak());
+            ui.label(RichText::new("非表示（動画は一時停止し、音は消している）").weak());
         }
         BrowserState::Failed(why) => {
             ui.label(RichText::new(why).color(ui.visuals().warn_fg_color));
@@ -1357,16 +1438,17 @@ mod tests {
             })
             .collect();
         let near = |pos: [f32; 2]| (pos[0] - 20.0).abs() < 0.6 && (pos[1] - 10.0).abs() < 0.6;
+        // In the order they happened: the move to the page, then the click.
         assert!(
-            matches!(inputs[0], PageInput::MouseDown { pos, button: PageButton::Left, clicks: 1, buttons: 1, .. } if near(pos)),
+            matches!(inputs[0], PageInput::MouseMove { pos, buttons: 0, .. } if near(pos)),
             "{inputs:?}"
         );
         assert!(
-            matches!(inputs[1], PageInput::MouseUp { buttons: 0, .. }),
+            matches!(inputs[1], PageInput::MouseDown { pos, button: PageButton::Left, clicks: 1, buttons: 1, .. } if near(pos)),
             "{inputs:?}"
         );
         assert!(
-            matches!(inputs[2], PageInput::MouseMove { .. }),
+            matches!(inputs[2], PageInput::MouseUp { buttons: 0, .. }),
             "{inputs:?}"
         );
         // The page has the keys now.
@@ -1417,6 +1499,61 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_in_one_frame_moves_between_press_and_release_and_leaving_is_told() {
+        let ctx = egui::Context::default();
+        let mut menu = BrowserMenu::default();
+        let mut settings = Settings {
+            browser_rect: Some([300.0, 200.0, 400.0, 225.0]),
+            ..Settings::default()
+        };
+        let view = ready();
+        run(&ctx, &mut menu, &mut settings, &view, Vec::new());
+        let a = pos2(350.0, 250.0);
+        let b = pos2(380.0, 260.0);
+        let commands = frame(
+            &ctx,
+            &mut menu,
+            &mut settings,
+            &view,
+            true,
+            vec![
+                Event::PointerMoved(a),
+                primary(a, true),
+                Event::PointerMoved(b),
+                primary(b, false),
+            ],
+        );
+        let kinds: Vec<&str> = commands
+            .iter()
+            .filter_map(|c| match c {
+                BrowserCommand::Input(PageInput::MouseMove { buttons: 1, .. }) => Some("drag"),
+                BrowserCommand::Input(PageInput::MouseMove { .. }) => Some("move"),
+                BrowserCommand::Input(PageInput::MouseDown { .. }) => Some("down"),
+                BrowserCommand::Input(PageInput::MouseUp { .. }) => Some("up"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, ["move", "down", "drag", "up"]);
+        // Off the page: it hears the pointer left.
+        let away = pos2(50.0, 600.0);
+        let commands = frame(
+            &ctx,
+            &mut menu,
+            &mut settings,
+            &view,
+            true,
+            vec![Event::PointerMoved(away)],
+        );
+        assert!(
+            commands.iter().any(|c| matches!(
+                c,
+                BrowserCommand::Input(PageInput::MouseMove { pos: OUTSIDE, .. })
+            )),
+            "{commands:?}"
+        );
+    }
+
+    #[test]
     fn enter_in_the_address_bar_opens_the_page() {
         let ctx = egui::Context::default();
         let mut menu = BrowserMenu::default();
@@ -1457,18 +1594,13 @@ mod tests {
     }
 
     #[test]
-    fn the_page_shown_is_kept_for_the_next_start() {
+    fn the_page_address_stays_out_of_the_settings() {
+        // It can hold tokens; the platform hook keeps it elsewhere.
         let ctx = egui::Context::default();
         let mut menu = BrowserMenu::default();
         let mut settings = Settings::default();
+        let before = settings.browser_url.clone();
         run(&ctx, &mut menu, &mut settings, &ready(), Vec::new());
-        assert_eq!(settings.browser_url, "https://example.com/");
-        // Not an address to come back to.
-        let view = BrowserView {
-            url: "about:blank".into(),
-            ..ready()
-        };
-        run(&ctx, &mut menu, &mut settings, &view, Vec::new());
-        assert_eq!(settings.browser_url, "https://example.com/");
+        assert_eq!(settings.browser_url, before);
     }
 }
