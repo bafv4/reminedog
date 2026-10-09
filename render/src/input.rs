@@ -12,7 +12,7 @@ use crate::overlay::{Action, Hotkeys};
 use crate::pointer::PointerSpeed;
 use crate::rebind::{Delivery, Output, Phase, RebindState, Rebinder};
 use egui::{Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, pos2, vec2};
-use reminedog_core::InputId;
+use reminedog_core::{InputId, modifier_kind};
 
 /// What to do with an input event other than a key or mouse button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +56,8 @@ impl BrowserAction {
 
 /// Actions kept until the next frame takes them.
 const MAX_ACTIONS: usize = 4;
+/// The most characters a paste into the UI takes.
+const MAX_PASTE: usize = 4096;
 /// Browser actions kept until the next frame takes them (a held key repeats).
 const MAX_BROWSER_ACTIONS: usize = 8;
 
@@ -125,6 +127,8 @@ pub struct InputRouter {
     /// UI opened or closed since the last `take_ui_changed`.
     ui_changed: bool,
     zoom_held: bool,
+    /// The key or button whose press started the zoom.
+    zoom_raw: Option<InputId>,
     modifiers: Modifiers,
     /// Overlay pointer in window pixels.
     pointer: Pos2,
@@ -148,6 +152,8 @@ pub struct InputRouter {
     /// The key of [`IN_GAME`] at the same index was pressed and consumed, so its release is
     /// ours too.
     action_held: [bool; IN_GAME.len()],
+    /// The key or button of each held [`IN_GAME`] press.
+    action_raw: [Option<InputId>; IN_GAME.len()],
     actions: Vec<HotkeyAction>,
     browser_actions: Vec<BrowserAction>,
     /// The browser shows: its keys other than the toggle are taken.
@@ -160,16 +166,25 @@ pub struct InputRouter {
     debug_held: bool,
     /// The next key or mouse button pressed in the UI is captured.
     capturing: Option<Capture>,
+    /// A modifier key went down during an input capture: taken when it goes up alone, but
+    /// a combination with it (Ctrl+I, which closes the menu) is no capture of it.
+    pending_modifier: Option<InputId>,
     captured: Option<Captured>,
     /// The keys or buttons whose press a capture took: their repeats and release are not the
     /// game's either (F3's release alone toggles the debug screen behind the menu; a repeat
     /// without its release would leave the key held in the game).
     capture_held: Vec<InputId>,
     rebinder: Rebinder,
-    /// A key the game got as another key was pressed or repeated: its characters are not
-    /// the game's either (X → T would type an x into the chat T opened). Until the next text
-    /// or key event.
+    /// A key the game got as another key, or a hotkey, was pressed or repeated: its
+    /// characters are not the game's either (X → T would type an x into the chat T opened).
+    /// Until the next text or key event.
     suppress_text: bool,
+    /// A widget of the UI has the keyboard (a text field, the browser's page): a menu key
+    /// that types text is typed there instead.
+    text_focus: bool,
+    /// Ctrl+V (or Shift+Insert) went to the UI: the platform hands over the clipboard's
+    /// text ([`paste`](Self::paste)).
+    paste_requested: bool,
 }
 
 impl Default for InputRouter {
@@ -185,6 +200,7 @@ impl InputRouter {
             ui_open: false,
             ui_changed: false,
             zoom_held: false,
+            zoom_raw: None,
             modifiers: Modifiers::NONE,
             pointer: Pos2::ZERO,
             screen_px: [0.0, 0.0],
@@ -196,16 +212,20 @@ impl InputRouter {
             pointer_speed: PointerSpeed::RAW,
             keys: Hotkeys::DEFAULT,
             action_held: [false; IN_GAME.len()],
+            action_raw: [None; IN_GAME.len()],
             actions: Vec::new(),
             browser_actions: Vec::new(),
             browser_shown: false,
             debug_modifier: Some(DEFAULT_DEBUG_MODIFIER),
             debug_held: false,
             capturing: None,
+            pending_modifier: None,
             captured: None,
             capture_held: Vec::new(),
             rebinder: Rebinder::new(),
             suppress_text: false,
+            text_focus: false,
+            paste_requested: false,
         }
     }
 
@@ -214,7 +234,9 @@ impl InputRouter {
         if !enabled {
             self.set_ui_open(false);
             self.zoom_held = false;
+            self.zoom_raw = None;
             self.action_held = [false; IN_GAME.len()];
+            self.action_raw = [None; IN_GAME.len()];
             self.debug_held = false;
             self.suppress_text = false;
             self.capture_held.clear();
@@ -246,8 +268,40 @@ impl InputRouter {
     /// Size of the window in pixels and the UI scale, updated every frame.
     pub fn set_screen(&mut self, size_px: [u32; 2], pixels_per_point: f32) {
         self.screen_px = [size_px[0] as f32, size_px[1] as f32];
-        if pixels_per_point.is_finite() && pixels_per_point > 0.0 {
-            self.pixels_per_point = pixels_per_point;
+        self.pixels_per_point = crate::overlay::clamp_pixels_per_point(pixels_per_point);
+    }
+
+    /// Whether a widget of the UI has the keyboard (from the last frame).
+    pub fn set_text_focus(&mut self, focus: bool) {
+        self.text_focus = focus;
+    }
+
+    /// Whether the UI asked for the clipboard's text since the last call.
+    pub fn take_paste_request(&mut self) -> bool {
+        std::mem::take(&mut self.paste_requested)
+    }
+
+    /// The clipboard's text for a paste the UI asked for: one line, at most
+    /// [`MAX_PASTE`] characters (the UI's text fields are single lines).
+    pub fn paste(&mut self, text: &str) {
+        if !self.ui_open {
+            return;
+        }
+        let text: String = text
+            .chars()
+            .map(|c| {
+                if matches!(c, '\r' | '\n' | '\t') {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .filter(|c| !c.is_control())
+            .take(MAX_PASTE)
+            .collect();
+        let text = text.trim();
+        if !text.is_empty() {
+            self.push_event(Event::Paste(text.to_owned()));
         }
     }
 
@@ -266,18 +320,85 @@ impl InputRouter {
 
     pub fn set_hotkeys(&mut self, keys: Hotkeys) {
         if keys.zoom != self.keys.zoom {
-            self.zoom_held = false;
+            self.drop_zoom();
         }
         let (old, new) = (in_game_keys(&self.keys), in_game_keys(&keys));
-        for (held, (old, new)) in self.action_held.iter_mut().zip(old.into_iter().zip(new)) {
+        for (i, (old, new)) in old.into_iter().zip(new).enumerate() {
             if old != new {
-                *held = false;
+                self.drop_action(i);
             }
         }
         self.keys = keys;
     }
 
+    /// Forgets the zoom's press; its release (and repeats) stay out of the game, which
+    /// never got the press.
+    fn drop_zoom(&mut self) {
+        if std::mem::take(&mut self.zoom_held) {
+            let raw = self.zoom_raw.take();
+            self.hold_captured(raw);
+        }
+    }
+
+    /// As [`drop_zoom`](Self::drop_zoom), for the [`IN_GAME`] press at `i`.
+    fn drop_action(&mut self, i: usize) {
+        if std::mem::take(&mut self.action_held[i]) {
+            let raw = self.action_raw[i].take();
+            self.hold_captured(raw);
+        }
+    }
+
+    /// The keys and buttons whose press the router holds (the zoom's, the in-game hotkeys',
+    /// the debug modifier the game has down), for the platform's check of releases that
+    /// never come ([`forget_press`](Self::forget_press)).
+    pub fn held_presses(&self) -> Vec<InputId> {
+        let mut held: Vec<InputId> = self
+            .zoom_raw
+            .filter(|_| self.zoom_held)
+            .into_iter()
+            .collect();
+        for (i, raw) in self.action_raw.iter().enumerate() {
+            if self.action_held[i]
+                && let Some(id) = *raw
+                && !held.contains(&id)
+            {
+                held.push(id);
+            }
+        }
+        if self.debug_held
+            && let Some(id) = self.debug_modifier
+            && !held.contains(&id)
+        {
+            held.push(id);
+        }
+        held
+    }
+
+    /// The key or button `id` was found to be up although its release never came (26.x drops
+    /// input events while loading a world): forgets the router's presses of it, as the
+    /// release would have.
+    pub fn forget_press(&mut self, id: InputId) {
+        if self.zoom_held && self.zoom_raw == Some(id) {
+            self.zoom_held = false;
+            self.zoom_raw = None;
+        }
+        for i in 0..IN_GAME.len() {
+            if self.action_held[i] && self.action_raw[i] == Some(id) {
+                self.action_held[i] = false;
+                self.action_raw[i] = None;
+            }
+        }
+        if self.debug_held && self.debug_modifier == Some(id) && !self.rebinder.rule_holds(id) {
+            self.debug_held = false;
+        }
+    }
+
     /// Minecraft's debug modifier key or button; `None` when it is unbound.
+    /// Whether the game has the debug modifier down, as far as the router passed it on.
+    pub fn debug_held(&self) -> bool {
+        self.debug_held
+    }
+
     pub fn set_debug_modifier(&mut self, id: Option<InputId>) {
         if id != self.debug_modifier {
             self.debug_modifier = id;
@@ -367,11 +488,13 @@ impl InputRouter {
     fn begin_capture(&mut self, capture: Capture) {
         if self.ui_open {
             self.capturing = Some(capture);
+            self.pending_modifier = None;
             self.captured = None;
         }
     }
 
     pub fn cancel_capture(&mut self) {
+        self.pending_modifier = None;
         if self.capturing.take().is_some() {
             self.captured = Some(Captured::Cancelled);
         }
@@ -383,6 +506,7 @@ impl InputRouter {
 
     fn finish_capture(&mut self, result: Captured) {
         self.capturing = None;
+        self.pending_modifier = None;
         self.captured = Some(result);
     }
 
@@ -432,9 +556,17 @@ impl InputRouter {
         self.ui_open = open;
         self.ui_changed = true;
         log::info!("ui {}", if open { "opened" } else { "closed" });
-        self.zoom_held = false;
-        self.action_held = [false; IN_GAME.len()];
+        self.drop_zoom();
+        for i in 0..IN_GAME.len() {
+            self.drop_action(i);
+        }
         self.cancel_capture();
+        if !open && matches!(self.captured, Some(Captured::Input(_))) {
+            // Taken in the same frame the menu closed (a key, then Esc): the menu that waited
+            // for it is gone.
+            self.captured = Some(Captured::Cancelled);
+        }
+        self.paste_requested = false;
         if open {
             if self.last_captured || self.pointer == Pos2::ZERO {
                 self.pointer = pos2(self.screen_px[0] / 2.0, self.screen_px[1] / 2.0);
@@ -464,6 +596,9 @@ impl InputRouter {
         captured: bool,
         stateless: bool,
     ) -> Delivery {
+        // The menu key may come before any motion since the game grabbed or released the
+        // cursor (a chat closed): the menu must know which cursor to show.
+        self.observe_capture(captured);
         self.modifiers = modifiers;
         self.suppress_text = false;
         let phase = phase(pressed, repeat);
@@ -563,19 +698,31 @@ impl InputRouter {
         if self.capture_release(raw, phase(pressed, repeat)) {
             return Route::Consume;
         }
+        let menu_key = pressed
+            && self.keys.menu.matches_key(key, modifiers)
+            && !self.menu_key_types_here(key, captured);
         if self.ui_open
             && let Some(capture) = self.capturing
         {
             if pressed && !repeat {
                 let escape = key == Some(Key::Escape) || raw == Some(ESCAPE);
+                let combined = self.pending_modifier.is_some() && menu_key;
                 match (capture, key, raw) {
                     _ if escape => self.finish_capture(Captured::Cancelled),
+                    // The menu key with the modifier held: it closes the menu.
+                    _ if combined => {
+                        self.hold_captured(raw);
+                        self.set_ui_open(false);
+                    }
                     (Capture::Hotkey, Some(k), _) if hotkey::assignable(Trigger::Key(k)) => {
                         self.finish_capture(Captured::Hotkey(Hotkey::with_modifiers(
                             Trigger::Key(k),
                             modifiers,
                         )));
                         self.hold_captured(raw);
+                    }
+                    (Capture::Input, _, Some(id)) if modifier_kind(id).is_some() => {
+                        self.pending_modifier = Some(id);
                     }
                     (Capture::Input, _, Some(id)) => {
                         self.finish_capture(Captured::Input(id));
@@ -585,6 +732,13 @@ impl InputRouter {
                     // waiting.
                     _ => {}
                 }
+            } else if !pressed
+                && let Some(id) = raw
+                && self.pending_modifier == Some(id)
+            {
+                // The modifier went up alone: it is the key.
+                self.finish_capture(Captured::Input(id));
+                return Route::Consume;
             }
             return if pressed {
                 Route::Consume
@@ -592,9 +746,12 @@ impl InputRouter {
                 Route::Forward
             };
         }
-        if pressed && self.keys.menu.matches_key(key, modifiers) {
+        if menu_key {
             if !repeat {
                 self.set_ui_open(!self.ui_open);
+                // Its release is not the game's either (F3 as the menu key would toggle the
+                // debug screen).
+                self.hold_captured(raw);
             }
             return Route::Consume;
         }
@@ -602,6 +759,7 @@ impl InputRouter {
             if key == Some(Key::Escape) && pressed {
                 if !repeat {
                     self.set_ui_open(false);
+                    self.hold_captured(raw);
                 }
                 return Route::Consume;
             }
@@ -613,6 +771,9 @@ impl InputRouter {
                     repeat,
                     modifiers,
                 });
+                if pressed {
+                    self.clipboard_key(key, modifiers);
+                }
             }
             return if pressed {
                 Route::Consume
@@ -624,6 +785,35 @@ impl InputRouter {
             return Route::Forward;
         };
         self.game_hotkey(Trigger::Key(key), raw, pressed, repeat, modifiers, captured)
+    }
+
+    /// A menu key without Ctrl or Alt that types text (M, Space) types it where text goes:
+    /// in the UI's text field or page that has the keyboard, and in the game's screens (chat,
+    /// signs) rather than opening the menu there.
+    fn menu_key_types_here(&self, key: Option<Key>, captured: bool) -> bool {
+        let menu = self.keys.menu;
+        !menu.ctrl
+            && !menu.alt
+            && key.is_some_and(hotkey::types_text)
+            && if self.ui_open {
+                self.text_focus
+            } else {
+                !captured
+            }
+    }
+
+    /// The UI's clipboard keys: copy, cut and paste for its text fields (the browser's page
+    /// gets the keys themselves).
+    fn clipboard_key(&mut self, key: Key, modifiers: Modifiers) {
+        let command = modifiers.ctrl || modifiers.command;
+        match key {
+            Key::V if command && !modifiers.alt => self.paste_requested = true,
+            Key::Insert if modifiers.shift => self.paste_requested = true,
+            Key::C if command && !modifiers.alt => self.push_event(Event::Copy),
+            Key::Insert if command => self.push_event(Event::Copy),
+            Key::X if command && !modifiers.alt => self.push_event(Event::Cut),
+            _ => {}
+        }
     }
 
     /// The in-game hotkeys (UI closed): the waypoint and navigate keys, the browser's (other
@@ -646,6 +836,7 @@ impl InputRouter {
             };
             if !pressed {
                 if std::mem::take(&mut self.action_held[i]) {
+                    self.action_raw[i] = None;
                     return Route::Consume;
                 }
             } else if repeat {
@@ -655,6 +846,7 @@ impl InputRouter {
                     {
                         self.queue(InGame::Browser(action));
                     }
+                    self.suppress_own_text(trigger);
                     return Route::Consume;
                 }
             } else {
@@ -666,7 +858,9 @@ impl InputRouter {
                 };
                 if active && captured && !self.debug_held && hotkey.modifiers_held(modifiers) {
                     self.action_held[i] = true;
+                    self.action_raw[i] = raw;
                     self.queue(action);
+                    self.suppress_own_text(trigger);
                     return Route::Consume;
                 }
             }
@@ -675,9 +869,22 @@ impl InputRouter {
         let is_modifier = raw.is_some() && raw == self.debug_modifier;
         if self.keys.zoom.trigger == trigger && (self.zoom_held || !self.debug_held || is_modifier)
         {
-            return self.zoom_input(pressed, repeat, modifiers, captured);
+            let route = self.zoom_input(raw, pressed, repeat, modifiers, captured);
+            if route == Route::Consume && pressed {
+                self.suppress_own_text(trigger);
+            }
+            return route;
         }
         Route::Forward
+    }
+
+    /// The characters a hotkey's own press or repeat types are not the game's (the next text
+    /// event only: the hotkey held while typing in a chat opened meanwhile must not swallow
+    /// the chat's characters).
+    fn suppress_own_text(&mut self, trigger: Trigger) {
+        if matches!(trigger, Trigger::Key(_)) {
+            self.suppress_text = true;
+        }
     }
 
     fn queue(&mut self, action: InGame) {
@@ -699,6 +906,7 @@ impl InputRouter {
     /// a press the game got (the modifier was held then) must leave the release to the game.
     fn zoom_input(
         &mut self,
+        raw: Option<InputId>,
         pressed: bool,
         repeat: bool,
         modifiers: Modifiers,
@@ -707,11 +915,15 @@ impl InputRouter {
         if pressed {
             let starts = !repeat && captured && self.keys.zoom.modifiers_held(modifiers);
             if self.zoom_held || starts {
+                if !self.zoom_held {
+                    self.zoom_raw = raw;
+                }
                 self.zoom_held = true;
                 return Route::Consume;
             }
         } else if self.zoom_held {
             self.zoom_held = false;
+            self.zoom_raw = None;
             return Route::Consume;
         }
         Route::Forward
@@ -720,11 +932,7 @@ impl InputRouter {
     /// Typed text (after the keyboard layout and IME).
     pub fn text(&mut self, text: &str) -> Route {
         if std::mem::take(&mut self.suppress_text) {
-            // The characters of a key the game got as another key.
-            return Route::Consume;
-        }
-        if self.zoom_held || self.action_held.contains(&true) {
-            // The hotkey's own characters (and their auto-repeat).
+            // The characters of a key the game got as another key, or of a hotkey.
             return Route::Consume;
         }
         if !self.ui_open || !self.enabled {
@@ -745,6 +953,7 @@ impl InputRouter {
         pressed: bool,
         captured: bool,
     ) -> Delivery {
+        self.observe_capture(captured);
         let phase = phase(pressed, false);
         let delivery = self
             .rebound(raw, phase, captured, false)
@@ -792,6 +1001,7 @@ impl InputRouter {
             }
         } else if pressed && self.keys.menu.matches_button(button, self.modifiers) {
             self.set_ui_open(!self.ui_open);
+            self.hold_captured(raw);
             return Route::Consume;
         }
         if !self.ui_open {
@@ -821,13 +1031,7 @@ impl InputRouter {
     /// An absolute cursor position (GLFW). Returns the position to forward to the game, or
     /// `None` to drop the event.
     pub fn cursor_position(&mut self, x: f64, y: f64, captured: bool) -> Option<(f64, f64)> {
-        if captured != self.last_captured {
-            // The game re-centres the cursor and its reference point when it grabs or
-            // releases the cursor, so earlier motion no longer matters.
-            self.last_captured = captured;
-            self.last_cursor = None;
-            self.offset = (0.0, 0.0);
-        }
+        self.observe_capture(captured);
         let (dx, dy) = self
             .last_cursor
             .map_or((0.0, 0.0), |(lx, ly)| (x - lx, y - ly));
@@ -842,6 +1046,10 @@ impl InputRouter {
             }
             return None;
         }
+        if !captured {
+            // Where the free cursor is, for the menu opening over it.
+            self.pointer = pos2(x as f32, y as f32);
+        }
         Some(if captured {
             (x - self.offset.0, y - self.offset.1)
         } else {
@@ -849,10 +1057,24 @@ impl InputRouter {
         })
     }
 
+    /// Whether the game has the cursor, from any event: the game re-centres the cursor and its
+    /// reference point when it grabs or releases it, so earlier motion no longer matters.
+    fn observe_capture(&mut self, captured: bool) {
+        if captured != self.last_captured {
+            self.last_captured = captured;
+            self.last_cursor = None;
+            self.offset = (0.0, 0.0);
+        }
+    }
+
     /// Relative mouse motion with the absolute position (SDL3).
     pub fn cursor_motion(&mut self, dx: f32, dy: f32, x: f32, y: f32, captured: bool) -> Route {
-        self.last_captured = captured;
+        self.observe_capture(captured);
         if !self.ui_open {
+            if !captured {
+                // Where the free cursor is, for the menu opening over it.
+                self.pointer = pos2(x, y);
+            }
             return Route::Forward;
         }
         if captured {
@@ -884,8 +1106,14 @@ impl InputRouter {
     /// key but key -1, and every button; SDL3: keys only).
     #[must_use = "the releases must reach the game"]
     pub fn focus_lost(&mut self, platform_releases: impl Fn(InputId) -> bool) -> Vec<Output> {
+        if self.ui_open {
+            // The UI lets go of what it holds (the browser's page of its buttons and keys).
+            self.push_event(Event::WindowFocused(false));
+        }
         self.zoom_held = false;
+        self.zoom_raw = None;
         self.action_held = [false; IN_GAME.len()];
+        self.action_raw = [None; IN_GAME.len()];
         self.debug_held = false;
         self.suppress_text = false;
         self.rebinder.focus_lost(platform_releases)
@@ -1222,6 +1450,43 @@ mod tests {
     }
 
     #[test]
+    fn the_menu_opens_where_the_free_cursor_is() {
+        let mut r = router();
+        r.cursor_position(100.0, 100.0, false);
+        ctrl_i(&mut r);
+        ctrl_i(&mut r);
+        // A screen of the game is open: the menu's pointer follows the real cursor.
+        r.cursor_position(120.0, 80.0, false);
+        r.take_events();
+        r.route_key(Some(Key::I), true, false, CTRL, false);
+        assert!(r.ui_open());
+        assert_eq!(r.software_cursor(), None, "the real cursor is visible");
+        assert!(
+            r.take_events()
+                .contains(&Event::PointerMoved(pos2(120.0, 80.0)))
+        );
+        r.route_key(Some(Key::I), true, false, CTRL, false);
+        // SDL3 reports the free cursor's position with its motion too.
+        r.cursor_motion(1.0, 1.0, 300.0, 200.0, false);
+        r.take_events();
+        r.route_key(Some(Key::I), true, false, CTRL, false);
+        assert!(
+            r.take_events()
+                .contains(&Event::PointerMoved(pos2(300.0, 200.0)))
+        );
+    }
+
+    #[test]
+    fn the_menu_key_tells_that_the_game_took_the_cursor() {
+        let mut r = router();
+        // The last motion was on a screen (a chat), which closed without a motion since.
+        r.cursor_position(120.0, 80.0, false);
+        ctrl_i(&mut r);
+        // The game hides its cursor: the menu draws its own, from the middle.
+        assert_eq!(r.software_cursor(), Some(pos2(400.0, 300.0)));
+    }
+
+    #[test]
     fn relative_motion_moves_the_software_cursor() {
         let mut r = router();
         assert_eq!(r.cursor_motion(5.0, 5.0, 0.0, 0.0, true), Route::Forward);
@@ -1495,13 +1760,19 @@ mod tests {
             r.route_key(Some(Key::J), false, false, NONE, false),
             Route::Consume
         );
-        // Opening the menu forgets the press (the release goes to the game while it is open).
+        // Opening the menu forgets the press; its release stays out of the game, which never
+        // got the press (F3 as a hotkey would toggle the debug screen).
         r.route_key(Some(Key::J), true, false, NONE, true);
         ctrl_i(&mut r);
         ctrl_i(&mut r);
         assert_eq!(
             r.route_key(Some(Key::J), false, false, NONE, true),
-            Route::Forward
+            Route::Consume
+        );
+        assert_eq!(
+            r.route_key(Some(Key::J), false, false, NONE, true),
+            Route::Forward,
+            "once"
         );
         assert_eq!(r.take_actions().len(), 2);
     }
@@ -2097,16 +2368,20 @@ mod tests {
         );
         assert_eq!(r.take_captured(), None);
         assert_eq!(r.take_events().len(), 1);
-        // A modifier key alone is a key like any other.
+        // A modifier key alone is a key like any other, taken when it goes up alone.
         let ctrl = r.key(None, Some(LCTRL), true, false, CTRL, true, false);
         assert_eq!(ctrl, Delivery::Consume);
-        assert_eq!(r.take_captured(), Some(Captured::Input(LCTRL)));
+        assert_eq!(r.take_captured(), None);
         assert!(r.take_events().is_empty(), "egui does not see it");
-        // Its release is not the game's either (once), and capture is over.
         let ctrl = r.key(None, Some(LCTRL), false, false, NONE, true, false);
-        assert_eq!(ctrl, Delivery::Consume);
+        assert_eq!(
+            ctrl,
+            Delivery::Consume,
+            "its release is not the game's either"
+        );
+        assert_eq!(r.take_captured(), Some(Captured::Input(LCTRL)));
         let ctrl = r.key(None, Some(LCTRL), false, false, NONE, true, false);
-        assert_eq!(ctrl, Delivery::Forward);
+        assert_eq!(ctrl, Delivery::Forward, "capture is over");
         r.start_input_capture();
         assert_eq!(
             r.route_button(PointerButton::Extra1, true, true),
@@ -2131,6 +2406,127 @@ mod tests {
         r.start_capture();
         r.key(None, Some(LCTRL), true, false, CTRL, true, false);
         assert_eq!(r.take_captured(), None, "a modifier alone is no hotkey");
+    }
+
+    #[test]
+    fn ctrl_i_while_waiting_for_a_key_closes_the_menu_without_taking_ctrl() {
+        let mut r = router();
+        ctrl_i(&mut r);
+        r.key(Some(Key::I), raw(Key::I), false, false, NONE, true, false);
+        r.start_input_capture();
+        assert_eq!(
+            r.key(None, Some(LCTRL), true, false, CTRL, true, false),
+            Delivery::Consume
+        );
+        assert_eq!(
+            r.key(Some(Key::I), raw(Key::I), true, false, CTRL, true, false),
+            Delivery::Consume
+        );
+        assert!(!r.ui_open());
+        assert_eq!(r.take_captured(), Some(Captured::Cancelled));
+        assert_eq!(
+            r.key(Some(Key::I), raw(Key::I), false, false, CTRL, true, false),
+            Delivery::Consume,
+            "the menu key's release is not the game's"
+        );
+        r.key(None, Some(LCTRL), false, false, NONE, true, false);
+        assert_eq!(r.take_captured(), None, "nothing is taken afterwards");
+
+        // A key taken in the frame the menu closes (a key, then Esc) is dropped too.
+        ctrl_i(&mut r);
+        r.start_input_capture();
+        key(&mut r, Key::B, true, false, true);
+        key(&mut r, Key::Escape, true, false, true);
+        assert!(!r.ui_open());
+        assert_eq!(r.take_captured(), Some(Captured::Cancelled));
+    }
+
+    #[test]
+    fn the_ui_gets_copy_cut_and_the_clipboard_on_paste() {
+        let mut r = router();
+        ctrl_i(&mut r);
+        r.take_events();
+        r.route_key(Some(Key::V), true, false, CTRL, true);
+        assert!(r.take_paste_request());
+        assert!(!r.take_paste_request(), "once");
+        r.paste("https://example.com/\r\nnext");
+        r.route_key(Some(Key::C), true, false, CTRL, true);
+        r.route_key(Some(Key::X), true, false, CTRL, true);
+        let events: Vec<_> = r
+            .take_events()
+            .into_iter()
+            .filter(|e| !matches!(e, Event::Key { .. }))
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                Event::Paste("https://example.com/  next".into()),
+                Event::Copy,
+                Event::Cut
+            ]
+        );
+        // Not while the menu is closed.
+        ctrl_i(&mut r);
+        r.take_events();
+        r.paste("text");
+        assert!(
+            r.take_events()
+                .iter()
+                .all(|e| !matches!(e, Event::Paste(_)))
+        );
+    }
+
+    #[test]
+    fn a_menu_key_that_types_text_types_it_where_text_goes() {
+        let mut r = router();
+        r.set_hotkeys(Hotkeys {
+            menu: Hotkey::parse("M").unwrap(),
+            ..Hotkeys::DEFAULT
+        });
+        // In a game screen (chat): the game gets it.
+        assert_eq!(
+            r.route_key(Some(Key::M), true, false, NONE, false),
+            Route::Forward
+        );
+        assert!(!r.ui_open());
+        // In game it opens the menu.
+        assert_eq!(
+            r.route_key(Some(Key::M), true, false, NONE, true),
+            Route::Consume
+        );
+        assert!(r.ui_open());
+        r.route_key(Some(Key::M), false, false, NONE, true);
+        // With a text field focused it is typed there.
+        r.set_text_focus(true);
+        r.take_events();
+        assert_eq!(
+            r.route_key(Some(Key::M), true, false, NONE, true),
+            Route::Consume
+        );
+        assert!(r.ui_open());
+        assert!(
+            r.take_events()
+                .iter()
+                .any(|e| matches!(e, Event::Key { key: Key::M, .. }))
+        );
+        r.set_text_focus(false);
+        r.route_key(Some(Key::M), true, false, NONE, true);
+        assert!(!r.ui_open());
+    }
+
+    #[test]
+    fn hotkey_presses_whose_release_never_came_are_forgotten() {
+        let mut r = router();
+        assert_eq!(key(&mut r, Key::Z, true, false, true), Delivery::Consume);
+        assert!(r.zoom_active());
+        let z = raw(Key::Z).unwrap();
+        assert_eq!(r.held_presses(), vec![z]);
+        // The hotkey's own character goes, but only that one.
+        assert_eq!(r.text("z"), Route::Consume);
+        assert_eq!(r.text("t"), Route::Forward);
+        r.forget_press(z);
+        assert!(!r.zoom_active());
+        assert!(r.held_presses().is_empty());
     }
 
     #[test]

@@ -105,6 +105,11 @@ impl PointerSpeed {
         let (Some(first), Some(last)) = (points.first(), points.last()) else {
             return 1.0;
         };
+        // Not a number: no point of the curve to look between (it would index before the
+        // first one).
+        if size.is_nan() {
+            return 1.0;
+        }
         if size <= first[0] {
             return first[1];
         }
@@ -134,6 +139,14 @@ pub fn parse_windows_curve(bytes: &[u8]) -> Option<[f32; 5]> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_motion_that_is_not_a_number_does_not_panic() {
+        let speed = super::PointerSpeed::windows(10, true, super::WINDOWS_DEFAULT_CURVE);
+        let (dx, dy) = speed.apply(f32::NAN, 1.0);
+        assert!(dx.is_nan() || dx.is_finite());
+        assert!(dy.is_finite() || dy.is_nan());
+    }
+
     use super::*;
 
     fn close(a: f32, b: f32) -> bool {

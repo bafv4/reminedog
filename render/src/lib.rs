@@ -21,7 +21,7 @@ pub use hotkey::{Hotkey, Trigger};
 pub use input::{BrowserAction, Captured, HotkeyAction, InputRouter, Route};
 pub use overlay::{
     FontSource, FrameInput, FrameOutput, FrameParams, Hotkeys, Overlay, OverlayError, StatusLine,
-    ZoomView, gl_summary, hotkeys,
+    ZoomView, gl_summary, hotkeys, hotkeys_quiet,
 };
 pub use pointer::{PointerSpeed, WINDOWS_DEFAULT_CURVE, parse_windows_curve};
 pub use rebind::{Delivery, MAX_REBINDS, Output, Phase, RebindState};

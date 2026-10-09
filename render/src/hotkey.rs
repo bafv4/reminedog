@@ -93,7 +93,7 @@ impl Hotkey {
     pub fn label(&self) -> String {
         let mut text = self.modifier_prefix();
         match self.trigger {
-            Trigger::Key(key) => text.push_str(key.symbol_or_name()),
+            Trigger::Key(key) => text.push_str(key_symbol(key)),
             Trigger::Mouse(button) => text.push_str(match button {
                 PointerButton::Middle => "ホイールクリック",
                 PointerButton::Extra1 => "マウスのボタン4",
@@ -298,6 +298,86 @@ pub fn assignable(trigger: Trigger) -> bool {
             PointerButton::Middle | PointerButton::Extra1 | PointerButton::Extra2
         ),
     }
+}
+
+/// A key as the menu shows it, with the same arrows and minus as the rest of the menu (the
+/// game's key names, [`reminedog_core::input_label`]).
+fn key_symbol(key: Key) -> &'static str {
+    match key {
+        Key::ArrowUp => "↑",
+        Key::ArrowDown => "↓",
+        Key::ArrowLeft => "←",
+        Key::ArrowRight => "→",
+        Key::Minus => "-",
+        _ => key.symbol_or_name(),
+    }
+}
+
+/// Whether a key types text without Ctrl or Alt: letters, digits, punctuation, Space, Enter,
+/// Backspace and Tab.
+pub(crate) fn types_text(key: Key) -> bool {
+    use Key::*;
+    matches!(
+        key,
+        A | B
+            | C
+            | D
+            | E
+            | F
+            | G
+            | H
+            | I
+            | J
+            | K
+            | L
+            | M
+            | N
+            | O
+            | P
+            | Q
+            | R
+            | S
+            | T
+            | U
+            | V
+            | W
+            | X
+            | Y
+            | Z
+            | Num0
+            | Num1
+            | Num2
+            | Num3
+            | Num4
+            | Num5
+            | Num6
+            | Num7
+            | Num8
+            | Num9
+            | Colon
+            | Comma
+            | Backslash
+            | Slash
+            | Pipe
+            | Questionmark
+            | Exclamationmark
+            | OpenBracket
+            | CloseBracket
+            | OpenCurlyBracket
+            | CloseCurlyBracket
+            | Backtick
+            | Minus
+            | Period
+            | Plus
+            | Equals
+            | Semicolon
+            | Quote
+            | IntlBackslash
+            | Space
+            | Enter
+            | Backspace
+            | Tab
+    )
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use egui::{
 use glow::HasContext as _;
 
 use reminedog_core::settings::ZOOM_FACTOR_RANGE;
-use reminedog_core::{InputId, Settings, input_label};
+use reminedog_core::{InputId, Settings, input_label, mapping_label};
 
 use crate::browser::{
     BrowserCommand, BrowserMenu, BrowserPixels, BrowserView, PageTexture, browser_section,
@@ -28,7 +28,9 @@ use crate::zoom::Zoom;
 /// A font file added as a fallback for glyphs egui's built-in fonts lack (Japanese).
 pub struct FontSource {
     pub name: String,
-    pub data: Vec<u8>,
+    /// Borrowed when the caller keeps the file for the process (so a new overlay copies
+    /// nothing).
+    pub data: Cow<'static, [u8]>,
     /// Face index inside a font collection (`.ttc`); 0 for plain `.ttf`/`.otf`.
     pub index: u32,
 }
@@ -59,8 +61,6 @@ pub struct FrameParams<'a> {
     pub time: f64,
     pub status: &'a [StatusLine],
     pub input: FrameInput,
-    /// The browser's newest picture; `None` keeps the last one.
-    pub browser_pixels: Option<BrowserPixels<'a>>,
 }
 
 /// How the zoom shows this frame.
@@ -99,6 +99,9 @@ pub struct FrameInput {
     pub game_bindings: Vec<(InputId, Vec<String>)>,
     /// Why some rebinding rules cannot work now (e.g. keys as sources), shown in the menu.
     pub rebind_note: Option<String>,
+    /// A problem with the settings file (unreadable, moved aside, not saved), shown at the
+    /// top of the menu.
+    pub settings_note: Option<String>,
     /// Keys and buttons of the rebinding rules that the game's window library cannot report
     /// (as a source) or give the game (as an output); the menu notes the rules that use them.
     pub unsupported_inputs: Vec<InputId>,
@@ -122,6 +125,10 @@ pub struct FrameOutput {
     pub waypoint_commands: Vec<WaypointCommand>,
     /// For the browser, in order.
     pub browser_commands: Vec<BrowserCommand>,
+    /// Text the UI copied (Ctrl+C, Ctrl+X in a text field), for the system clipboard.
+    pub copied_text: Option<String>,
+    /// A widget of the UI has the keyboard ([`crate::InputRouter::set_text_focus`]).
+    pub text_focus: bool,
 }
 
 /// The user's hotkeys.
@@ -223,8 +230,26 @@ impl Default for Hotkeys {
 
 /// The hotkeys in `settings`. Unreadable ones fall back to the defaults, and so does one an
 /// earlier hotkey would hide (see `hides`), which only a hand-edited or older settings file
-/// can have. A browser key may be empty: unassigned.
+/// can have. A browser key may be empty: unassigned. Logs what fell back; for the settings
+/// as loaded (changes from the menu use [`hotkeys_quiet`]).
 pub fn hotkeys(settings: &Settings) -> Hotkeys {
+    resolve_hotkeys(settings, true)
+}
+
+/// [`hotkeys`] without its warnings, for the settings the menu changed (a slider moving would
+/// repeat them every frame).
+pub fn hotkeys_quiet(settings: &Settings) -> Hotkeys {
+    resolve_hotkeys(settings, false)
+}
+
+fn resolve_hotkeys(settings: &Settings, log: bool) -> Hotkeys {
+    macro_rules! warn {
+        ($($arg:tt)*) => {
+            if log {
+                log::warn!($($arg)*);
+            }
+        };
+    }
     let mut keys = Hotkeys::DEFAULT;
     for action in Action::ALL {
         let text = action.setting(settings);
@@ -234,7 +259,7 @@ pub fn hotkeys(settings: &Settings) -> Hotkeys {
             continue;
         }
         let hotkey = Hotkey::parse(text).or_else(|| {
-            log::warn!(
+            warn!(
                 "settings: unknown {} key {text:?}; using {}",
                 action.id(),
                 label_or_none(default)
@@ -242,7 +267,7 @@ pub fn hotkeys(settings: &Settings) -> Hotkeys {
             default
         });
         let hotkey = if action.uses_f3c() && hotkey.is_some_and(|hotkey| hotkey.ctrl) {
-            log::warn!(
+            warn!(
                 "settings: the {} key {text} needs Ctrl, which F3+C cannot be sent with; using {}",
                 action.id(),
                 label_or_none(default)
@@ -258,7 +283,7 @@ pub fn hotkeys(settings: &Settings) -> Hotkeys {
             continue;
         };
         let default = action.default_hotkey();
-        log::warn!(
+        warn!(
             "settings: the {} key {} is hidden by the {} key {}; using {}",
             action.id(),
             label_or_none(keys.get(action)),
@@ -271,7 +296,7 @@ pub fn hotkeys(settings: &Settings) -> Hotkeys {
             continue;
         };
         if action.optional() {
-            log::warn!(
+            warn!(
                 "settings: the {} key {} is hidden by the {} key too; unassigned",
                 action.id(),
                 label_or_none(default),
@@ -279,7 +304,7 @@ pub fn hotkeys(settings: &Settings) -> Hotkeys {
             );
             keys.set(action, None);
         } else {
-            log::warn!(
+            warn!(
                 "settings: the {} key {} is hidden by the {} key {} too",
                 action.id(),
                 label_or_none(default),
@@ -339,6 +364,16 @@ impl fmt::Display for OverlayError {
 }
 
 impl std::error::Error for OverlayError {}
+
+/// The UI scale the overlay draws at (and the router maps the pointer with): pixels per point
+/// within 0.25 to 8, 1 when not a number.
+pub(crate) fn clamp_pixels_per_point(pixels_per_point: f32) -> f32 {
+    if pixels_per_point.is_finite() {
+        pixels_per_point.clamp(0.25, 8.0)
+    } else {
+        1.0
+    }
+}
 
 /// How long the hotkey hint shows after the first frame, in seconds.
 const HINT_SECONDS: f64 = 10.0;
@@ -487,10 +522,12 @@ struct UiState {
     waypoints: WaypointMenu,
     rebinds: RebindMenu,
     browser: BrowserMenu,
-    /// [`FrameInput::game_bindings`], [`FrameInput::rebind_note`] and
-    /// [`FrameInput::unsupported_inputs`] of the current frame.
+    /// [`FrameInput::game_bindings`], [`FrameInput::rebind_note`],
+    /// [`FrameInput::settings_note`] and [`FrameInput::unsupported_inputs`] of the current
+    /// frame.
     game_bindings: Vec<(InputId, Vec<String>)>,
     rebind_note: Option<String>,
+    settings_note: Option<String>,
     unsupported_inputs: Vec<InputId>,
 }
 
@@ -498,22 +535,38 @@ impl UiState {
     fn new(mut settings: Settings) -> Self {
         let keys = hotkeys(&settings);
         // What the router uses: a key that fell back to its default must not come back when
-        // the key hiding it moves.
+        // the key hiding it moves. The menu says which (the log says why).
+        let mut changed = None;
         for action in Action::ALL {
-            *action.setting_mut(&mut settings) = setting_text(keys.get(action));
+            let text = setting_text(keys.get(action));
+            let setting = action.setting_mut(&mut settings);
+            if setting.trim() != text && changed.is_none() {
+                changed = Some((action, setting.clone()));
+            }
+            *setting = text;
         }
+        let key_note_about = changed.as_ref().map_or(Action::Menu, |(action, _)| *action);
+        let key_note = changed.map(|(action, was)| {
+            format!(
+                "settings.json の「{}」のキー（{was}）は使えないので、{} にした",
+                action.name(),
+                keys.get(action)
+                    .map_or_else(|| "なし".to_owned(), |key| key.label())
+            )
+        });
         Self {
             settings,
             keys,
             reserved_keys: Vec::new(),
             capturing: None,
-            key_note: None,
-            key_note_about: Action::Menu,
+            key_note,
+            key_note_about,
             waypoints: WaypointMenu::default(),
             rebinds: RebindMenu::default(),
             browser: BrowserMenu::default(),
             game_bindings: Vec::new(),
             rebind_note: None,
+            settings_note: None,
             unsupported_inputs: Vec::new(),
         }
     }
@@ -594,13 +647,30 @@ impl UiState {
             let Some(default) = action.default_hotkey() else {
                 continue;
             };
+            // Only a key that stays away from its default needs saying so.
+            let moved = self.keys.get(action) != Some(default);
             if let Some(source) =
                 rule_sources(&self.settings).find(|&id| input_trigger(id) == Some(default.trigger))
             {
-                // Only a key that stays away from its default needs saying so.
-                if self.keys.get(action) != Some(default) {
+                if moved {
                     note.get_or_insert_with(|| {
                         format!("{} は置き換えに使っている", input_label(source))
+                    });
+                }
+                keep.push(action);
+            } else if action.uses_f3c()
+                && self
+                    .reserved_keys
+                    .iter()
+                    .any(|&key| default.trigger == Trigger::Key(key))
+            {
+                if moved {
+                    note.get_or_insert_with(|| {
+                        format!(
+                            "{} は F3+C に使うキーなので「{}」を元に戻せない",
+                            default.label(),
+                            action.name()
+                        )
                     });
                 }
                 keep.push(action);
@@ -611,12 +681,23 @@ impl UiState {
             for &action in &keep {
                 keys.set(action, self.keys.get(action));
             }
-            match actions
-                .iter()
-                .copied()
-                .find(|&action| !keep.contains(&action) && conflict(&keys, action).is_some())
-            {
-                Some(action) => keep.push(action),
+            match actions.iter().copied().find_map(|action| {
+                (!keep.contains(&action))
+                    .then(|| conflict(&keys, action).map(|other| (action, other)))
+                    .flatten()
+            }) {
+                Some((action, other)) => {
+                    if self.keys.get(action) != action.default_hotkey() {
+                        note.get_or_insert_with(|| {
+                            format!(
+                                "「{}」は「{}」と重なるので元に戻せない",
+                                action.name(),
+                                other.name()
+                            )
+                        });
+                    }
+                    keep.push(action);
+                }
                 None => break keys,
             }
         };
@@ -681,11 +762,49 @@ fn key_grid(
     } else if let Some(note) = state.key_note.as_ref().filter(|_| note_here) {
         ui.label(RichText::new(note).color(ui.visuals().warn_fg_color));
     }
+    for note in game_key_notes(state, list) {
+        ui.label(RichText::new(note).weak());
+    }
     if ui.button("キーを元に戻す").clicked() {
         state.capturing = None;
         actions.cancel_capture = true;
         state.reset_hotkeys(list);
     }
+}
+
+/// The hotkeys of `list` on keys the game uses too (options.txt): the game does not get them
+/// while reminedog takes them.
+fn game_key_notes(state: &UiState, list: &[Action]) -> Vec<String> {
+    let mut notes = Vec::new();
+    for &action in list {
+        let Some(hotkey) = state.keys.get(action) else {
+            continue;
+        };
+        // A combination leaves the key alone to the game.
+        if hotkey.ctrl || hotkey.shift || hotkey.alt {
+            continue;
+        }
+        let Some((_, mappings)) = state.game_bindings.iter().find(|(id, mappings)| {
+            input_trigger(*id) == Some(hotkey.trigger) && !mappings.is_empty()
+        }) else {
+            continue;
+        };
+        let names: Vec<String> = mappings.iter().map(|m| mapping_label(m)).collect();
+        let when = match action {
+            Action::Menu => "",
+            Action::Browser(BrowserAction::Toggle)
+            | Action::Zoom
+            | Action::Waypoint
+            | Action::Navigate => "ゲーム中は",
+            Action::Browser(_) => "ゲーム中にブラウザを表示している間は",
+        };
+        notes.push(format!(
+            "{} はゲームの「{}」にも割り当てられている。{when}reminedog が使うので、ゲームには届かない",
+            hotkey.label(),
+            names.join("」「")
+        ));
+    }
+    notes
 }
 
 /// What the menu asked for this frame.
@@ -709,6 +828,8 @@ pub struct Overlay {
     notices: NoticeList,
     /// The browser's page.
     page: PageTexture,
+    /// The settings as last handed to the platform hook, to tell a change.
+    saved_settings: Settings,
     first_time: Option<f64>,
     last_time: Option<f64>,
     frames: u64,
@@ -728,11 +849,16 @@ impl Overlay {
         let ctx = egui::Context::default();
         ctx.set_theme(egui::Theme::Dark);
         ctx.set_fonts(font_definitions(fonts));
+        // Ctrl+= and Ctrl+- would scale egui alone, away from the scale the router maps the
+        // pointer with.
+        ctx.options_mut(|options| options.zoom_with_keyboard = false);
+        let state = UiState::new(settings);
         Ok(Self {
             ctx,
             painter,
             zoom,
-            state: UiState::new(settings),
+            saved_settings: state.settings.clone(),
+            state,
             notices: NoticeList::default(),
             page: PageTexture::default(),
             first_time: None,
@@ -747,6 +873,16 @@ impl Overlay {
         self.frames
     }
 
+    /// Uploads the browser's newest picture (`None` keeps the last one), before
+    /// [`render`](Self::render); the caller can let go of the picture right after.
+    ///
+    /// # Safety
+    /// The agent's GL context must be current.
+    pub unsafe fn upload_page(&mut self, pixels: Option<BrowserPixels<'_>>) {
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.page.update(&mut self.painter, pixels) };
+    }
+
     /// Draws one frame into the default framebuffer. Must be called with the agent's GL
     /// context current on the game's drawable, right before the buffer swap.
     pub fn render(&mut self, params: FrameParams<'_>) -> FrameOutput {
@@ -754,11 +890,7 @@ impl Overlay {
         if width == 0 || height == 0 {
             return FrameOutput::default();
         }
-        let ppp = if params.pixels_per_point.is_finite() {
-            params.pixels_per_point.clamp(0.25, 8.0)
-        } else {
-            1.0
-        };
+        let ppp = clamp_pixels_per_point(params.pixels_per_point);
         let dt = self
             .last_time
             .map_or(1.0 / 60.0, |t| (params.time - t) as f32)
@@ -767,16 +899,14 @@ impl Overlay {
         let first_time = *self.first_time.get_or_insert(params.time);
         self.frames += 1;
         self.fps.tick(params.time);
-        // SAFETY: the caller guarantees our context is current.
-        unsafe { self.page.update(&mut self.painter, params.browser_pixels) };
         let picture = self.page.picture();
 
         let input = params.input;
         let state = &mut self.state;
-        let before = state.settings.clone();
         state.reserved_keys = input.reserved_keys;
         state.game_bindings = input.game_bindings;
         state.rebind_note = input.rebind_note;
+        state.settings_note = input.settings_note;
         state.unsupported_inputs = input.unsupported_inputs;
         let mut capture_again = false;
         if let Some(captured) = input.captured {
@@ -789,12 +919,14 @@ impl Overlay {
         }
         if !input.ui_open {
             state.capturing = None;
+            state.key_note = None;
             state.rebinds.cancel();
             capture_again = false;
         }
         state.waypoints.sync(input.ui_open, &input.waypoints);
         self.notices.update(input.notices, params.time);
         let notices = &self.notices;
+        let zoom_supported = self.zoom.supported();
         if input.zoom == ZoomView::Magnify {
             // SAFETY: the caller guarantees our context is current on the game's drawable.
             unsafe {
@@ -836,8 +968,12 @@ impl Overlay {
             fps: self.fps.value,
             size: [width, height],
             ppp,
+            zoom_supported,
         };
-        let show_hint = !input.ui_open && params.time - first_time < HINT_SECONDS;
+        // The status window has the corner the hint would take.
+        let show_hint = !input.ui_open
+            && !state.settings.show_status
+            && params.time - first_time < HINT_SECONDS;
         let high_res_note = input.high_res_note.as_deref();
         let mut actions = MenuActions::default();
         let mut output = self.ctx.run_ui(raw, |ui| {
@@ -868,7 +1004,10 @@ impl Overlay {
             );
             match input.zoom {
                 ZoomView::Off => {}
-                ZoomView::Magnify => zoom_badge(ui.ctx(), state.settings.zoom_factor),
+                ZoomView::Magnify if zoom_supported => {
+                    zoom_badge(ui.ctx(), state.settings.zoom_factor);
+                }
+                ZoomView::Magnify => {}
                 ZoomView::HighRes { factor } => zoom_badge(ui.ctx(), factor),
             }
             if show_hint {
@@ -882,6 +1021,16 @@ impl Overlay {
                 draw_cursor(ui.ctx(), pos);
             }
         });
+        let text_focus = self.ctx.egui_wants_keyboard_input();
+        let copied_text = output
+            .platform_output
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            });
         let primitives = self
             .ctx
             .tessellate(std::mem::take(&mut output.shapes), output.pixels_per_point);
@@ -899,6 +1048,8 @@ impl Overlay {
             cancel_capture: actions.cancel_capture,
             waypoint_commands: actions.waypoint_commands,
             browser_commands,
+            copied_text,
+            text_focus,
             ..Default::default()
         };
         out.browser_commands.extend(actions.browser_commands);
@@ -911,7 +1062,8 @@ impl Overlay {
             state.capturing = None;
             out.start_input_capture = true;
         }
-        if state.settings != before {
+        if state.settings != self.saved_settings {
+            self.saved_settings.clone_from(&state.settings);
             out.settings = Some(state.settings.clone());
         }
         out
@@ -951,7 +1103,7 @@ fn font_definitions(fonts: Vec<FontSource>) -> FontDefinitions {
         defs.font_data.insert(
             font.name.clone(),
             Arc::new(FontData {
-                font: Cow::Owned(font.data),
+                font: font.data,
                 index: font.index,
                 tweak,
             }),
@@ -976,6 +1128,8 @@ struct FrameInfo {
     fps: f32,
     size: [u32; 2],
     ppp: f32,
+    /// OpenGL 3.0 or later: the zoom works.
+    zoom_supported: bool,
 }
 
 fn status_grid(ui: &mut egui::Ui, info: &FrameInfo, status: &[StatusLine]) {
@@ -1070,6 +1224,9 @@ fn menu_contents(
     actions: &mut MenuActions,
 ) {
     ui.label(format!("{} か Esc で閉じる", state.keys.menu.label()));
+    if let Some(note) = &state.settings_note {
+        ui.label(RichText::new(note).color(ui.visuals().warn_fg_color));
+    }
     ui.separator();
 
     ui.label(RichText::new("ズーム").strong());
@@ -1077,6 +1234,12 @@ fn menu_contents(
         "ゲーム中に {} を押している間、画面の中央を拡大する",
         state.keys.zoom.label()
     ));
+    if !info.zoom_supported {
+        ui.label(
+            RichText::new("この環境ではズームを使えない（OpenGL 3.0 以降が必要）")
+                .color(ui.visuals().warn_fg_color),
+        );
+    }
     let (lo, hi) = ZOOM_FACTOR_RANGE;
     ui.add(egui::Slider::new(&mut state.settings.zoom_factor, lo..=hi).text("倍率"));
     ui.checkbox(&mut state.settings.zoom_high_res, "高精細にする")
@@ -1324,7 +1487,7 @@ mod tests {
     fn japanese_font_leads_proportional_and_backs_up_monospace() {
         let defs = font_definitions(vec![FontSource {
             name: "jp".into(),
-            data: vec![],
+            data: Cow::Borrowed(&[]),
             index: 1,
         }]);
         assert_eq!(defs.font_data["jp"].index, 1);
@@ -1515,6 +1678,7 @@ mod tests {
             fps: 60.0,
             size: [size.x as u32, size.y as u32],
             ppp: 1.0,
+            zoom_supported: true,
         };
         for _ in 0..4 {
             let raw = egui::RawInput {
@@ -1611,6 +1775,7 @@ mod tests {
             fps: 60.0,
             size: [1920, 1080],
             ppp: 1.0,
+            zoom_supported: true,
         };
         for events in [
             vec![egui::Event::PointerMoved(title), click(true), click(false)],

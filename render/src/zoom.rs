@@ -54,6 +54,11 @@ impl Zoom {
         }
     }
 
+    /// Whether the GL version has what the zoom needs (3.0, for `glBlitFramebuffer`).
+    pub fn supported(&self) -> bool {
+        self.supported
+    }
+
     /// Replaces the frame with its centre enlarged `factor` times.
     ///
     /// # Safety
@@ -79,7 +84,8 @@ impl Zoom {
             let Some(framebuffer) = self.ensure_target(gl, [rw, rh]) else {
                 return;
             };
-            // Blits are clipped by the scissor box, which egui leaves enabled.
+            // Blits are clipped by the scissor box; it must be off (egui switches it off after
+            // painting, but this runs before).
             gl.disable(glow::SCISSOR_TEST);
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(framebuffer));
