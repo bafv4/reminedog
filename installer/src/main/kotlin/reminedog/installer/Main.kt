@@ -28,7 +28,7 @@ fun main() {
 private fun windowsUsesDarkMode(): Boolean =
     try {
         val process = ProcessBuilder(
-            "reg", "query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            system32("reg.exe"), "query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
             "/v", "AppsUseLightTheme",
         ).redirectErrorStream(true).start()
         val output = process.inputStream.bufferedReader().readText()

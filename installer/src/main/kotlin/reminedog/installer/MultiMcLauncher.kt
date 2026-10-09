@@ -45,7 +45,7 @@ class MultiMcLauncher private constructor(label: String, root: Path, private val
     override fun isRunning(processes: Processes) = processes.has(if (prism) "prismlauncher.exe" else "MultiMC.exe")
 
     private inner class CfgInstance(folder: Path, name: String) :
-        Instance(this@MultiMcLauncher, name, version(folder)) {
+        Instance(this@MultiMcLauncher, name, version(folder), folder.fileName.toString()) {
 
         private val file = folder.resolve("instance.cfg")
 

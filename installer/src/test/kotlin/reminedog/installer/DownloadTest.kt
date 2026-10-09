@@ -78,12 +78,23 @@ class DownloadTest {
             {"tag_name": "v1.2.3", "assets": [
               {"name": "reminedog-installer-1.2.3.jar", "browser_download_url": "https://example.invalid/jar", "size": 3},
               {"name": "reminedog-1.2.3.pdb", "browser_download_url": "https://example.invalid/pdb", "size": 2},
-              {"name": "reminedog-1.2.3-beta.1.dll", "browser_download_url": "https://example.invalid/dll", "size": 1}
+              {"name": "reminedog-1.2.3-beta.1.dll", "browser_download_url": "https://example.invalid/dll", "size": 1,
+               "digest": "sha256:00FF"}
             ]}
             """.trimIndent(),
         )
         assertEquals("https://example.invalid/dll", release.url)
-        assertEquals(null, release.sha256)
+        assertEquals("00ff", release.sha256)
+    }
+
+    @Test
+    fun `a release without a hash is refused`() {
+        val e = assertFailsWith<IOException> {
+            Download.parse(
+                """{"tag_name": "v1", "assets": [{"name": "reminedog.dll", "browser_download_url": "x", "size": 1}]}""",
+            )
+        }
+        assertTrue(e.message!!.contains("ハッシュ"), e.message)
     }
 
     @Test
@@ -105,10 +116,12 @@ class DownloadTest {
             assertFalse(Download.save(release, target), "the same file is not downloaded again")
 
             val other = dir.resolve("other/reminedog.dll")
-            assertFailsWith<IOException> { Download.save(Download.Release("v1", server.url("/dll"), 6, null), other) }
+            val hash = sha256(dll)
+            assertFailsWith<IOException> { Download.save(Download.Release("v1", server.url("/dll"), 6, hash), other) }
             assertFailsWith<IOException> { Download.save(Download.Release("v1", server.url("/dll"), 5, "00"), other) }
-            assertFailsWith<IOException> { Download.save(Download.Release("v1", server.url("/other"), 5, null), other) }
-            assertFailsWith<IOException> { Download.save(Download.Release("v1", server.url("/missing"), 5, null), other) }
+            val notDll = byteArrayOf(1, 2, 3, 4, 5)
+            assertFailsWith<IOException> { Download.save(Download.Release("v1", server.url("/other"), 5, sha256(notDll)), other) }
+            assertFailsWith<IOException> { Download.save(Download.Release("v1", server.url("/missing"), 5, hash), other) }
             assertFalse(Files.exists(other.parent), "nothing is written when the download fails")
         }
     }
@@ -138,10 +151,11 @@ class DownloadTest {
             assertEquals(1, downloads)
             assertEquals(1, server.requests.get())
 
-            // Without GitHub's hash, it downloads to compare.
-            val unknown = Download.replaceAll(Download.Release("v2", server.url("/dll"), dll.size.toLong(), null), listOf(stale))
-            assertIs<Download.Replaced.AlreadyLatest>(unknown.single())
-            assertEquals(2, server.requests.get())
+            // Another file there is told apart from the release's.
+            assertFalse(Download.differs(release, stale))
+            val test = write("d/reminedog.dll", byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 7))
+            assertTrue(Download.differs(release, test))
+            assertFalse(Download.differs(release, dir.resolve("none/reminedog.dll")))
         }
     }
 
@@ -158,7 +172,7 @@ class DownloadTest {
             assertTrue(failed.reason.contains("書き込めません"), failed.reason)
             assertIs<Download.Replaced.Updated>(results[1])
             assertContentEquals(dll, Files.readAllBytes(fine))
-            assertFailsWith<IOException> { Download.save(release, blocked) }
+            assertFailsWith<Download.PlaceException> { Download.save(release, blocked) }
         }
     }
 }

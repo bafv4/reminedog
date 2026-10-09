@@ -18,8 +18,12 @@ abstract class Launcher(val label: String, val root: Path) {
         get() = "$label|" + root.toAbsolutePath().normalize().toString().lowercase()
 }
 
-/** An instance (or a profile of the official launcher) whose JVM arguments can load reminedog. */
-abstract class Instance(val launcher: Launcher, val name: String, val detail: String) {
+/**
+ * An instance (or a profile of the official launcher) whose JVM arguments can load reminedog.
+ * [place] tells it apart from the launcher's other instances (its folder, or the profile's id):
+ * names can repeat.
+ */
+abstract class Instance(val launcher: Launcher, val name: String, val detail: String, val place: String) {
     /** The JVM arguments the launcher would start this instance with now. */
     abstract fun read(): Args
 
@@ -30,6 +34,9 @@ abstract class Instance(val launcher: Launcher, val name: String, val detail: St
     abstract fun remove(): Change
 
     val title: String get() = "${launcher.label} / $name"
+
+    /** Identifies the instance among every launcher's. */
+    val key: String get() = launcher.key + "|" + place
 }
 
 /**

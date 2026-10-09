@@ -23,8 +23,15 @@ object Download {
     /** This installer's version, from its jar's manifest ("dev" when built without one). */
     val INSTALLER_VERSION: String = Download::class.java.`package`?.implementationVersion ?: "dev"
 
-    /** The DLL of a release. [sha256] is lowercase hex, or null when GitHub did not give one. */
-    class Release(val tag: String, val url: String, val size: Long, val sha256: String?)
+    /**
+     * The DLL of a release, with its size and SHA-256 (lowercase hex) as GitHub gave them. They
+     * show that the download arrived whole, not who made the file: GitHub's answer is all there
+     * is to compare with.
+     */
+    class Release(val tag: String, val url: String, val size: Long, val sha256: String)
+
+    /** A downloaded DLL could not be put in place (a game has it loaded, the folder cannot be written). */
+    class PlaceException(message: String, cause: Throwable) : IOException(message, cause)
 
     fun latest(): Release {
         val connection = open(API)
@@ -54,20 +61,24 @@ object Download {
         val size = (asset["size"] as? JsonNumber)?.text?.toLongOrNull()
         if (url == null || size == null) throw IOException("リリース $tag の DLL の情報を読めません")
         val sha256 = (asset["digest"] as? String)?.takeIf { it.startsWith("sha256:") }?.removePrefix("sha256:")?.lowercase()
+            ?: throw IOException("リリース $tag の DLL にハッシュ（SHA-256）がないので、ダウンロードを確かめられません")
         return Release(tag, url, size, sha256)
     }
 
     /**
      * Puts the release's DLL at [target] (through a temporary file, checking its size and hash).
      * Returns false when the file there is already the same; [onDownload] runs just before
-     * downloading.
+     * downloading. A file that cannot be put there throws [PlaceException].
      */
     fun save(release: Release, target: Path, onDownload: () -> Unit = {}): Boolean =
         when (val result = replaceAll(release, listOf(target), onDownload).single()) {
             is Replaced.Updated -> true
             is Replaced.AlreadyLatest -> false
-            is Replaced.Failed -> throw IOException(result.reason, result.cause)
+            is Replaced.Failed -> throw PlaceException(result.reason, result.cause)
         }
+
+    /** Whether [target] is a file other than the release's DLL (a test build, an older version). */
+    fun differs(release: Release, target: Path): Boolean = hashOrNull(target)?.let { it != release.sha256 } ?: false
 
     /** What [replaceAll] did to one DLL file. */
     sealed class Replaced(val path: Path) {
@@ -86,8 +97,7 @@ object Download {
      */
     fun replaceAll(release: Release, targets: List<Path>, onDownload: () -> Unit = {}): List<Replaced> {
         val hashes = targets.associateWith { hashOrNull(it) }
-        val known = release.sha256
-        if (known != null && hashes.values.all { it == known }) return targets.map { Replaced.AlreadyLatest(it) }
+        if (hashes.values.all { it == release.sha256 }) return targets.map { Replaced.AlreadyLatest(it) }
         onDownload()
         val (dll, hash) = fetch(release)
         try {
@@ -127,12 +137,18 @@ object Download {
         }
     }
 
-    /** Replaces [target] with [dll] through a temporary file next to it. */
+    /**
+     * Replaces [target] with [dll] through a temporary file next to it. A folder made for it is
+     * made writable for the user (and SYSTEM and the administrators) only.
+     */
     private fun place(dll: Path, target: Path) {
         val temp = target.resolveSibling("${target.fileName}.download")
         try {
             try {
-                Files.createDirectories(target.parent)
+                if (!Files.isDirectory(target.parent)) {
+                    Files.createDirectories(target.parent)
+                    Acl.restrict(target.parent)
+                }
                 Files.copy(dll, temp, StandardCopyOption.REPLACE_EXISTING)
             } catch (e: FileSystemException) {
                 throw IOException("${target.parent} に書き込めません（${e.reason ?: e.javaClass.simpleName}）", e)
@@ -162,7 +178,7 @@ object Download {
         val size = Files.size(file)
         if (size != release.size) throw IOException("ダウンロードが途中で切れました（$size / ${release.size} バイト）")
         val hash = sha256(file)
-        if (release.sha256 != null && release.sha256 != hash) throw IOException("ダウンロードした DLL のハッシュが合いません")
+        if (release.sha256 != hash) throw IOException("ダウンロードした DLL のハッシュが合いません")
         val head = Files.newInputStream(file).use { input -> ByteArray(2).also { if (input.read(it) != 2) it.fill(0) } }
         if (head[0] != 'M'.code.toByte() || head[1] != 'Z'.code.toByte()) throw IOException("ダウンロードしたファイルが DLL ではありません")
         return hash

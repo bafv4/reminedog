@@ -60,7 +60,7 @@ class McsrLauncher(root: Path) : Launcher("MCSR Launcher", root) {
     }
 
     private inner class JsonInstance(private val file: Path, name: String, detail: String) :
-        Instance(this@McsrLauncher, name, detail) {
+        Instance(this@McsrLauncher, name, detail, file.parent.fileName.toString()) {
 
         private fun usesLauncher(options: Map<String, Any?>) = options["useLauncherJavaOption"] != false
 

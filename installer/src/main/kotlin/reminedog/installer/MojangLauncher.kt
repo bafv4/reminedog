@@ -26,7 +26,7 @@ class MojangLauncher(minecraftDir: Path, fileName: String) : Launcher(
         get() = super.key + "|" + file.fileName
 
     private inner class Profile(private val id: String, profile: Map<String, Any?>) :
-        Instance(this@MojangLauncher, displayName(profile), detail(profile)) {
+        Instance(this@MojangLauncher, displayName(profile), detail(profile), id) {
 
         private fun profileIn(doc: JsonDoc): MutableMap<String, Any?> =
             doc.root["profiles"].asJsonObject()?.get(id).asJsonObject()

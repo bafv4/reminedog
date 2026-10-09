@@ -12,8 +12,12 @@ import java.awt.GridBagLayout
 import java.awt.Insets
 import java.awt.event.MouseEvent
 import java.io.File
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.nio.file.Files
 import java.nio.file.InvalidPathException
+import java.nio.file.Path
 import java.nio.file.Paths
 import javax.swing.BorderFactory
 import javax.swing.Box
@@ -36,6 +40,7 @@ import javax.swing.SwingUtilities
 import javax.swing.UIManager
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
+import javax.net.ssl.SSLException
 import javax.swing.filechooser.FileNameExtensionFilter
 import javax.swing.table.AbstractTableModel
 import javax.swing.table.DefaultTableCellRenderer
@@ -50,6 +55,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
     private val fileField = JTextField()
     private val fileButton = JButton("参照…")
     private val argumentLabel = JLabel(" ")
+    private val warningLabel = JLabel(" ")
 
     private val launchers = mutableListOf<Launcher>()
     private val rows = RowModel()
@@ -91,7 +97,12 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
                 " pressedBackground: \$Button.default.pressedBackground",
         )
 
-        Paths.get(DEFAULT_FOLDER, Download.ASSET).takeIf { Files.isRegularFile(it) }?.let { fileField.text = it.toString() }
+        // A DLL already on the PC (maybe a test build) is used as it is, unless the user picks
+        // the download.
+        existingDll()?.let {
+            fileField.text = it.toString()
+            existingChoice.isSelected = true
+        }
         fileField.putClientProperty(FlatClientProperties.PLACEHOLDER_TEXT, "$DEFAULT_FOLDER\\${Download.ASSET}")
         val onChange = object : DocumentListener {
             override fun insertUpdate(e: DocumentEvent) = pathChanged()
@@ -148,6 +159,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
         panel.addAt(fileField, 1, 4, weightX = 1.0, fill = GridBagConstraints.HORIZONTAL)
         panel.addAt(fileButton, 2, 4)
         panel.addAt(argumentLabel, 0, 5, width = 3, top = 8)
+        panel.addAt(warningLabel, 0, 6, width = 3)
         return panel
     }
 
@@ -228,7 +240,25 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
             argumentLabel.foreground = UIManager.getColor("Label.foreground")
             argumentLabel.text = "追加する JVM 引数：${AgentArg.token(path)}"
         }
+        warningLabel.foreground = color("Actions.Yellow")
+        warningLabel.text = (if (problem == null) othersCanChange(path) else null) ?: " "
         rows.fireTableDataChanged()
+    }
+
+    /** A warning when other users of the PC could replace the DLL at [path] (or its folder). */
+    private fun othersCanChange(path: String): String? {
+        val file = try {
+            Paths.get(path)
+        } catch (e: InvalidPathException) {
+            return null
+        }
+        // A folder still to be made is made for this user only.
+        val exposed = listOfNotNull(file, file.parent).filter { Files.exists(it) }.any { Acl.othersCanWrite(it) }
+        return if (exposed) {
+            "注意：この場所は PC のほかのユーザーも書き換えられます。共用の PC なら、自分だけの場所（例：%LOCALAPPDATA%\\reminedog）にしてください"
+        } else {
+            null
+        }
     }
 
     private fun chooseFolder() {
@@ -309,6 +339,9 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
                 list += row
             }
         }
+        // Instances of one launcher with the same name are told apart by their folder.
+        list.groupBy { it.instance.launcher.key to it.instance.name }.values.filter { it.size > 1 }.flatten()
+            .forEach { it.name = "${it.instance.name}（${it.instance.place}）" }
         rows.rows = list
         rows.fireTableDataChanged()
     }
@@ -338,22 +371,49 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
                 return
             }
         }
-        if (!confirmLaunchersClosed(chosen)) return
 
         val download = installing && downloadChoice.isSelected
         runInBackground {
+            if (!launchersClosed(chosen)) return@runInBackground null
             if (download) {
-                try {
+                val target = Paths.get(dll)
+                val release = try {
                     logLine("最新のリリースを確認しています…")
-                    val release = Download.latest()
-                    val saved = Download.save(release, Paths.get(dll)) { logDownloading(release) }
-                    logLine(if (saved) "$dll に保存しました" else "$dll はすでに ${release.tag} と同じです")
+                    Download.latest()
+                } catch (e: Exception) {
+                    logLine("最新のリリースを確認できませんでした：${message(e)}")
+                    return@runInBackground Outcome.error(
+                        "ダウンロードできません",
+                        "最新のリリースを確認できませんでした（${message(e)}）。インスタンスは変えていません。\n" +
+                            "DLL を自分で用意したなら「PC にある DLL を使う」を選んでください。",
+                    )
+                }
+                if (Download.differs(release, target) &&
+                    !ask(
+                        "DLL を置き換えます",
+                        "$dll にはすでに別の DLL があります（${release.tag} とは違うファイルです）。\n" +
+                            "${release.tag} で置き換えますか？\n\n" +
+                            "試験版や自分でビルドした DLL を使っているなら「いいえ」を押して、「PC にある DLL を使う」を選んでください。",
+                    )
+                ) {
+                    return@runInBackground Outcome.done("やめました。DLL もインスタンスも変えていません。")
+                }
+                try {
+                    val saved = Download.save(release, target) { logDownloading(release) }
+                    logLine(if (saved) "$dll に ${release.tag} を保存しました" else "$dll はすでに ${release.tag} と同じです")
+                } catch (e: Download.PlaceException) {
+                    logLine("DLL を置けませんでした：${message(e)}")
+                    return@runInBackground Outcome.error(
+                        "DLL を置けません",
+                        "ダウンロードした DLL を $dll に置けませんでした。インスタンスは変えていません。\n" +
+                            "その DLL を読み込んでいるゲームを閉じてから、もう一度試してください。",
+                    )
                 } catch (e: Exception) {
                     logLine("ダウンロードできませんでした：${message(e)}")
                     return@runInBackground Outcome.error(
                         "ダウンロードできません",
-                        "DLL をダウンロードできませんでした。インスタンスは変えていません。\n" +
-                            "ログを見て、DLL を自分で用意したなら「PC にある DLL を使う」を選んでください。",
+                        "DLL をダウンロードできませんでした（${message(e)}）。インスタンスは変えていません。\n" +
+                            "DLL を自分で用意したなら「PC にある DLL を使う」を選んでください。",
                     )
                 }
             }
@@ -361,10 +421,10 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
             for (row in chosen) {
                 try {
                     val change = if (installing) row.instance.install(dll) else row.instance.remove()
-                    logLine("${row.instance.title}：${change.message}")
+                    logLine("${row.title}：${change.message}")
                 } catch (e: Exception) {
                     failures++
-                    logLine("${row.instance.title}：失敗しました（${message(e)}）")
+                    logLine("${row.title}：失敗しました（${message(e)}）")
                 }
             }
             if (!installing) logLine("DLL のファイルは消していません。いらなければ消してください。")
@@ -387,16 +447,16 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
         for (row in chosen) {
             val args = row.args
             if (args == null) {
-                logLine("${row.instance.title}：設定を読めないので飛ばします")
+                logLine("${row.title}：設定を読めないので飛ばします")
                 continue
             }
             val agents = args.agents
-            if (agents.isEmpty()) logLine("${row.instance.title}：reminedog が入っていないので飛ばします")
+            if (agents.isEmpty()) logLine("${row.title}：reminedog が入っていないので飛ばします")
             for (agent in agents) {
                 if (AgentArg.isDrivePath(agent.path)) {
-                    dlls.getOrPut(AgentArg.pathKey(agent.path)) { InstalledDll(agent.path) }.users += row.instance.title
+                    dlls.getOrPut(AgentArg.pathKey(agent.path)) { InstalledDll(agent.path) }.users += row.title
                 } else {
-                    logLine("${row.instance.title}：DLL のパス（${agent.path}）がドライブから始まらないので、置き換えられません")
+                    logLine("${row.title}：DLL のパス（${agent.path}）がドライブから始まらないので、置き換えられません")
                 }
             }
         }
@@ -410,27 +470,26 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
             return
         }
         val list = dlls.values.joinToString("\n") { "・${it.path}（${it.users.joinToString("、")}）" }
-        val answer = JOptionPane.showConfirmDialog(
-            this,
-            "次の DLL を GitHub の最新版に置き換えます。JVM 引数は変えません。\n\n$list\n\n" +
-                "その DLL を読み込んでいるゲームは、閉じてから「はい」を押してください。",
-            "最新版に更新",
-            JOptionPane.YES_NO_OPTION,
-            JOptionPane.QUESTION_MESSAGE,
-        )
-        if (answer != JOptionPane.YES_OPTION) return
-
-        val targets = dlls.values.map { Paths.get(it.path) }
         runInBackground {
-            val release: Download.Release
-            val results: List<Download.Replaced>
-            try {
+            val targets = dlls.values.map { Paths.get(it.path) }
+            val release = try {
                 logLine("最新のリリースを確認しています…")
-                release = Download.latest()
-                results = Download.replaceAll(release, targets) { logDownloading(release) }
+                Download.latest()
+            } catch (e: Exception) {
+                logLine("最新のリリースを確認できませんでした：${message(e)}")
+                return@runInBackground Outcome.error("ダウンロードできません", "最新のリリースを確認できませんでした（${message(e)}）。DLL は変えていません。")
+            }
+            val go = ask(
+                "最新版に更新",
+                "次の DLL を GitHub の最新版（${release.tag}）に置き換えます。JVM 引数は変えません。\n\n$list\n\n" +
+                    "その DLL を読み込んでいるゲームは、閉じてから「はい」を押してください。",
+            )
+            if (!go) return@runInBackground null
+            val results = try {
+                Download.replaceAll(release, targets) { logDownloading(release) }
             } catch (e: Exception) {
                 logLine("ダウンロードできませんでした：${message(e)}")
-                return@runInBackground Outcome.error("ダウンロードできません", "最新版をダウンロードできませんでした。DLL は変えていません。")
+                return@runInBackground Outcome.error("ダウンロードできません", "最新版をダウンロードできませんでした（${message(e)}）。DLL は変えていません。")
             }
             for (result in results) {
                 logLine(
@@ -443,7 +502,10 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
             }
             when {
                 results.any { it is Download.Replaced.Failed } ->
-                    Outcome.warning("失敗があります", "置き換えられなかった DLL があります。下のログを見てください。")
+                    Outcome.warning(
+                        "失敗があります",
+                        "置き換えられなかった DLL があります。その DLL を読み込んでいるゲームを閉じてから、もう一度試してください（下のログに詳しく出ています）。",
+                    )
                 results.all { it is Download.Replaced.AlreadyLatest } -> Outcome.done("どの DLL もすでに最新版（${release.tag}）です。")
                 else -> Outcome.done("reminedog を最新版（${release.tag}）にしました。")
             }
@@ -454,43 +516,74 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
         logLine("reminedog ${release.tag} をダウンロードしています（${megabytes(release.size)} MB）…")
     }
 
-    /** Runs [task] off the event thread with the window busy, then shows the dialog it returns. */
-    private fun runInBackground(task: () -> Outcome) {
+    /**
+     * Runs [task] off the event thread with the window busy, then shows the dialog it returns
+     * (none for null: the user stopped it). The window is usable again whatever happens.
+     */
+    private fun runInBackground(task: () -> Outcome?) {
         setBusy(true)
         thread(isDaemon = true, name = "reminedog-installer") {
-            val outcome = try {
-                task()
-            } catch (e: Exception) {
-                logLine("失敗しました：${message(e)}")
-                Outcome.error("失敗しました", message(e))
-            }
-            SwingUtilities.invokeLater {
-                setBusy(false)
-                reload()
-                JOptionPane.showMessageDialog(this@InstallerFrame, outcome.message, outcome.title, outcome.type)
+            var outcome: Outcome? = null
+            try {
+                outcome = task()
+            } catch (e: Throwable) {
+                outcome = Outcome.error("失敗しました", message(e))
+                runCatching { logLine("失敗しました：${message(e)}") }
+            } finally {
+                val shown = outcome
+                SwingUtilities.invokeLater {
+                    setBusy(false)
+                    reload()
+                    shown?.let { JOptionPane.showMessageDialog(this@InstallerFrame, it.message, it.title, it.type) }
+                }
             }
         }
     }
 
-    /** Asks the user to close the launchers that are open. False when they cancel. */
-    private fun confirmLaunchersClosed(chosen: List<Row>): Boolean {
-        val processes = Processes.running()
-        val open = chosen.map { it.instance.launcher }
-            .distinctBy { it.key }
-            .filter { it.isRunning(processes) }
-            .map { it.label }
-            .distinct()
-        if (open.isEmpty()) return true
-        val answer = JOptionPane.showConfirmDialog(
-            this,
-            "次のランチャーが起動しています：${open.joinToString("、")}\n\n" +
-                "起動したままだと、ランチャーが設定を書き戻して変更が消えることがあります。\n" +
-                "ランチャーを閉じてから「はい」を押してください（「いいえ」でやめます）。",
-            "ランチャーが起動しています",
-            JOptionPane.YES_NO_OPTION,
-            JOptionPane.WARNING_MESSAGE,
-        )
+    /** Asks a yes-or-no question from a background task (the dialog shows on the event thread). */
+    private fun ask(title: String, message: String): Boolean {
+        var answer = JOptionPane.NO_OPTION
+        SwingUtilities.invokeAndWait {
+            answer = JOptionPane.showConfirmDialog(this, message, title, JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE)
+        }
         return answer == JOptionPane.YES_OPTION
+    }
+
+    /**
+     * Until the launchers of [chosen] are closed, asks the user to close them (from a background
+     * task: listing the programs takes a moment). False when they stop.
+     */
+    private fun launchersClosed(chosen: List<Row>): Boolean {
+        while (true) {
+            val processes = Processes.running()
+            val open = chosen.map { it.instance.launcher }
+                .distinctBy { it.key }
+                .filter { it.isRunning(processes) }
+                .map { it.label }
+                .distinct()
+            if (open.isEmpty()) return true
+            val options = arrayOf("閉じた", "このまま続ける", "やめる")
+            var answer = JOptionPane.CLOSED_OPTION
+            SwingUtilities.invokeAndWait {
+                answer = JOptionPane.showOptionDialog(
+                    this,
+                    "次のランチャーが起動しています：${open.joinToString("、")}\n\n" +
+                        "起動したままだと、ランチャーが設定を書き戻して変更が消えることがあります。\n" +
+                        "ランチャーを閉じてから「閉じた」を押してください。",
+                    "ランチャーが起動しています",
+                    JOptionPane.DEFAULT_OPTION,
+                    JOptionPane.WARNING_MESSAGE,
+                    null,
+                    options,
+                    options[0],
+                )
+            }
+            when (answer) {
+                0 -> continue
+                1 -> return true
+                else -> return false
+            }
+        }
     }
 
     private fun setBusy(busy: Boolean) {
@@ -552,7 +645,11 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
         var checked = false
         var args: Args? = null
         var error: String? = null
-        val key: String get() = instance.launcher.key + "|" + instance.name
+
+        /** The instance's name, with its folder when another one has the same name. */
+        var name = instance.name
+        val key: String get() = instance.key
+        val title: String get() = "${instance.launcher.label} / $name"
     }
 
     private enum class StatusKind { INSTALLED, OTHER, ABSENT, ERROR }
@@ -580,7 +677,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
             return when (column) {
                 0 -> row.checked
                 1 -> row.instance.launcher.label
-                2 -> row.instance.name
+                2 -> row.name
                 3 -> row.instance.detail
                 else -> status(row)
             }
@@ -619,7 +716,29 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
     }
 
     companion object {
-        private const val DEFAULT_FOLDER = "C:\\reminedog"
+        /** Where the DLL went before %LOCALAPPDATA% (and still goes where that path cannot be used). */
+        private const val FALLBACK_FOLDER = "C:\\reminedog"
+
+        /**
+         * `%LOCALAPPDATA%\reminedog`, where only the user can change the DLL, when its path can be
+         * put in JVM arguments (no spaces, ASCII only); else [FALLBACK_FOLDER].
+         */
+        private val DEFAULT_FOLDER: String =
+            System.getenv("LOCALAPPDATA")
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { it.trimEnd('\\') + "\\reminedog" }
+                ?.takeIf { AgentArg.problem("$it\\${Download.ASSET}") == null }
+                ?: FALLBACK_FOLDER
+
+        /** A DLL already in one of the usual places. */
+        private fun existingDll(): Path? =
+            listOf(DEFAULT_FOLDER, FALLBACK_FOLDER).distinct().firstNotNullOfOrNull { folder ->
+                try {
+                    Paths.get(folder, Download.ASSET).takeIf { Files.isRegularFile(it) }
+                } catch (e: InvalidPathException) {
+                    null
+                }
+            }
 
         /** One of FlatLaf's icon colors (Actions.Green, Actions.Red, ...). */
         private fun color(key: String): Color = UIManager.getColor(key) ?: UIManager.getColor("Label.foreground")
@@ -658,7 +777,16 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
             add(component, constraints)
         }
 
-        private fun message(e: Exception): String = e.message?.takeIf { it.isNotEmpty() } ?: e.javaClass.simpleName
+        /** What went wrong, in words for the user where Java's own are not. */
+        private fun message(e: Throwable): String =
+            when (e) {
+                is UnknownHostException -> "${e.message} が見つかりません（インターネットにつながっているか確かめてください）"
+                is ConnectException -> "接続できません（インターネットにつながっているか確かめてください）"
+                is SocketTimeoutException -> "応答がありません（時間切れ。しばらくしてから試してください）"
+                is SSLException ->
+                    "安全な接続を確かめられません（PC の時刻と、セキュリティソフトが通信を検査していないかを確かめてください）"
+                else -> e.message?.takeIf { it.isNotEmpty() } ?: e.javaClass.simpleName
+            }
 
         private fun megabytes(bytes: Long): String = "%.1f".format(bytes / 1048576.0)
     }

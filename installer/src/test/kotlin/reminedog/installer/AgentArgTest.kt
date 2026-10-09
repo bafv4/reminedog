@@ -69,6 +69,16 @@ class AgentArgTest {
     }
 
     @Test
+    fun `an argument in quotes is one argument, spaces and all`() {
+        val args = "-Xmx4G \"-agentpath:C:\\My Tools\\reminedog.dll\" -agentpath:\"C:\\a b\\reminedog.dll=log=debug\" -Dx=y"
+        val found = AgentArg.find(args)
+        assertEquals(listOf("C:\\My Tools\\reminedog.dll", "C:\\a b\\reminedog.dll"), found.map { it.path })
+        assertEquals("log=debug", found[1].options)
+        assertEquals("-Xmx4G -agentpath:$dll -Dx=y", AgentArg.install(args, dll))
+        assertEquals("-Xmx4G -Dx=y", AgentArg.remove(args))
+    }
+
+    @Test
     fun `only paths from a drive are taken as the same file wherever the game runs`() {
         assertTrue(AgentArg.isDrivePath("C:\\reminedog\\reminedog.dll"))
         assertTrue(AgentArg.isDrivePath("d:/games/reminedog.dll"))

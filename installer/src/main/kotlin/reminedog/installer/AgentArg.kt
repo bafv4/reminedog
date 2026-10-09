@@ -46,11 +46,14 @@ object AgentArg {
                 continue
             }
             val start = i
-            while (i < args.length && !args[i].isWhitespace()) i++
-            // Prism and MultiMC accept an argument in quotes.
-            val word = args.substring(start, i).let {
-                if (it.length >= 2 && it.startsWith('"') && it.endsWith('"')) it.substring(1, it.length - 1) else it
+            // Prism and MultiMC take an argument (or a part of one) in quotes, spaces and all,
+            // and drop the quotes.
+            var quoted = false
+            while (i < args.length && (quoted || !args[i].isWhitespace())) {
+                if (args[i] == '"') quoted = !quoted
+                i++
             }
+            val word = args.substring(start, i).replace("\"", "")
             if (!word.startsWith(PREFIX)) continue
             val rest = word.removePrefix(PREFIX)
             val path = rest.substringBefore('=')
