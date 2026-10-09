@@ -68,6 +68,26 @@ static REDIRECT: AtomicU32 = AtomicU32::new(0);
 static GAME_CONTEXT: AtomicUsize = AtomicUsize::new(0);
 /// The game bound (or blitted to) framebuffer 0 since the last frame, getting ours.
 static REDIRECTED: AtomicBool = AtomicBool::new(false);
+/// The window system's real swap is running (on the game's thread).
+static SWAPPING: AtomicBool = AtomicBool::new(false);
+
+/// Marks the window system's real swap until dropped: framebuffer 0 is the window's there.
+/// Screen recorders (OBS's game capture) hook the swap and read the window's back buffer
+/// through framebuffer 0, which would otherwise give them the tall frame's bottom rows.
+pub struct Swapping;
+
+impl Swapping {
+    pub fn begin() -> Self {
+        SWAPPING.store(true, Ordering::Relaxed);
+        Swapping
+    }
+}
+
+impl Drop for Swapping {
+    fn drop(&mut self) {
+        SWAPPING.store(false, Ordering::Relaxed);
+    }
+}
 /// The tall size (width << 32 | height) the game should set as its viewport, and whether
 /// it did since the zoom started. Only the height is compared: the game may keep a width of
 /// its own (26.3 renders 2560 wide in a window SDL reports as 2561 pixels wide). Once set,
@@ -206,7 +226,7 @@ fn redirected(framebuffer: u32) -> u32 {
         return framebuffer;
     }
     let ours = REDIRECT.load(Ordering::Relaxed);
-    if ours == 0 {
+    if ours == 0 || SWAPPING.load(Ordering::Relaxed) {
         return 0;
     }
     let current = wgl::get().map_or(0, |wgl| wgl.current().1 as usize);

@@ -209,6 +209,7 @@ unsafe extern "C" fn swap_buffers_detour(window: *mut c_void) {
         }
     });
     if let Some(original) = SWAP_BUFFERS.get() {
+        let _swapping = crate::tall::Swapping::begin();
         // SAFETY: same arguments GLFW's caller passed us.
         unsafe { original(window) };
     }

@@ -381,8 +381,10 @@ unsafe extern "C" fn gl_swap_window_detour(window: *mut c_void) -> bool {
             frame::before_swap(sdl, window);
         }
     });
+    let swapping = crate::tall::Swapping::begin();
     // SAFETY: same arguments the caller passed us.
     let swapped = unsafe { original(window) };
+    drop(swapping);
     ffi::catch("rebinds", || crate::sdl_input::release_lost_keys(window));
     ffi::catch("hotkeys", crate::rebind_state::forget_lost_presses);
     ffi::catch("SDL input", || crate::sdl_input::after_swap(window));
