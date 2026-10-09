@@ -18,7 +18,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use reminedog_core::{DebugKeys, InputId, Location, UNBOUND, key_label, parse_f3c};
+use reminedog_core::{
+    DebugKeys, InputId, Location, Naming, UNBOUND, input_by_name, key_label, parse_f3c,
+};
 
 /// Longest clipboard text looked at; F3+C writes well under 200 bytes.
 const MAX_TEXT: usize = 512;
@@ -80,8 +82,9 @@ pub enum Failure {
     /// The modifier, copy or crash key, or a Ctrl key, was held as the game reads it: physically,
     /// or as the output of a rebinding rule, (source, output), held by its source.
     KeysHeld(Option<(InputId, InputId)>),
-    /// A debug mapping is bound to a key the agent cannot send (the key's label).
-    Unsupported(String),
+    /// The debug modifier or the copy-location mapping is bound to a key the agent cannot
+    /// send (the key's label).
+    Unsupported(DebugKey, String),
     /// The modifier or copy-location mapping has no key.
     Unbound,
     /// The game had no key callback (GLFW) or window id (SDL3) to send the keys to.
@@ -90,6 +93,13 @@ pub enum Failure {
     NoHooks,
     /// No answer in time.
     Timeout,
+}
+
+/// The debug mappings F3+C sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DebugKey {
+    Modifier,
+    Copy,
 }
 
 /// What the clipboard saw while the key events were with the game.
@@ -103,36 +113,36 @@ pub enum Injected {
     Nothing,
 }
 
-/// The game's codes of the debug keys (GLFW key codes, or SDL scancodes and keycodes).
+/// The game's codes of the keys F3+C sends (GLFW key codes, or SDL scancodes and keycodes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeyCodes<T> {
     pub modifier: T,
     pub copy: T,
-    /// `None` when the crash mapping is unbound (it cannot arm then).
-    pub crash: Option<T>,
 }
 
-/// Maps the debug keys with `code`. An unbound modifier or copy key makes F3+C impossible;
-/// a key `code` does not know cannot be sent (or, for the crash key, checked).
+/// Maps the debug modifier and copy keys with `code`. An unbound one makes F3+C impossible;
+/// a key `code` does not know cannot be sent.
 pub fn key_codes<T>(
     keys: &DebugKeys,
     code: impl Fn(&str) -> Option<T>,
 ) -> Result<KeyCodes<T>, Failure> {
-    let map = |name: &str| {
+    let map = |name: &str, which| {
         if name == UNBOUND {
             return Err(Failure::Unbound);
         }
-        code(name).ok_or_else(|| Failure::Unsupported(key_label(name)))
+        code(name).ok_or_else(|| Failure::Unsupported(which, key_label(name)))
     };
     Ok(KeyCodes {
-        modifier: map(&keys.modifier)?,
-        copy: map(&keys.copy_location)?,
-        crash: if keys.crash == UNBOUND {
-            None
-        } else {
-            Some(map(&keys.crash)?)
-        },
+        modifier: map(&keys.modifier, DebugKey::Modifier)?,
+        copy: map(&keys.copy_location, DebugKey::Copy)?,
     })
+}
+
+/// The crash key, as a keyboard key to check (it is never sent, so any key will do): `None`
+/// when it is unbound (it cannot arm then) or a mouse button (not checked: the hooks read
+/// the keyboard's state only).
+pub fn crash_key(keys: &DebugKeys, naming: Naming) -> Option<InputId> {
+    input_by_name(&keys.crash, naming).filter(|id| matches!(id, InputId::Key(_)))
 }
 
 /// The clipboard as seen while a job's key events are with the game.
@@ -405,6 +415,12 @@ pub fn end_passive() {
     }
 }
 
+/// Whether a clipboard write now may be F3+C's (ours or the user's): the detours read the
+/// text only then.
+pub fn watching() -> bool {
+    WATCHING.load(Ordering::Acquire)
+}
+
 /// From the clipboard detours. true = swallow the write (it was ours).
 pub fn on_clipboard(text: &str) -> bool {
     if !WATCHING.load(Ordering::Acquire) {
@@ -601,7 +617,6 @@ mod tests {
             Ok(KeyCodes {
                 modifier: 292,
                 copy: 67,
-                crash: Some(67)
             })
         );
         let sdl = |name: &str| sdl_scancode(name).zip(sdl_keycode(name));
@@ -610,9 +625,9 @@ mod tests {
             Ok(KeyCodes {
                 modifier: (60, 0x4000_003C),
                 copy: (6, 0x63),
-                crash: Some((6, 0x63))
             })
         );
+        assert_eq!(crash_key(&keys, Naming::Modern), Some(InputId::Key(6)));
 
         let with = |modifier: &str, copy: &str, crash: &str| DebugKeys {
             modifier: modifier.into(),
@@ -622,11 +637,18 @@ mod tests {
         };
         let f3 = "key.keyboard.f3";
         let c = "key.keyboard.c";
-        // An unbound crash key needs no check.
+        // An unbound crash key needs no check, nor a mouse button (not checked); any key is
+        // checked.
+        assert_eq!(crash_key(&with(f3, c, UNBOUND), Naming::Glfw), None);
         assert_eq!(
-            key_codes(&with(f3, c, UNBOUND), glfw_key).map(|k| k.crash),
-            Ok(None)
+            crash_key(&with(f3, c, "key.mouse.left"), Naming::Glfw),
+            None
         );
+        assert_eq!(
+            crash_key(&with(f3, c, "key.keyboard.pause"), Naming::Modern),
+            input_by_name("key.keyboard.pause", Naming::Modern)
+        );
+        assert!(key_codes(&with(f3, c, "key.keyboard.pause"), glfw_key).is_ok());
         assert_eq!(
             key_codes(&with(UNBOUND, c, c), glfw_key),
             Err(Failure::Unbound)
@@ -637,16 +659,15 @@ mod tests {
         );
         assert_eq!(
             key_codes(&with(f3, "key.keyboard.left.shift", c), glfw_key),
-            Err(Failure::Unsupported("key.keyboard.left.shift".into()))
-        );
-        assert_eq!(
-            key_codes(&with(f3, c, "key.mouse.left"), glfw_key),
-            Err(Failure::Unsupported("key.mouse.left".into()))
+            Err(Failure::Unsupported(
+                DebugKey::Copy,
+                key_label("key.keyboard.left.shift")
+            ))
         );
         // SDL3 has no F25.
         assert_eq!(
             key_codes(&with("key.keyboard.f25", c, c), sdl),
-            Err(Failure::Unsupported("F25".into()))
+            Err(Failure::Unsupported(DebugKey::Modifier, "F25".into()))
         );
     }
 }

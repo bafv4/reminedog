@@ -16,10 +16,10 @@
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use reminedog_core::{InputId, SCANCODE_COUNT, sdl_keycode, sdl_keycode_of, sdl_scancode};
+use reminedog_core::{InputId, Naming, SCANCODE_COUNT, sdl_keycode, sdl_keycode_of, sdl_scancode};
 use reminedog_render::{Delivery, Key, Modifiers, Output, Phase, PointerButton, Route};
 use windows_sys::Win32::Foundation::HMODULE;
 
@@ -130,8 +130,19 @@ static API: OnceLock<Api> = OnceLock::new();
 static POLL_EVENT: OnceLock<PollEventFn> = OnceLock::new();
 /// The window of the last input event, for switching text input when the UI toggles.
 static LAST_WINDOW: AtomicUsize = AtomicUsize::new(0);
-/// We switched SDL text input on for the UI and must switch it off again.
+/// We switched SDL text input on for the UI and must switch it off again (when the game's
+/// own switching is not followed).
 static TEXT_INPUT_OURS: AtomicBool = AtomicBool::new(false);
+/// Trampolines of SDL_StartTextInput and SDL_StopTextInput: the game's own switching is
+/// followed, so closing the UI leaves text input as the game last wanted it.
+static START_TEXT_INPUT: OnceLock<WindowBoolFn> = OnceLock::new();
+static STOP_TEXT_INPUT: OnceLock<WindowBoolFn> = OnceLock::new();
+/// Text input as the game (or SDL) last switched it.
+static GAME_TEXT_INPUT: AtomicBool = AtomicBool::new(false);
+/// The UI is open and keeps text input on.
+static UI_TEXT_INPUT: AtomicBool = AtomicBool::new(false);
+/// The game window's pixel density (pixels per window unit), found once a frame.
+static DENSITY: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 /// Events made up by the agent (the zoom's resizes, F3+C), handed out before SDL's own.
 static INJECTED: Mutex<VecDeque<(Event, Tag)>> = Mutex::new(VecDeque::new());
 static SET_CLIPBOARD_TEXT: OnceLock<SetClipboardTextFn> = OnceLock::new();
@@ -230,6 +241,19 @@ pub fn install(module: HMODULE) {
         let _ = GET_KEYBOARD_STATE_EXPORT
             .set(unsafe { std::mem::transmute::<*const c_void, GetKeyboardStateFn>(f) });
     }
+    let starts = hook!(
+        c"SDL_StartTextInput",
+        start_text_input_detour,
+        START_TEXT_INPUT
+    );
+    let stops = hook!(
+        c"SDL_StopTextInput",
+        stop_text_input_detour,
+        STOP_TEXT_INPUT
+    );
+    if !(starts && stops) {
+        log::warn!("SDL3 input: the game's text input switching is not followed");
+    }
     hook!(c"SDL_PeepEvents", peep_events_probe, PEEP_EVENTS);
     hook!(c"SDL_WaitEvent", wait_event_probe, WAIT_EVENT);
     hook!(
@@ -302,7 +326,14 @@ unsafe extern "C" fn poll_event_detour(event: *mut u8) -> bool {
             let kind = unsafe { event.cast::<u32>().read_unaligned() };
             log::trace!("SDL event 0x{kind:X} -> {route:?}");
         }
-        ffi::catch("SDL text input", update_text_input);
+        // The UI opens and closes with a key (else the frame finds the change).
+        // SAFETY: as above.
+        if matches!(
+            unsafe { event.cast::<u32>().read_unaligned() },
+            EVENT_KEY_DOWN | EVENT_KEY_UP
+        ) {
+            ffi::catch("SDL text input", update_text_input);
+        }
         if route != Some(Route::Consume) {
             // SAFETY: as above.
             ffi::catch("SDL F3+C", || unsafe { mark_passive(event) });
@@ -325,7 +356,13 @@ unsafe fn mark_passive(event: *const u8) {
             event.add(OFF_KEY_SCANCODE).cast::<u32>().read_unaligned(),
         )
     };
-    if kind == EVENT_KEY_DOWN && !repeat && f3c::passive_key_sdl(scancode) {
+    // Only with the debug modifier down as the game sees it: Ctrl+C in a text field may copy
+    // text that reads as a location (a /tp command).
+    if kind == EVENT_KEY_DOWN
+        && !repeat
+        && f3c::passive_key_sdl(scancode)
+        && input::router().debug_held()
+    {
         f3c::begin_passive();
     }
 }
@@ -363,10 +400,14 @@ fn f3c_events(job: &Job) -> Result<[(Event, Tag); 4], Failure> {
     // (only then: Ctrl is often held to sprint). Held as the game reads them: a key rebound
     // to one of them counts, one rebound to another key does not.
     let ctrl = job.keys.copy_drops_items();
+    let crash = match f3c::crash_key(&job.keys, Naming::Modern) {
+        Some(InputId::Key(scancode)) => Some(u32::from(scancode)),
+        _ => None,
+    };
     let watched = [
         Some(codes.modifier.0),
         Some(codes.copy.0),
-        codes.crash.map(|(scancode, _)| scancode),
+        crash,
         ctrl.then_some(SCANCODE_LCTRL),
         ctrl.then_some(SCANCODE_RCTRL),
     ];
@@ -454,7 +495,10 @@ unsafe extern "C" fn get_keyboard_state_detour(numkeys: *mut c_int) -> *const bo
     };
     // SAFETY: SDL's array of `count` one-byte bools.
     let real = unsafe { std::slice::from_raw_parts(state.cast::<u8>(), count) };
-    spoof_keys(real, &SPOOFED_KEYS[..count], rebind_state::forced);
+    let out = &SPOOFED_KEYS[..count];
+    if !rebind_state::patch_forced(real, out) {
+        spoof_keys(real, out, rebind_state::forced);
+    }
     SPOOFED_KEYS.as_ptr().cast()
 }
 
@@ -549,7 +593,9 @@ unsafe extern "C" fn set_clipboard_text_detour(text: *const c_char) -> bool {
     let Some(original) = SET_CLIPBOARD_TEXT.get() else {
         return false;
     };
+    // Other writes (the game's own copying) are passed on unread.
     let ours = !text.is_null()
+        && f3c::watching()
         && ffi::catch("SDL_SetClipboardText detour", || {
             // SAFETY: NUL-terminated UTF-8, valid only during this call (LWJGL passes a stack
             // buffer); it is read here, before returning.
@@ -603,12 +649,7 @@ unsafe fn route_event(event: *mut u8) -> Route {
             LAST_WINDOW.store(window as usize, Ordering::Relaxed);
         }
         let captured = !window.is_null() && (api.get_relative_mouse_mode)(window);
-        let density = if window.is_null() {
-            1.0
-        } else {
-            let d = (api.get_pixel_density)(window);
-            if d.is_finite() && d > 0.0 { d } else { 1.0 }
-        };
+        let density = f32::from_bits(DENSITY.load(Ordering::Relaxed));
         match kind {
             EVENT_KEY_DOWN | EVENT_KEY_UP => {
                 let key = read_u32(OFF_KEY);
@@ -690,9 +731,10 @@ unsafe fn route_event(event: *mut u8) -> Route {
                 router().scroll(read_f32(OFF_WHEEL_X) * sign, read_f32(OFF_WHEEL_Y) * sign)
             }
             EVENT_WINDOW_FOCUS_LOST => {
-                // SDL3 sends the releases of held keys after this event, not of buttons, and the
-                // router drops those of rebound sources: their outputs are released first, at
-                // the next poll.
+                // SDL3 sends the releases of held keys around this event (the smoke test saw
+                // them before it), not of buttons, and the router drops those of rebound sources
+                // after this: their outputs are released here, at the next poll. Either order
+                // ends with everything released.
                 let releases = {
                     let mut router = router();
                     let releases = router.focus_lost(|id| matches!(id, InputId::Key(_)));
@@ -914,7 +956,7 @@ fn queue_zoom_resize() {
 /// window's size is to its pixel size.
 fn window_size_for(api: &Api, window: *mut c_void, [w, h]: [i32; 2]) -> (i32, i32) {
     // SAFETY: as above.
-    let density = unsafe { (api.get_pixel_density)(window) };
+    let density = crate::tall::own_query(|| unsafe { (api.get_pixel_density)(window) });
     let density = if density.is_finite() && density > 0.0 {
         density
     } else {
@@ -934,8 +976,27 @@ pub fn captured(window: *mut c_void) -> bool {
     })
 }
 
+/// Once a frame, after the swap of `window` (on the thread that polls its events): its pixel
+/// density, and text input if the UI opened or closed.
+pub fn after_swap(window: *mut c_void) {
+    if let Some(api) = API.get()
+        && !window.is_null()
+    {
+        // SAFETY: the window SDL passed to SDL_GL_SwapWindow, on its thread.
+        let density = crate::tall::own_query(|| unsafe { (api.get_pixel_density)(window) });
+        let density = if density.is_finite() && density > 0.0 {
+            density
+        } else {
+            1.0
+        };
+        DENSITY.store(density.to_bits(), Ordering::Relaxed);
+    }
+    update_text_input();
+}
+
 /// SDL3 only sends text (and runs the IME) while text input is on; switch it on for the
-/// UI and back off afterwards if the game had it off.
+/// UI, and when the UI closes back to what the game last asked for (or, without that
+/// followed, off if the game had it off).
 fn update_text_input() {
     let Some(open) = router().take_ui_changed() else {
         return;
@@ -946,19 +1007,61 @@ fn update_text_input() {
     ) else {
         return;
     };
+    UI_TEXT_INPUT.store(open, Ordering::Relaxed);
     if window.is_null() {
         return;
     }
-    // SAFETY: a window SDL reported for an event on this (the event) thread.
+    let followed = START_TEXT_INPUT.get().zip(STOP_TEXT_INPUT.get());
+    // SAFETY: a window SDL reported for an event on this (the event) thread; the trampolines
+    // have the exports' signature.
     unsafe {
-        if open {
-            if !(api.text_input_active)(window) && (api.start_text_input)(window) {
-                TEXT_INPUT_OURS.store(true, Ordering::Relaxed);
+        match followed {
+            Some((&start, &stop)) => {
+                let active = (api.text_input_active)(window);
+                if open || GAME_TEXT_INPUT.load(Ordering::Relaxed) {
+                    if !active {
+                        start(window);
+                    }
+                } else if active {
+                    stop(window);
+                }
             }
-        } else if TEXT_INPUT_OURS.swap(false, Ordering::Relaxed) {
-            (api.stop_text_input)(window);
+            None if open => {
+                if !(api.text_input_active)(window) && (api.start_text_input)(window) {
+                    TEXT_INPUT_OURS.store(true, Ordering::Relaxed);
+                }
+            }
+            None => {
+                if TEXT_INPUT_OURS.swap(false, Ordering::Relaxed) {
+                    (api.stop_text_input)(window);
+                }
+            }
         }
     }
+}
+
+/// The game (or SDL) switches text input on: remembered for when the UI closes.
+unsafe extern "C" fn start_text_input_detour(window: *mut c_void) -> bool {
+    GAME_TEXT_INPUT.store(true, Ordering::Relaxed);
+    let Some(original) = START_TEXT_INPUT.get() else {
+        return false;
+    };
+    // SAFETY: the caller's argument.
+    unsafe { original(window) }
+}
+
+/// The game switches text input off: remembered, and while the UI is open put off until it
+/// closes (the UI's text fields need it).
+unsafe extern "C" fn stop_text_input_detour(window: *mut c_void) -> bool {
+    GAME_TEXT_INPUT.store(false, Ordering::Relaxed);
+    if UI_TEXT_INPUT.load(Ordering::Relaxed) {
+        return true;
+    }
+    let Some(original) = STOP_TEXT_INPUT.get() else {
+        return false;
+    };
+    // SAFETY: the caller's argument.
+    unsafe { original(window) }
 }
 
 fn modifiers(mods: u16) -> Modifiers {

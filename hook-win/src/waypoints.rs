@@ -11,26 +11,29 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant, SystemTime};
 
 use reminedog_core::{
-    DebugKeys, InputId, Location, Naming, UNBOUND, Waypoint, WaypointBook, WorldId, WorldState,
-    WorldWatcher, bindings_by_key, glfw_key, glfw_key_of, input_by_name, input_label, key_label,
-    mapping_label, options_path, parse_debug_keys, unix_now,
+    DebugKeys, InputId, Location, Naming, SaveJob, ServerLabels, UNBOUND, Waypoint, WaypointBook,
+    WorldId, WorldState, WorldWatcher, bindings_by_key, glfw_key, glfw_key_of, input_by_name,
+    input_label, key_label, mapping_label, options_path, parse_debug_keys, unix_now,
 };
 use reminedog_render::{
     HotkeyAction, Key, Notice, WaypointCommand, WaypointView, WorldLabel, format_xyz,
     navigation_text, turn_to,
 };
 
-use crate::f3c::{self, Failure, Job, Outcome, Purpose};
+use crate::f3c::{self, DebugKey, Failure, Job, Outcome, Purpose};
 use crate::input;
+use crate::saver;
 
 /// How often latest.log is read for world changes.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// How often options.txt is read for the key bindings.
+/// How often options.txt is looked at for changed key bindings (also right before a request).
 const KEYS_INTERVAL: Duration = Duration::from_secs(5);
+/// A larger options.txt is not read.
+const MAX_OPTIONS_LEN: u64 = 1024 * 1024;
 /// How often waypoints an earlier save failed to write are saved again.
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 /// A request the platform did not take within this long fails.
@@ -62,35 +65,26 @@ pub fn before_frame(game_dir: &Path, window: usize, playing: bool, naming: Namin
     let mut state = lock();
     let now = Instant::now();
     let waypoints = state.get_or_insert_with(|| Waypoints::new(game_dir, now));
+    waypoints.naming = naming;
+    if !playing {
+        waypoints.in_game_since_poll = false;
+    }
     if now >= waypoints.next_poll {
         waypoints.next_poll = now + POLL_INTERVAL;
         waypoints.poll_world();
     }
+    waypoints.poll_saves();
     if !waypoints.book.has_unsaved() {
         // The first retry comes an interval after the failure, not at the next frame.
         waypoints.next_retry = now + RETRY_INTERVAL;
     } else if now >= waypoints.next_retry {
         waypoints.next_retry = now + RETRY_INTERVAL;
-        if waypoints.book.retry_save().is_ok() {
-            log::info!("waypoints: saved after an earlier failure");
-        }
+        let _ = waypoints.book.retry_save();
     }
+    waypoints.submit_saves();
     if now >= waypoints.next_keys {
         waypoints.next_keys = now + KEYS_INTERVAL;
         waypoints.load_keys(naming);
-        let keys = &waypoints.keys;
-        // The user's own F3+C: the copy key as the platform reports it to the game.
-        let copy = input_by_name(&keys.copy_location, naming);
-        f3c::set_passive_keys(
-            copy.and_then(glfw_key_of)
-                .map(|(key, _)| key)
-                .filter(|&key| key != -1),
-            match copy {
-                Some(InputId::Key(scancode)) => Some(u32::from(scancode)),
-                _ => None,
-            },
-        );
-        input::router().set_debug_modifier(input_by_name(&keys.modifier, naming));
     }
     f3c::expire(REQUEST_TIMEOUT);
     for outcome in f3c::take_outcomes() {
@@ -108,6 +102,7 @@ pub fn before_frame(game_dir: &Path, window: usize, playing: bool, naming: Namin
         };
         waypoints.send(job);
     }
+    waypoints.submit_saves();
     Frame {
         view: waypoints.view(playing, f3c::busy(), now),
         notices: std::mem::take(&mut waypoints.pending_notices),
@@ -137,22 +132,38 @@ pub fn after_frame(commands: Vec<WaypointCommand>, window: usize) {
         let job = waypoints.command(command, window);
         waypoints.send(job);
     }
+    waypoints.submit_saves();
 }
 
 fn lock() -> MutexGuard<'static, Option<Waypoints>> {
     WAYPOINTS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A file's modification time and size (`None`: there was no file).
+type FileStamp = Option<(Option<SystemTime>, u64)>;
+
 struct Waypoints {
     game_dir: PathBuf,
     watcher: WorldWatcher,
     book: WaypointBook,
+    /// The label last used on each server.
+    labels: ServerLabels,
+    /// Saves on the saving thread: the waypoints', and the labels' (`None`).
+    saving: Vec<(saver::Pending, Option<SaveJob>)>,
+    /// The waypoints as the menu shows them, made again when the book's revision changes.
+    shown: (u64, Arc<[Waypoint]>),
     next_poll: Instant,
     next_keys: Instant,
     next_retry: Instant,
+    /// The game had the cursor in every frame since the last poll of the log.
+    in_game_since_poll: bool,
+    /// How the window library's Minecraft names keys.
+    naming: Naming,
     keys: DebugKeys,
     /// options.txt was read at least once.
     keys_read: bool,
+    /// options.txt as it was read, and the naming it was read with.
+    keys_stamp: Option<(FileStamp, Naming)>,
     /// The menu's warnings about `keys`.
     key_problems: Vec<String>,
     reserved_keys: Vec<Key>,
@@ -178,15 +189,21 @@ impl Waypoints {
         Self {
             game_dir: game_dir.to_owned(),
             watcher: WorldWatcher::new(game_dir),
-            book: WaypointBook::new(game_dir),
+            book: WaypointBook::deferred(game_dir),
+            labels: ServerLabels::new(game_dir),
+            saving: Vec::new(),
+            shown: (u64::MAX, Arc::from([])),
             next_poll: now,
             next_keys: now,
             next_retry: now,
+            in_game_since_poll: false,
+            naming: Naming::Modern,
             key_problems: binding_problems(&keys),
             reserved_keys: reserved_keys(&keys),
             game_bindings: Vec::new(),
             keys,
             keys_read: false,
+            keys_stamp: None,
             location: None,
             selected: None,
             blocked: false,
@@ -196,42 +213,138 @@ impl Waypoints {
         }
     }
 
+    /// Reads the log for world changes. World lines read after the game had the cursor all
+    /// the time since the last poll did not come from its screens: they are ignored.
     fn poll_world(&mut self) {
-        match self.watcher.poll() {
+        let polled = if self.in_game_since_poll {
+            self.watcher.poll_while_playing()
+        } else {
+            self.watcher.poll()
+        };
+        self.in_game_since_poll = true;
+        match polled {
             Ok(true) => self.world_changed(),
             Ok(false) => {}
             Err(e) => log_once(&mut self.log_errors, &e, "world: cannot read latest.log"),
         }
     }
 
-    /// Opens the new world's waypoints; what belonged to the old world goes.
+    /// Opens the new world's waypoints (a server's under its last label); what belonged to the
+    /// old world goes.
     fn world_changed(&mut self) {
-        if let Some(lost) = self.book.set_world(self.watcher.current()) {
-            self.warn(lost);
-        }
-        self.selected = None;
+        let world = self.watcher.current().map(|world| self.labels.apply(world));
+        self.switch_book(world.as_ref());
         self.location = None;
         self.blocked = false;
         match self.watcher.state() {
             WorldState::NotInWorld => log::info!("world: not in a world"),
             WorldState::Unknown => log::info!("world: unknown"),
-            WorldState::In(world) => log::info!("world: {}", world.display_name()),
+            WorldState::In(_) => {
+                log::info!(
+                    "world: {}",
+                    world
+                        .as_ref()
+                        .map_or_else(String::new, WorldId::display_name)
+                )
+            }
         }
     }
 
-    /// Reads the key bindings, with key names as `naming` has them; on an error the ones read
-    /// before stay. A missing file (a fresh instance) has the defaults.
+    fn switch_book(&mut self, world: Option<&WorldId>) {
+        if let Some(lost) = self.book.set_world(world) {
+            self.warn(lost);
+        }
+        self.selected = None;
+    }
+
+    /// Hands the book's saves to the saving thread.
+    fn submit_saves(&mut self) {
+        for mut job in self.book.take_saves() {
+            let bytes = std::mem::take(&mut job.bytes);
+            self.saving
+                .push((saver::write(job.path.clone(), bytes), Some(job)));
+        }
+    }
+
+    /// Takes in the saves done since the last frame.
+    fn poll_saves(&mut self) {
+        let mut i = 0;
+        while i < self.saving.len() {
+            let Some(result) = self.saving[i].0.poll() else {
+                i += 1;
+                continue;
+            };
+            let (_, job) = self.saving.remove(i);
+            let Some(job) = job else {
+                if let Err(e) = result {
+                    log::warn!("waypoints: cannot save the servers' labels: {e}");
+                    self.warn(format!("ラベルを保存できなかった：{e}"));
+                }
+                continue;
+            };
+            let was_failing = self.book.problem().is_some();
+            let result = result.map_err(|e| e.to_string());
+            let ok = result.is_ok();
+            if let Some(text) = self.book.save_done(&job, result) {
+                self.warn(text);
+            } else if ok && was_failing && self.book.problem().is_none() {
+                log::info!("waypoints: saved after an earlier failure");
+            }
+        }
+    }
+
+    /// Reads the key bindings if options.txt changed since (or `naming` did), with key names as
+    /// `naming` has them; on an error the ones read before stay. A missing file (a fresh
+    /// instance) has the defaults.
     fn load_keys(&mut self, naming: Naming) {
-        let text = match fs::read(options_path(&self.game_dir)) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        let path = options_path(&self.game_dir);
+        let file = match fs::metadata(&path) {
+            Ok(meta) => Some((meta.modified().ok(), meta.len())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
             Err(e) => {
                 log_once(&mut self.keys_errors, &e, "options.txt: cannot read");
                 return;
             }
         };
+        let stamp = Some((file, naming));
+        if self.keys_read && stamp == self.keys_stamp {
+            return;
+        }
+        let text = match file {
+            Some((_, len)) if len > MAX_OPTIONS_LEN => {
+                let e = io::Error::other(format!("{len} bytes, too large"));
+                log_once(&mut self.keys_errors, &e, "options.txt: not read");
+                return;
+            }
+            Some(_) => match fs::read(&path) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(e) => {
+                    log_once(&mut self.keys_errors, &e, "options.txt: cannot read");
+                    return;
+                }
+            },
+            None => {
+                if !self.keys_read {
+                    log::info!("options.txt: not found; the game's default keys are assumed");
+                }
+                String::new()
+            }
+        };
+        self.keys_stamp = stamp;
         self.game_bindings = bindings_by_key(&text, naming);
         let keys = parse_debug_keys(&text);
+        // The user's own F3+C: the copy key as the platform reports it to the game.
+        let copy = input_by_name(&keys.copy_location, naming);
+        f3c::set_passive_keys(
+            copy.and_then(glfw_key_of)
+                .map(|(key, _)| key)
+                .filter(|&key| key != -1),
+            match copy {
+                Some(InputId::Key(scancode)) => Some(u32::from(scancode)),
+                _ => None,
+            },
+        );
+        input::router().set_debug_modifier(input_by_name(&keys.modifier, naming));
         if self.keys_read && keys == self.keys {
             return;
         }
@@ -304,13 +417,17 @@ impl Waypoints {
         }
     }
 
-    /// The way from `from` to the destination, if one is selected.
+    /// The way from `from` to the destination, if one is selected; it replaces the way shown
+    /// from an older position.
     fn show_way(&mut self, from: &Location) {
         if let Some(notice) = self.destination().map(|waypoint| Notice {
-            text: navigation_text(&waypoint.name, from, waypoint),
-            warn: false,
-            seconds: NAVIGATION_SECONDS,
             arrow: turn_to(from, waypoint),
+            ..Notice::new(
+                navigation_text(&waypoint.name, from, waypoint),
+                false,
+                NAVIGATION_SECONDS,
+            )
+            .replacing(Notice::NAVIGATION)
         }) {
             self.pending_notices.push(notice);
         }
@@ -336,8 +453,10 @@ impl Waypoints {
         self.job(Purpose::Refresh, window)
     }
 
-    /// The request to send, unless the game refused F3+C in this world.
+    /// The request to send, unless the game refused F3+C in this world. The key bindings are
+    /// read again first if options.txt changed (the user may just have changed them).
     fn job(&mut self, purpose: Purpose, window: usize) -> Option<Job> {
+        self.load_keys(self.naming);
         if self.blocked {
             log::info!("F3+C: {purpose:?} not sent; the game refused F3+C in this world");
             self.warn(BLOCKED);
@@ -388,8 +507,29 @@ impl Waypoints {
                     log::info!("F3+C: requests allowed again from the menu");
                 }
             }
+            WaypointCommand::SetLabel(label) => self.set_label(label.as_deref()),
         }
         None
+    }
+
+    /// On a server: keeps its waypoints under `label` from now on (and on later visits).
+    fn set_label(&mut self, label: Option<&str>) {
+        let Some(world) = self
+            .book
+            .world()
+            .filter(|world| world.address_key().is_some())
+            .map(|world| world.with_label(label))
+        else {
+            return;
+        };
+        if self.book.world() == Some(&world) {
+            return;
+        }
+        if let Some((path, bytes)) = self.labels.set(&world) {
+            self.saving.push((saver::write(path, bytes), None));
+        }
+        log::info!("waypoints: server label changed");
+        self.switch_book(Some(&world));
     }
 
     fn waypoint(&self, id: u64) -> Option<&Waypoint> {
@@ -404,25 +544,29 @@ impl Waypoints {
     }
 
     fn notice(&mut self, text: impl Into<String>, warn: bool, seconds: f64) {
-        self.pending_notices.push(Notice {
-            text: text.into(),
-            warn,
-            seconds,
-            arrow: None,
-        });
+        self.pending_notices.push(Notice::new(text, warn, seconds));
     }
 
     fn warn(&mut self, text: impl Into<String>) {
         self.notice(text, true, NOTICE_SECONDS);
     }
 
-    fn view(&self, playing: bool, busy: bool, now: Instant) -> WaypointView {
+    fn view(&mut self, playing: bool, busy: bool, now: Instant) -> WaypointView {
         let mut problems: Vec<String> =
             self.book.problem().map(str::to_owned).into_iter().collect();
         problems.extend(self.key_problems.iter().cloned());
+        let revision = self.book.revision();
+        if self.shown.0 != revision {
+            self.shown = (revision, Arc::from(self.book.waypoints()));
+        }
+        let label = match self.book.world() {
+            Some(WorldId::Multiplayer { label, .. }) => label.clone(),
+            _ => None,
+        };
         WaypointView {
-            world: world_label(self.watcher.state()),
-            waypoints: self.book.waypoints().to_vec(),
+            world: world_label(self.watcher.state(), self.watcher.level_name()),
+            label,
+            waypoints: self.shown.1.clone(),
             selected: self.selected,
             location: self.location.as_ref().map(|(location, _)| location.clone()),
             location_age: self
@@ -444,15 +588,20 @@ fn log_once(logged: &mut Vec<io::ErrorKind>, error: &io::Error, what: &str) {
     }
 }
 
-fn world_label(state: &WorldState) -> WorldLabel {
+/// The world for the menu: a singleplayer world by its name in the game (`level_name`) and
+/// its folder when that differs (two worlds can have one name), a server by its address.
+fn world_label(state: &WorldState, level_name: Option<&str>) -> WorldLabel {
     match state {
         WorldState::NotInWorld => WorldLabel::NotInWorld,
         WorldState::Unknown => WorldLabel::Unknown,
-        WorldState::In(world @ WorldId::Singleplayer { .. }) => {
-            WorldLabel::Singleplayer(world.display_name())
+        WorldState::In(WorldId::Singleplayer { folder }) => {
+            WorldLabel::Singleplayer(match level_name {
+                Some(name) if name != folder => format!("{name}（フォルダ：{folder}）"),
+                _ => folder.clone(),
+            })
         }
         WorldState::In(world @ WorldId::Multiplayer { .. }) => {
-            WorldLabel::Multiplayer(world.display_name())
+            WorldLabel::Multiplayer(world.with_label(None).display_name())
         }
     }
 }
@@ -549,14 +698,21 @@ fn failure_text(reason: &Failure, keys: &DebugKeys) -> String {
             "{} を押している間は座標を取得できない",
             debug_key_labels(keys)
         ),
-        Failure::Unsupported(name) => format!("F3+C のキー設定（{name}）には対応していない"),
+        Failure::Unsupported(which, label) => format!(
+            "F3+C の{}のキー（{label}）は送れない（Minecraft のキー設定で、英字・数字・F キー・テンキーの数字にする）",
+            match which {
+                DebugKey::Modifier => "デバッグ用の修飾キー",
+                DebugKey::Copy => "座標のコピー",
+            }
+        ),
         Failure::Unbound if keys.copy_location == UNBOUND => {
             "座標のコピーにキーが割り当てられていない".to_owned()
         }
         Failure::Unbound => "デバッグ用の修飾キー（F3）にキーが割り当てられていない".to_owned(),
         Failure::NoCallback => "座標を取得できなかった（ゲームにキーを送れない）".to_owned(),
         Failure::NoHooks => {
-            "この環境では座標を取得できない（クリップボードをフックできなかった）".to_owned()
+            "この環境では座標を取得できない（座標を取るのに必要なフックが入らなかった。ログの F3+C の行を見る）"
+                .to_owned()
         }
         Failure::Timeout => "座標を取得できなかった（時間切れ）".to_owned(),
     }
@@ -599,6 +755,27 @@ mod tests {
         }
     }
 
+    /// Writes the saves handed out so far and takes in how they went.
+    fn settle(waypoints: &mut Waypoints) {
+        waypoints.submit_saves();
+        let saving = std::mem::take(&mut waypoints.saving);
+        for (pending, job) in saving {
+            let result = pending
+                .wait(Duration::from_secs(10))
+                .expect("saved in time");
+            if let Some(job) = job {
+                let result = result.map_err(|e| e.to_string());
+                assert_eq!(waypoints.book.save_done(&job, result), None);
+            }
+        }
+    }
+
+    /// Polls the log as after a frame with one of the game's screens (they change worlds).
+    fn poll_after_a_screen(waypoints: &mut Waypoints) {
+        waypoints.in_game_since_poll = false;
+        waypoints.poll_world();
+    }
+
     /// The notices so far, taken.
     fn notices(waypoints: &mut Waypoints) -> Vec<String> {
         std::mem::take(&mut waypoints.pending_notices)
@@ -624,7 +801,7 @@ mod tests {
         create_world(game, name);
         start_server(game);
         let mut waypoints = Waypoints::new(game, now);
-        waypoints.poll_world();
+        poll_after_a_screen(&mut waypoints);
         let origin = here(OVERWORLD, 0.0, 64.0, 0.0);
         waypoints.on_outcome(located(origin, Some(Purpose::Record)), now);
         assert_eq!(
@@ -664,7 +841,7 @@ mod tests {
 
         create_world(game, "New World");
         start_server(game);
-        waypoints.poll_world();
+        poll_after_a_screen(&mut waypoints);
         let view = waypoints.view(true, false, now);
         assert_eq!(view.world, WorldLabel::Singleplayer("New World".into()));
         // The old world's position went with it.
@@ -682,7 +859,10 @@ mod tests {
         let world = WorldId::Singleplayer {
             folder: "New World".into(),
         };
+        // Saved on the saving thread.
+        settle(&mut waypoints);
         assert!(waypoints_path(game, &world).is_file());
+        assert!(!waypoints.book.has_unsaved());
     }
 
     #[test]
@@ -693,7 +873,7 @@ mod tests {
         let mut waypoints = Waypoints::new(game, now);
         // The server started, but its world folder is not there (yet).
         start_server(game);
-        waypoints.poll_world();
+        poll_after_a_screen(&mut waypoints);
         assert_eq!(waypoints.view(true, false, now).world, WorldLabel::Unknown);
 
         create_world(game, "Later");
@@ -713,7 +893,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let now = Instant::now();
         let mut waypoints = Waypoints::new(dir.path(), now);
-        waypoints.keys.shared_with_copy = vec!["key.drop".into()];
+        // Read again right before each request.
+        fs::write(
+            options_path(dir.path()),
+            "key_key.drop:key.keyboard.c
+",
+        )
+        .unwrap();
+        waypoints.load_keys(Naming::Modern);
+        assert_eq!(waypoints.keys.shared_with_copy, ["key.drop"]);
         let job = Job {
             purpose: Purpose::Record,
             window: WINDOW,
@@ -746,7 +934,7 @@ mod tests {
         assert!(waypoints.blocked);
         create_world(dir.path(), "Other");
         start_server(dir.path());
-        waypoints.poll_world();
+        poll_after_a_screen(&mut waypoints);
         assert!(!waypoints.blocked);
 
         // So does a world where the user's own F3+C worked.
@@ -778,7 +966,7 @@ mod tests {
                 "ゲームの画面を閉じてから押す",
                 "F3・C を押している間は座標を取得できない",
                 "座標を取得できなかった（時間切れ）",
-                "この環境では座標を取得できない（クリップボードをフックできなかった）",
+                "この環境では座標を取得できない（座標を取るのに必要なフックが入らなかった。ログの F3+C の行を見る）",
             ]
         );
         assert!(waypoints.job(Purpose::Refresh, WINDOW).is_some());
@@ -815,10 +1003,9 @@ mod tests {
         assert_eq!(
             shown,
             [Notice {
-                text: "地点 1：北 100 m（正面）".into(),
-                warn: false,
-                seconds: NAVIGATION_SECONDS,
                 arrow: Some(0.0),
+                ..Notice::new("地点 1：北 100 m（正面）", false, NAVIGATION_SECONDS)
+                    .replacing(Notice::NAVIGATION)
             }]
         );
         // The user's own F3+C too.
@@ -876,7 +1063,7 @@ mod tests {
         let log = latest_log_path(dir.path());
         let stopped = format!("{STARTING}[12:30:00] [Server thread/INFO]: Stopping server\n");
         fs::write(log, stopped).unwrap();
-        waypoints.poll_world();
+        poll_after_a_screen(&mut waypoints);
         let view = waypoints.view(false, false, now);
         assert_eq!(view.world, WorldLabel::NotInWorld);
         assert_eq!((view.selected, view.location), (None, None));
@@ -941,7 +1128,10 @@ mod tests {
         );
         assert_eq!(
             waypoints.key_problems,
-            ["F3+C のキー設定（key.keyboard.left.shift）には対応していない"]
+            [format!(
+                "F3+C のデバッグ用の修飾キーのキー（{}）は送れない（Minecraft のキー設定で、英字・数字・F キー・テンキーの数字にする）",
+                key_label("key.keyboard.left.shift")
+            )]
         );
         // The menu shows them.
         let view = waypoints.view(true, false, now);
@@ -1010,10 +1200,10 @@ mod tests {
         );
         assert_eq!(
             failure_text(
-                &Failure::Unsupported("key.mouse.left".into()),
+                &Failure::Unsupported(DebugKey::Copy, "マウスの戻る".into()),
                 &keys(f4, x, y)
             ),
-            "F3+C のキー設定（key.mouse.left）には対応していない"
+            "F3+C の座標のコピーのキー（マウスの戻る）は送れない（Minecraft のキー設定で、英字・数字・F キー・テンキーの数字にする）"
         );
         assert_eq!(
             failure_text(&Failure::NoCallback, &keys(f4, x, y)),
@@ -1041,15 +1231,91 @@ mod tests {
 
     #[test]
     fn world_labels() {
-        assert_eq!(world_label(&WorldState::NotInWorld), WorldLabel::NotInWorld);
-        assert_eq!(world_label(&WorldState::Unknown), WorldLabel::Unknown);
+        assert_eq!(
+            world_label(&WorldState::NotInWorld, None),
+            WorldLabel::NotInWorld
+        );
+        assert_eq!(world_label(&WorldState::Unknown, None), WorldLabel::Unknown);
         let server = WorldId::Multiplayer {
             host: "example.com".into(),
             port: 25565,
+            label: Some("survival".into()),
         };
+        // The label shows in its own row.
         assert_eq!(
-            world_label(&WorldState::In(server)),
+            world_label(&WorldState::In(server), None),
             WorldLabel::Multiplayer("example.com".into())
         );
+        let world = WorldState::In(WorldId::Singleplayer {
+            folder: "New World (1)".into(),
+        });
+        assert_eq!(
+            world_label(&world, Some("New World")),
+            WorldLabel::Singleplayer("New World（フォルダ：New World (1)）".into())
+        );
+        assert_eq!(
+            world_label(&world, Some("New World (1)")),
+            WorldLabel::Singleplayer("New World (1)".into())
+        );
+        assert_eq!(
+            world_label(&world, None),
+            WorldLabel::Singleplayer("New World (1)".into())
+        );
+    }
+
+    #[test]
+    fn a_server_label_keeps_its_own_waypoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let game = dir.path();
+        let now = Instant::now();
+        let log = latest_log_path(game);
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        fs::write(
+            &log,
+            "[12:00:00] [Render thread/INFO]: Connecting to example.com, 25565\n",
+        )
+        .unwrap();
+        let mut waypoints = Waypoints::new(game, now);
+        poll_after_a_screen(&mut waypoints);
+        let spot = here(OVERWORLD, 1.0, 64.0, 1.0);
+        waypoints.on_outcome(located(spot.clone(), Some(Purpose::Record)), now);
+        assert_eq!(waypoints.view(true, false, now).waypoints.len(), 1);
+        assert_eq!(waypoints.view(true, false, now).label, None);
+
+        waypoints.command(WaypointCommand::SetLabel(Some("survival".into())), WINDOW);
+        let view = waypoints.view(true, false, now);
+        assert_eq!(view.label.as_deref(), Some("survival"));
+        assert!(view.waypoints.is_empty());
+        settle(&mut waypoints);
+
+        // The next visit opens the label's waypoints.
+        let mut again = Waypoints::new(game, now);
+        poll_after_a_screen(&mut again);
+        assert_eq!(
+            again.view(true, false, now).label.as_deref(),
+            Some("survival")
+        );
+        again.command(WaypointCommand::SetLabel(None), WINDOW);
+        assert_eq!(again.view(true, false, now).waypoints.len(), 1);
+    }
+
+    #[test]
+    fn world_lines_read_during_play_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let game = dir.path();
+        let now = Instant::now();
+        let mut waypoints = with_destination(game, "World", now);
+        // A frame in game, then a poll: a server's text put a world line in the log.
+        let log = latest_log_path(game);
+        let mut text = fs::read_to_string(&log).unwrap();
+        text.push_str("[12:30:00] [Server thread/INFO]: Stopping server\n");
+        fs::write(&log, text).unwrap();
+        waypoints.in_game_since_poll = true;
+        Waypoints::poll_world(&mut waypoints);
+        assert_eq!(waypoints.selected, Some(1));
+        assert!(matches!(
+            waypoints.view(true, false, now).world,
+            WorldLabel::Singleplayer(_)
+        ));
     }
 }

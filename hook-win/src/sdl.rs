@@ -2,8 +2,12 @@
 //!
 //! 26.x renders with OpenGL through SDL3 (its "RenderPearl OpenGL" backend), so the overlay
 //! works as with GLFW: `SDL_GL_SwapWindow` is detoured and hands each frame to
-//! [`frame::before_swap`]. The other detours only log how the game uses SDL3 (window
-//! flags, OpenGL context or Vulkan surface), for diagnosing future versions.
+//! [`frame::before_swap`]. `SDL_GetWindowSizeInPixels` reports the tall size during the
+//! high-resolution zoom ([`crate::tall`]). The other detours only log how the game uses SDL3
+//! (window flags, OpenGL context or Vulkan surface), for diagnosing future versions.
+//!
+//! Only one window library is hooked, the first loaded: a mod's SDL (controller support) in
+//! a GLFW game is left alone.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -197,11 +201,22 @@ impl WindowSystem for Sdl {
     }
 }
 
-/// Identifies SDL3 by its exports, like GLFW.
+/// Identifies SDL3 by its exports, like GLFW: those SDL2 has too, and two only SDL3 has.
 pub fn is_sdl3(module: HMODULE) -> bool {
-    [c"SDL_Init", c"SDL_CreateWindow", c"SDL_GL_SwapWindow"]
-        .iter()
-        .all(|name| export(module, name).is_some())
+    [
+        c"SDL_Init",
+        c"SDL_CreateWindow",
+        c"SDL_GL_SwapWindow",
+        c"SDL_GetWindowProperties",
+        c"SDL_GetPointerProperty",
+    ]
+    .iter()
+    .all(|name| export(module, name).is_some())
+}
+
+/// Whether an SDL3 library was hooked.
+pub fn attached() -> bool {
+    SDL.get().is_some()
 }
 
 pub fn attach(module: HMODULE, path: &str) {
@@ -215,7 +230,11 @@ pub fn attach(module: HMODULE, path: &str) {
         Ok(sdl) => {
             let _ = SDL.set(sdl);
         }
-        Err(e) => log::error!("SDL3 loaded ({path}), but the overlay cannot use it: {e}"),
+        Err(e) => {
+            // Not the SDL3 the game opens its window with: no detours at all.
+            log::error!("SDL3 loaded ({path}), but the overlay cannot use it: {e}");
+            return;
+        }
     }
     log::info!("SDL3 loaded: {path}");
     // SAFETY (each call): the SDL3 export, its detour and the slot's fn type share one
@@ -356,6 +375,8 @@ unsafe extern "C" fn gl_swap_window_detour(window: *mut c_void) -> bool {
     // SAFETY: same arguments the caller passed us.
     let swapped = unsafe { original(window) };
     ffi::catch("rebinds", || crate::sdl_input::release_lost_keys(window));
+    ffi::catch("hotkeys", crate::rebind_state::forget_lost_presses);
+    ffi::catch("SDL input", || crate::sdl_input::after_swap(window));
     swapped
 }
 

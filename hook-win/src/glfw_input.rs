@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use reminedog_core::{
-    DebugKeys, InputId, glfw_button_of, glfw_key, glfw_key_of, input_from_glfw_button,
+    DebugKeys, InputId, Naming, glfw_button_of, glfw_key, glfw_key_of, input_from_glfw_button,
     input_from_glfw_key,
 };
 use reminedog_render::{Delivery, Key, Output, Phase, PointerButton, Route};
@@ -367,7 +367,9 @@ fn key_to_game(window: *mut c_void, key: c_int, scancode: c_int, action: c_int, 
     let Some(game) = game_callbacks(window).key else {
         return;
     };
-    let passive = action == PRESS && f3c::passive_key_glfw(key);
+    // Only with the debug modifier down as the game sees it: Ctrl+C in a text field may copy
+    // text that reads as a location (a /tp command).
+    let passive = action == PRESS && f3c::passive_key_glfw(key) && input::router().debug_held();
     if passive {
         ffi::catch("GLFW F3+C", f3c::begin_passive);
     }
@@ -586,7 +588,9 @@ unsafe extern "C" fn set_clipboard_string_detour(window: *mut c_void, text: *con
     let Some(original) = SET_CLIPBOARD_STRING.get() else {
         return;
     };
+    // Other writes (the game's own copying) are passed on unread.
     let ours = !text.is_null()
+        && f3c::watching()
         && ffi::catch("glfwSetClipboardString detour", || {
             // SAFETY: NUL-terminated UTF-8, valid only during this call (LWJGL frees it right
             // after); it is read here, before returning.
@@ -672,10 +676,14 @@ fn check_f3c(window: *mut c_void, keys: &DebugKeys) -> Result<(c_int, c_int), Fa
     // (only then: Ctrl is often held to sprint). Held as the game reads them: a key rebound
     // to one of them counts, one rebound to another key does not.
     let ctrl = keys.copy_drops_items();
+    let crash = f3c::crash_key(keys, Naming::Glfw)
+        .and_then(glfw_key_of)
+        .map(|(key, _)| key)
+        .filter(|&key| key != -1);
     let watched = [
         Some(codes.modifier),
         Some(codes.copy),
-        codes.crash,
+        crash,
         ctrl.then_some(KEY_LEFT_CONTROL),
         ctrl.then_some(KEY_RIGHT_CONTROL),
     ];
