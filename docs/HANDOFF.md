@@ -803,3 +803,13 @@ MSVC のリリースビルドの依存は `dumpbin /dependents` で確かめた�
 確かめたこと：`cargo test --workspace`、`cargo clippy --workspace --all-targets`（警告 0）、インストーラーの `gradlew build`、リリースビルドの DLL に `ci/check-dll.ps1`、ワークフローの YAML の書式、LWJGL の jar の SHA-256 の照合（fetch-lwjgl.sh）。
 確かめていないこと：実機（1.21.11、26.3）での動作の全部（`docs/TESTING.md` の「監査の修正で確認すること」）、ワークフローを GitHub で動かすこと、ACL を変えたフォルダでのゲームの起動、WebView2 の新しいイベント（証明書・画面の共有）とタイマーでの起床、`ICoreWebView2_27` がない古いランタイム（購読を飛ばすだけのはず）。
 採らなかったこと：DLL の署名（S-4 の案。利用者の判断で文言だけ）、`rust-toolchain.toml`（手元で別のツールチェーンをダウンロードさせるので、ワークフローの env で固定した）、インストーラーで既存の DLL の VERSIONINFO を読むこと（ハッシュの違いで確認する）
+
+## 追記：26.3 でズーム中のクリックでマウスが外れる（2026-10-09）
+
+利用者の報告：26.3 で高精細のズーム中にクリックすると、Windows のカーソルが出て視点を動かせなくなり、Z を離しても戻らない。
+
+- 原因（26.3 の jar で確認）：`Window.onResize`（`WINDOW_RESIZED` で呼ばれる）は、マウスを捕まえていれば `InputConstants.grabMouse(getScreenWidth() / 2, getScreenHeight() / 2)` を呼び、`SDL_WarpMouseInWindow` でカーソルをそこへ移す。
+  ズームの間は縦に k 倍のウィンドウを伝えているので、移す先は本当のウィンドウの下の外になる。相対モードでも OS のカーソルはそこにあり、クリックは別のウィンドウに当たって、ゲームがフォーカスとマウスを失う。ログでは、ズームの開始と終了のたびに `SDL_SetWindowRelativeMouseMode(true)` が出ていた
+- 修正：`SDL_WarpMouseInWindow` をフックし、大きさを偽っている間は y を「本当のピクセルの高さ ÷ 縦長のピクセルの高さ」倍にして、本当のウィンドウに戻す（x は幅を変えないのでそのまま）。大きさを偽っていないときは触らない。GLFW の版（1.21）はウィンドウの大きさを偽らず、フレームバッファの大きさの変更でマウスを捕まえ直さないので関係ない
+- 確かめたこと：テスト、clippy、SDL3 版のスモークテストでフックが入ること。実機では未確認（`docs/TESTING.md` のズームの項目）
+

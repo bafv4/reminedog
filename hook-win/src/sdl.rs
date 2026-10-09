@@ -3,7 +3,8 @@
 //! 26.x renders with OpenGL through SDL3 (its "RenderPearl OpenGL" backend), so the overlay
 //! works as with GLFW: `SDL_GL_SwapWindow` is detoured and hands each frame to
 //! [`frame::before_swap`]. `SDL_GetWindowSizeInPixels` reports the tall size during the
-//! high-resolution zoom ([`crate::tall`]). The other detours only log how the game uses SDL3
+//! high-resolution zoom ([`crate::tall`]), and `SDL_WarpMouseInWindow` maps the game's warps
+//! from that size back into the real window. The other detours only log how the game uses SDL3
 //! (window flags, OpenGL context or Vulkan surface), for diagnosing future versions.
 //!
 //! Only one window library is hooked, the first loaded: a mod's SDL (controller support) in
@@ -39,6 +40,7 @@ type GetWindowPropertiesFn = unsafe extern "C" fn(window: *mut c_void) -> u32;
 type GetPointerPropertyFn =
     unsafe extern "C" fn(props: u32, name: *const c_char, default: *mut c_void) -> *mut c_void;
 type GetHintBooleanFn = unsafe extern "C" fn(name: *const c_char, default: bool) -> bool;
+type WarpMouseInWindowFn = unsafe extern "C" fn(window: *mut c_void, x: f32, y: f32);
 
 const WINDOW_OPENGL: u64 = 0x0000_0002;
 const WINDOW_HIDDEN: u64 = 0x0000_0008;
@@ -50,6 +52,7 @@ static GL_SWAP_WINDOW: OnceLock<GlSwapWindowFn> = OnceLock::new();
 /// Trampoline to the original SDL_GetWindowSizeInPixels (the overlay needs the real size).
 static GET_WINDOW_SIZE_IN_PIXELS: OnceLock<GetWindowSizeInPixelsFn> = OnceLock::new();
 static VULKAN_CREATE_SURFACE: OnceLock<VulkanCreateSurfaceFn> = OnceLock::new();
+static WARP_MOUSE_IN_WINDOW: OnceLock<WarpMouseInWindowFn> = OnceLock::new();
 static SDL: OnceLock<Sdl> = OnceLock::new();
 
 static ATTACHED: Mutex<bool> = Mutex::new(false);
@@ -266,6 +269,12 @@ pub fn attach(module: HMODULE, path: &str) {
         );
         probe(
             module,
+            c"SDL_WarpMouseInWindow",
+            warp_mouse_in_window_detour as *const c_void,
+            &WARP_MOUSE_IN_WINDOW,
+        );
+        probe(
+            module,
             c"SDL_Vulkan_CreateSurface",
             vulkan_create_surface_detour as *const c_void,
             &VULKAN_CREATE_SURFACE,
@@ -403,6 +412,39 @@ unsafe extern "C" fn get_window_size_in_pixels_detour(
         }
     }
     ok
+}
+
+/// While the zoom tells the game a taller window, the game's warps (26.3 re-grabs the mouse
+/// at the centre of the window it believes in whenever the window is resized) are scaled
+/// back into the real window. Else the system's cursor lands below the window, and a click
+/// there goes to another window: the game loses the focus and the mouse.
+unsafe extern "C" fn warp_mouse_in_window_detour(window: *mut c_void, x: f32, y: f32) {
+    let Some(original) = WARP_MOUSE_IN_WINDOW.get() else {
+        return;
+    };
+    let y = ffi::catch("SDL_WarpMouseInWindow detour", || real_warp_y(window, y)).unwrap_or(y);
+    // SAFETY: the caller's window; the coordinates are within it.
+    unsafe { original(window, x, y) };
+}
+
+/// `y` in the real window, for a warp the game made in the tall one (as it is otherwise).
+fn real_warp_y(window: *mut c_void, y: f32) -> f32 {
+    let Some([_, tall_h]) = crate::tall::own_query(|| crate::tall::size_override(window)) else {
+        return y;
+    };
+    let Some(real_size) = GET_WINDOW_SIZE_IN_PIXELS.get() else {
+        return y;
+    };
+    let (mut w, mut h) = (0, 0);
+    // SAFETY: the window SDL passed the caller; valid out parameters. The trampoline gives the
+    // real size.
+    if !unsafe { real_size(window, &mut w, &mut h) } || h <= 0 || tall_h <= 0 {
+        return y;
+    }
+    // The tall size is k times the real one in pixels; the window units scale alike.
+    let mapped = y * h as f32 / tall_h as f32;
+    log::debug!("zoom: the game warped the mouse to y {y:.0}; warping to {mapped:.0}");
+    mapped
 }
 
 unsafe extern "C" fn vulkan_create_surface_detour(
