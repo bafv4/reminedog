@@ -13,9 +13,11 @@
 //! ([`glfw_key`], [`sdl_scancode`], [`sdl_keycode`]) know only the keys a debug binding is
 //! likely to use: letters, digits, F-keys and keypad digits.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use crate::keytable::{GLFW_KEYS, SDL_KEYS};
 
@@ -76,12 +78,24 @@ impl Default for DebugKeys {
     }
 }
 
-/// The `key_<id>:<name>` lines of options.txt as (mapping id, key name), in file order. The
-/// last line wins for a repeated id, which keeps its first position. CRLF, a BOM and
-/// whitespace around the parts are tolerated; lines with an empty part are skipped.
-fn key_lines(options_txt: &str) -> Vec<(&str, &str)> {
+/// A `key_<id>:<name>` line of options.txt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KeyLine<'a> {
+    id: &'a str,
+    name: &'a str,
+    /// Forge and NeoForge write a modifier the mapping needs after the name
+    /// (`key.keyboard.c:CONTROL`); the key alone does not set it off.
+    with_modifier: bool,
+}
+
+/// The `key_<id>:<name>` lines of options.txt, in file order. The last line wins for a
+/// repeated id, which keeps its first position. CRLF, a BOM and whitespace around the parts
+/// are tolerated; lines with an empty part are skipped. A Forge modifier after the name is
+/// split off.
+fn key_lines(options_txt: &str) -> Vec<KeyLine<'_>> {
     let text = options_txt.strip_prefix('\u{feff}').unwrap_or(options_txt);
-    let mut bindings: Vec<(&str, &str)> = Vec::new();
+    let mut bindings: Vec<KeyLine<'_>> = Vec::new();
+    let mut index: HashMap<&str, usize> = HashMap::new();
     for line in text.lines() {
         let Some((id, name)) = line
             .trim()
@@ -91,12 +105,31 @@ fn key_lines(options_txt: &str) -> Vec<(&str, &str)> {
             continue;
         };
         let (id, name) = (id.trim(), name.trim());
+        let (name, with_modifier) = match name.rsplit_once(':') {
+            Some((key, modifier))
+                if !modifier.is_empty()
+                    && modifier
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b == b'_') =>
+            {
+                (key.trim(), modifier != "NONE")
+            }
+            _ => (name, false),
+        };
         if id.is_empty() || name.is_empty() {
             continue;
         }
-        match bindings.iter_mut().find(|(i, _)| *i == id) {
-            Some(binding) => binding.1 = name,
-            None => bindings.push((id, name)),
+        let line = KeyLine {
+            id,
+            name,
+            with_modifier,
+        };
+        match index.get(id) {
+            Some(&i) => bindings[i] = line,
+            None => {
+                index.insert(id, bindings.len());
+                bindings.push(line);
+            }
         }
     }
     bindings
@@ -107,15 +140,15 @@ fn key_lines(options_txt: &str) -> Vec<(&str, &str)> {
 /// Every `key_<id>:<name>` line is read, and the last one wins for a repeated id. A missing
 /// debug line keeps its default (1.16 has none). CRLF, a BOM and whitespace around the parts
 /// are tolerated. `shared_with_copy` lists, in file order, the mappings outside `key.debug.*`
-/// bound to the copy-location key, except those only read as held; an unbound copy-location
-/// key shares nothing.
+/// bound to the copy-location key, except those only read as held and (Forge) those that
+/// need a modifier as well; an unbound copy-location key shares nothing.
 pub fn parse_debug_keys(options_txt: &str) -> DebugKeys {
     let bindings = key_lines(options_txt);
     let bound = |id: &str| {
         bindings
             .iter()
-            .find(|(i, _)| *i == id)
-            .map(|(_, name)| (*name).to_owned())
+            .find(|line| line.id == id)
+            .map(|line| line.name.to_owned())
     };
     let defaults = DebugKeys::default();
     let copy_location = bound(COPY_LOCATION_ID).unwrap_or(defaults.copy_location);
@@ -124,12 +157,13 @@ pub fn parse_debug_keys(options_txt: &str) -> DebugKeys {
     } else {
         bindings
             .iter()
-            .filter(|(id, name)| {
-                !id.starts_with("key.debug.")
-                    && !HELD_ONLY_IDS.contains(id)
-                    && *name == copy_location
+            .filter(|line| {
+                !line.id.starts_with("key.debug.")
+                    && !HELD_ONLY_IDS.contains(&line.id)
+                    && !line.with_modifier
+                    && line.name == copy_location
             })
-            .map(|(id, _)| (*id).to_owned())
+            .map(|line| line.id.to_owned())
             .collect()
     };
     DebugKeys {
@@ -149,16 +183,20 @@ pub fn parse_debug_keys(options_txt: &str) -> DebugKeys {
 /// other than the modifier and the overlay toggle: they act only together with the modifier.
 pub fn bindings_by_key(options_txt: &str, naming: Naming) -> Vec<(InputId, Vec<String>)> {
     let mut by_key: Vec<(InputId, Vec<String>)> = Vec::new();
-    for (id, name) in key_lines(options_txt) {
+    let mut index: HashMap<InputId, usize> = HashMap::new();
+    for KeyLine { id, name, .. } in key_lines(options_txt) {
         if id.starts_with("key.debug.") && id != MODIFIER_ID && id != OVERLAY_ID {
             continue;
         }
         let Some(input) = input_by_name(name, naming) else {
             continue;
         };
-        match by_key.iter_mut().find(|(i, _)| *i == input) {
-            Some((_, ids)) => ids.push(id.to_owned()),
-            None => by_key.push((input, vec![id.to_owned()])),
+        match index.get(&input) {
+            Some(&i) => by_key[i].1.push(id.to_owned()),
+            None => {
+                index.insert(input, by_key.len());
+                by_key.push((input, vec![id.to_owned()]));
+            }
         }
     }
     by_key
@@ -369,10 +407,20 @@ fn number(text: &str) -> Option<u32> {
     text.parse().ok()
 }
 
+/// The rows of [`SDL_KEYS`] by name.
+static SDL_NAMES: LazyLock<HashMap<&'static str, u16>> =
+    LazyLock::new(|| SDL_KEYS.iter().map(|&(sc, name, _)| (name, sc)).collect());
+/// A row of [`GLFW_KEYS`]: the GLFW key code, its name, and SDL scancodes.
+type GlfwRow = (i32, &'static str, u16, u16);
+
+/// The rows of [`GLFW_KEYS`] by name.
+static GLFW_NAMES: LazyLock<HashMap<&'static str, GlfwRow>> =
+    LazyLock::new(|| GLFW_KEYS.iter().map(|&row| (row.1, row)).collect());
+
 /// A key id from 26.x's name after `key.keyboard.`: its name, or the scancode itself.
 fn modern_key(rest: &str) -> Option<InputId> {
-    let sc = match SDL_KEYS.iter().find(|(_, name, _)| *name == rest) {
-        Some((sc, _, _)) => *sc,
+    let sc = match SDL_NAMES.get(rest) {
+        Some(&sc) => sc,
         None => u16::try_from(number(rest)?).ok()?,
     };
     is_key(sc).then_some(InputId::Key(sc))
@@ -381,8 +429,8 @@ fn modern_key(rest: &str) -> Option<InputId> {
 /// The [`GLFW_KEYS`] row of 1.21's name after `key.keyboard.`: its name, or the GLFW key code
 /// itself.
 fn glfw_name_row(rest: &str) -> Option<(i32, &'static str, u16, u16)> {
-    match GLFW_KEYS.iter().find(|(_, name, _, _)| *name == rest) {
-        Some(row) => Some(*row),
+    match GLFW_NAMES.get(rest) {
+        Some(&row) => Some(row),
         None => glfw_row(i32::try_from(number(rest)?).ok()?),
     }
 }
@@ -651,15 +699,15 @@ const fn f3c_key(sc: u16) -> bool {
 /// F3+C may use: letters, digits, F1..F25 and keypad digits.
 pub fn glfw_key(name: &str) -> Option<i32> {
     let rest = name.strip_prefix(KEYBOARD_PREFIX)?;
-    let (key, _, _, _) = GLFW_KEYS.iter().find(|(_, n, _, _)| *n == rest)?;
-    matches!(key, 48..=57 | 65..=90 | 290..=314 | 320..=329).then_some(*key)
+    let &(key, _, _, _) = GLFW_NAMES.get(rest)?;
+    matches!(key, 48..=57 | 65..=90 | 290..=314 | 320..=329).then_some(key)
 }
 
 /// The key of a 26.x key name, for the keys F3+C may use.
 fn f3c_scancode(name: &str) -> Option<u16> {
     let rest = name.strip_prefix(KEYBOARD_PREFIX)?;
-    let (sc, _, _) = SDL_KEYS.iter().find(|(_, n, _)| *n == rest)?;
-    f3c_key(*sc).then_some(*sc)
+    let &sc = SDL_NAMES.get(rest)?;
+    f3c_key(sc).then_some(sc)
 }
 
 /// The SDL3 scancode of a key name (what 26.x matches bindings on), for the keys F3+C may use:
@@ -674,16 +722,20 @@ pub fn sdl_keycode(name: &str) -> Option<u32> {
     f3c_scancode(name).map(|sc| sdl_keycode_of(InputId::Key(sc)))
 }
 
-/// A short label for a key name F3+C may use, e.g. "F3", "C", "テンキー 1" (as
-/// [`input_label`] has them); other names are shown as they are.
+/// A short label for a key name, e.g. "F3", "C", "テンキー 1", "左 Shift", "マウスの戻る" (as
+/// [`input_label`] has them, whether 26.x or 1.21 named it); names of neither are shown as
+/// they are.
 pub fn key_label(name: &str) -> String {
     if let Some(sc) = f3c_scancode(name) {
         return input_label(InputId::Key(sc));
     }
-    match glfw_key(name) {
+    if let Some(key @ 290..=314) = glfw_key(name) {
         // GLFW's F25, which SDL3 lacks.
-        Some(key @ 290..=314) => format!("F{}", key - 289),
-        _ => name.to_owned(),
+        return format!("F{}", key - 289);
+    }
+    match input_by_name(name, Naming::Modern).or_else(|| input_by_name(name, Naming::Glfw)) {
+        Some(id) => input_label(id),
+        None => name.to_owned(),
     }
 }
 
@@ -788,6 +840,38 @@ mod tests {
         );
         assert!(held_only.shared_with_copy.is_empty());
         assert!(!held_only.copy_drops_items());
+    }
+
+    #[test]
+    fn forge_modifiers_are_split_off() {
+        // Forge writes the modifier a mapping needs after the key; NONE is none.
+        let text = "key_key.debug.copyLocation:key.keyboard.c:NONE\n\
+                    key_key.drop:key.keyboard.c:CONTROL\n\
+                    key_key.inventory:key.keyboard.c\n";
+        let parsed = parse_debug_keys(text);
+        assert_eq!(parsed.copy_location, "key.keyboard.c");
+        // Drop needs Ctrl as well, so F3+C cannot set it off.
+        assert_eq!(parsed.shared_with_copy, ["key.inventory"]);
+        // The menu lists both (debug mappings other than the modifier are left out).
+        assert_eq!(
+            bindings_by_key(text, Naming::Modern),
+            [(
+                InputId::Key(6),
+                vec!["key.drop".to_owned(), "key.inventory".to_owned()]
+            )]
+        );
+    }
+
+    #[test]
+    fn key_labels_of_any_key() {
+        assert_eq!(key_label("key.keyboard.f3"), "F3");
+        assert_eq!(key_label("key.keyboard.f25"), "F25");
+        assert_eq!(
+            key_label("key.keyboard.left.shift"),
+            input_label(InputId::Key(225))
+        );
+        assert_eq!(key_label("key.mouse.4"), input_label(InputId::Mouse(4)));
+        assert_eq!(key_label("something.else"), "something.else");
     }
 
     #[test]
@@ -995,7 +1079,8 @@ mod tests {
         assert_eq!(key_label("key.keyboard.f"), "F");
         assert_eq!(key_label("key.keyboard.0"), "0");
         assert_eq!(key_label("key.keyboard.keypad.1"), "テンキー 1");
-        assert_eq!(key_label("key.mouse.left"), "key.mouse.left");
+        // Keys F3+C cannot use get their labels too.
+        assert_eq!(key_label("key.mouse.left"), input_label(InputId::Mouse(1)));
         assert_eq!(key_label(UNBOUND), UNBOUND);
     }
 
@@ -1052,7 +1137,6 @@ mod tests {
             assert_eq!(glfw_key(name), None, "{name}");
             assert_eq!(sdl_scancode(name), None, "{name}");
             assert_eq!(sdl_keycode(name), None, "{name}");
-            assert_eq!(key_label(name), name);
         }
         // The keys they know are the table's.
         for (key, name, sc, _) in GLFW_KEYS {

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::waypoint::{backup_path, copy_path, sync_parent_dir, tmp_path, unix_now, write_synced};
+use crate::waypoint::{backup_path, copy_path, unix_now, write_file};
 
 /// Range of the zoom factor.
 pub const ZOOM_FACTOR_RANGE: (f32, f32) = (1.5, 8.0);
@@ -58,7 +58,11 @@ pub struct Settings {
     pub browser_play_pause_key: String,
     pub browser_seek_back_key: String,
     pub browser_seek_forward_key: String,
-    /// The page the browser opens with: the last one shown.
+    /// The page the browser opened with in older versions. Read (the platform hook takes it
+    /// over once) but no longer written: the address can hold tokens, and this file goes
+    /// with the game folder (exported instances, reports). The last page is kept with the
+    /// browser's own data instead.
+    #[serde(skip_serializing)]
     pub browser_url: String,
     /// Where the page is on the screen: left, top, width and height in points. `None` puts
     /// it in the top right corner.
@@ -73,6 +77,14 @@ pub struct Settings {
     /// it could not read (the next save would lose them). Not saved.
     #[serde(skip)]
     pub rebinds_kept_in: Option<PathBuf>,
+    /// Where [`Settings::load`] moved a file that was not valid JSON (these are the defaults
+    /// then). Not saved.
+    #[serde(skip)]
+    pub moved_aside_to: Option<PathBuf>,
+    /// [`Settings::load`] could not read the file (not a missing one): these are the defaults,
+    /// and saving them would overwrite the user's file. Not saved.
+    #[serde(skip)]
+    pub unreadable: bool,
 }
 
 /// One rule of the key rebinding: `from` reaches the game as `to`. Both are 26.x key names,
@@ -110,6 +122,8 @@ impl Default for Settings {
             browser_opacity: 1.0,
             browser_seek_seconds: 10.0,
             rebinds_kept_in: None,
+            moved_aside_to: None,
+            unreadable: false,
         }
     }
 }
@@ -186,8 +200,10 @@ impl Settings {
         self
     }
 
-    /// Loads the settings at `path`. A missing file gives the defaults. A file that is not
-    /// valid JSON is moved aside (`settings.corrupt-<unix>.json`) so the next save does not
+    /// Loads the settings at `path`. A missing file gives the defaults; one that cannot be
+    /// read gives them with [`Settings::unreadable`] set. A UTF-8 byte order mark (Notepad,
+    /// PowerShell 5.1) is skipped. A file that is not valid JSON is moved aside
+    /// (`settings.corrupt-<unix>.json`, [`Settings::moved_aside_to`]) so the next save does not
     /// destroy the user's edits, and the defaults are used. A file whose rebinding values or
     /// entries could not all be read is copied to `settings.rebinds-<unix>.json`
     /// ([`Settings::rebinds_kept_in`]), for the same reason.
@@ -197,14 +213,18 @@ impl Settings {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Settings::default(),
             Err(e) => {
                 log::warn!(
-                    "cannot read {}: {e}; using default settings",
+                    "cannot read {}: {e}; using default settings, and not saving them",
                     path.display()
                 );
-                return Settings::default();
+                return Settings {
+                    unreadable: true,
+                    ..Settings::default()
+                };
             }
         };
+        let json = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
         DROPPED.set(false);
-        let parsed = serde_json::from_slice::<Settings>(&bytes);
+        let parsed = serde_json::from_slice::<Settings>(json);
         let dropped = DROPPED.replace(false);
         match parsed {
             Ok(mut settings) => {
@@ -216,36 +236,42 @@ impl Settings {
             Err(e) => {
                 let backup = backup_path(path, unix_now());
                 match fs::rename(path, &backup) {
-                    Ok(()) => log::warn!(
-                        "settings file {} is invalid ({e}); moved it to {}",
-                        path.display(),
-                        backup.display()
-                    ),
-                    Err(re) => log::warn!(
-                        "settings file {} is invalid ({e}) and cannot be moved aside ({re})",
-                        path.display()
-                    ),
+                    Ok(()) => {
+                        log::warn!(
+                            "settings file {} is invalid ({e}); moved it to {}",
+                            path.display(),
+                            backup.display()
+                        );
+                        Settings {
+                            moved_aside_to: Some(backup),
+                            ..Settings::default()
+                        }
+                    }
+                    Err(re) => {
+                        log::warn!(
+                            "settings file {} is invalid ({e}) and cannot be moved aside ({re}); not saving over it",
+                            path.display()
+                        );
+                        Settings {
+                            unreadable: true,
+                            ..Settings::default()
+                        }
+                    }
                 }
-                Settings::default()
             }
         }
     }
 
     /// Writes the settings atomically (temporary file, then rename), creating the folder.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            fs::create_dir_all(dir)?;
-        }
+        write_file(path, &self.to_json()?)
+    }
+
+    /// The file's contents, for [`write_file`] (on another thread).
+    pub fn to_json(&self) -> io::Result<Vec<u8>> {
         let mut json = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         json.push(b'\n');
-        let tmp = tmp_path(path);
-        let result = write_synced(&tmp, &json).and_then(|()| fs::rename(&tmp, path));
-        if result.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        result?;
-        sync_parent_dir(path);
-        Ok(())
+        Ok(json)
     }
 }
 
@@ -307,6 +333,41 @@ pub fn settings_path(game_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::waypoint::tmp_path;
+
+    #[test]
+    fn a_byte_order_mark_is_read_past() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, b"\xEF\xBB\xBF{\"zoom_key\": \"X\"}").unwrap();
+        let settings = Settings::load(&path);
+        assert_eq!(settings.zoom_key, "X");
+        assert_eq!(settings.moved_aside_to, None);
+    }
+
+    #[test]
+    fn an_invalid_file_is_moved_aside_and_said_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, b"{\"zoom_key\": \"X\",}").unwrap();
+        let settings = Settings::load(&path);
+        let moved = settings.moved_aside_to.clone().unwrap();
+        assert!(moved.exists());
+        assert!(!path.exists());
+        assert_eq!(settings.zoom_key, Settings::default().zoom_key);
+    }
+
+    #[test]
+    fn the_browser_url_is_read_but_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, br#"{"browser_url": "https://example.com/?token=x"}"#).unwrap();
+        let settings = Settings::load(&path);
+        assert_eq!(settings.browser_url, "https://example.com/?token=x");
+        settings.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("browser_url"), "{text}");
+    }
 
     #[test]
     fn missing_file_gives_defaults() {
@@ -341,12 +402,15 @@ mod tests {
             browser_play_pause_key: "End".into(),
             browser_seek_back_key: "Home".into(),
             browser_seek_forward_key: "Insert".into(),
-            browser_url: "https://example.com/".into(),
+            // Not written (see the_browser_url_is_read_but_not_written).
+            browser_url: Settings::default().browser_url,
             browser_rect: Some([1.5, 2.0, 300.0, 168.75]),
             browser_zoom: 0.75,
             browser_opacity: 0.5,
             browser_seek_seconds: 5.0,
             rebinds_kept_in: None,
+            moved_aside_to: None,
+            unreadable: false,
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
@@ -532,7 +596,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         fs::write(&path, "{ not json").unwrap();
-        assert_eq!(Settings::load(&path), Settings::default());
+        let loaded = Settings::load(&path);
+        assert!(loaded.moved_aside_to.is_some());
+        assert_eq!(
+            Settings {
+                moved_aside_to: None,
+                ..loaded
+            },
+            Settings::default()
+        );
         assert!(!path.exists());
         let moved: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(moved.len(), 1);

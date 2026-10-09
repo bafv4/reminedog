@@ -239,10 +239,10 @@ fn mouse(
 }
 
 fn key_params(key: PageKey, modifiers: PageModifiers) -> Value {
-    let name = if modifiers.shift && key.key.len() == 1 {
-        key.key.to_ascii_uppercase()
-    } else {
-        key.key.to_owned()
+    let name = match shifted(key.key) {
+        Some(shifted) if modifiers.shift => shifted.to_owned(),
+        _ if modifiers.shift && key.key.len() == 1 => key.key.to_ascii_uppercase(),
+        _ => key.key.to_owned(),
     };
     json!({
         "windowsVirtualKeyCode": key.vk,
@@ -253,9 +253,70 @@ fn key_params(key: PageKey, modifiers: PageModifiers) -> Value {
     })
 }
 
+/// The DOM `key` of a US-layout digit or symbol key with Shift held (a letter's is its upper
+/// case).
+fn shifted(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "1" => "!",
+        "2" => "@",
+        "3" => "#",
+        "4" => "$",
+        "5" => "%",
+        "6" => "^",
+        "7" => "&",
+        "8" => "*",
+        "9" => "(",
+        "0" => ")",
+        "-" => "_",
+        "=" => "+",
+        "[" => "{",
+        "]" => "}",
+        "\\" => "|",
+        ";" => ":",
+        "'" => "\"",
+        "," => "<",
+        "." => ">",
+        "/" => "?",
+        "`" => "~",
+        _ => return None,
+    })
+}
+
+/// File name extensions searched for rather than opened as a site (`options.txt`,
+/// `latest.log`), unless typed with a scheme.
+const FILE_EXTENSIONS: [&str; 26] = [
+    "bat",
+    "cfg",
+    "dat",
+    "dll",
+    "exe",
+    "gif",
+    "htm",
+    "html",
+    "ini",
+    "jar",
+    "jpeg",
+    "jpg",
+    "js",
+    "json",
+    "log",
+    "mca",
+    "mcfunction",
+    "mcmeta",
+    "nbt",
+    "png",
+    "properties",
+    "sh",
+    "toml",
+    "txt",
+    "yaml",
+    "yml",
+];
+
 /// The page the address bar's text names: a URL as typed (`https://` added when it has no
-/// scheme, `http://` for the local machine), or a web search for anything else. `None` for
-/// empty text.
+/// scheme; `http://` for the local machine and IPv4 addresses, where servers' maps such as
+/// Dynmap run without TLS), or a web search for anything else (a file name like
+/// `options.txt` too). `None` for empty text.
 pub fn normalize_url(text: &str) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {
@@ -268,10 +329,11 @@ pub fn normalize_url(text: &str) -> Option<String> {
     }
     if !text.contains(char::is_whitespace) {
         let host = lower.split(['/', ':', '?', '#']).next().unwrap_or_default();
-        if host == "localhost" || host == "127.0.0.1" {
+        if host == "localhost" || is_ipv4(host) {
             return Some(format!("http://{text}"));
         }
-        if is_domain(host) {
+        let extension = host.rsplit('.').next().unwrap_or_default();
+        if is_domain(host) && !FILE_EXTENSIONS.contains(&extension) {
             return Some(format!("https://{text}"));
         }
     }
@@ -295,6 +357,15 @@ fn is_domain(host: &str) -> bool {
     labels
         .last()
         .is_some_and(|tld| tld.chars().all(char::is_alphabetic))
+}
+
+/// Four numbers with dots: an IPv4 address.
+fn is_ipv4(host: &str) -> bool {
+    let labels: Vec<&str> = host.split('.').collect();
+    labels.len() == 4
+        && labels
+            .iter()
+            .all(|label| !label.is_empty() && label.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Percent-encodes a query value (`application/x-www-form-urlencoded`: a space is `+`).
@@ -324,11 +395,18 @@ pub enum MediaCommand {
     Resume,
 }
 
+/// The page's media elements, also those in open shadow roots (players made of web
+/// components). Not those in frames: scripts run in the top frame only.
+const MEDIA: &str = "const media = () => { const out = [];\
+    const walk = (root) => { out.push(...root.querySelectorAll('video, audio'));\
+        for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) walk(el.shadowRoot); } };\
+    walk(document); return out; };";
+
 /// The script that carries out `command` in the page. [`MediaCommand::PlayPause`] and
 /// [`MediaCommand::Seek`] act on the media playing, or else the largest one shown on the page
 /// (pages keep hidden players around), and evaluate to its [`MediaState`] (`null` without any).
 pub fn media_script(command: MediaCommand) -> String {
-    const PICK: &str = "const all = [...document.querySelectorAll('video, audio')];\
+    const PICK: &str = "const all = media();\
         const area = (m) => { const r = m.getBoundingClientRect(); return r.width * r.height; };\
         const m = all.find((m) => !m.paused && !m.ended)\
             || all.filter((m) => area(m) > 0).sort((a, b) => area(b) - area(a))[0];\
@@ -337,18 +415,19 @@ pub fn media_script(command: MediaCommand) -> String {
         duration: Number.isFinite(m.duration) ? m.duration : null };";
     match command {
         MediaCommand::PlayPause => format!(
-            "(() => {{ {PICK} if (m.paused) {{ m.play().catch(() => {{}}); }} else {{ m.pause(); }} {STATE} }})()"
+            "(() => {{ {MEDIA} {PICK} if (m.paused) {{ m.play().catch(() => {{}}); }} else {{ m.pause(); }} {STATE} }})()"
         ),
         MediaCommand::Seek(seconds) => format!(
-            "(() => {{ {PICK} const t = Math.max(0, m.currentTime + ({seconds}));\
+            "(() => {{ {MEDIA} {PICK} const t = Math.max(0, m.currentTime + ({seconds}));\
              m.currentTime = Number.isFinite(m.duration) ? Math.min(m.duration, t) : t; {STATE} }})()"
         ),
-        MediaCommand::PauseAll => "(() => { \
-            const playing = [...document.querySelectorAll('video, audio')].filter((m) => !m.paused && !m.ended);\
+        MediaCommand::PauseAll => format!(
+            "(() => {{ {MEDIA} \
+            const playing = media().filter((m) => !m.paused && !m.ended);\
             playing.forEach((m) => m.pause());\
             window.__reminedogPaused = playing;\
-            return playing.length; })()"
-            .to_owned(),
+            return playing.length; }})()"
+        ),
         MediaCommand::Resume => "(() => { \
             const paused = window.__reminedogPaused || [];\
             window.__reminedogPaused = [];\
@@ -552,11 +631,54 @@ mod tests {
             "https://www.google.com/search?q=%E3%82%A8%E3%83%B3%E3%83%81%E3%83%A3%E3%83%B3%E3%83%88"
         );
         assert_eq!(url("minecraft.wiki"), "https://minecraft.wiki");
-        assert_eq!(url("192.168.0.2:25565"), "https://192.168.0.2:25565");
+        // A server's map on the LAN (Dynmap, BlueMap) has no TLS.
+        assert_eq!(url("192.168.0.2:8123"), "http://192.168.0.2:8123");
+        // File names are looked up, not opened as sites.
+        assert_eq!(
+            url("options.txt"),
+            "https://www.google.com/search?q=options.txt"
+        );
+        assert_eq!(
+            url("latest.log"),
+            "https://www.google.com/search?q=latest.log"
+        );
         assert_eq!(url("1.21"), "https://www.google.com/search?q=1.21");
         assert_eq!(url("v1.2"), "https://www.google.com/search?q=v1.2");
         assert_eq!(url("a&b"), "https://www.google.com/search?q=a%26b");
         assert_eq!(normalize_url("   "), None);
+    }
+
+    #[test]
+    fn shift_gives_the_shifted_key() {
+        let key = |code, name, shift| {
+            let (_, params) = PageInput::KeyDown {
+                key: PageKey {
+                    vk: 0,
+                    code,
+                    key: name,
+                },
+                repeat: false,
+                modifiers: PageModifiers {
+                    shift,
+                    ..PageModifiers::default()
+                },
+            }
+            .cdp();
+            let value: Value = serde_json::from_str(&params).unwrap();
+            value["key"].as_str().unwrap().to_owned()
+        };
+        assert_eq!(key("Digit1", "1", true), "!");
+        assert_eq!(key("Slash", "/", true), "?");
+        assert_eq!(key("Period", ".", true), ">");
+        assert_eq!(key("KeyA", "a", true), "A");
+        assert_eq!(key("Slash", "/", false), "/");
+    }
+
+    #[test]
+    fn media_scripts_look_into_shadow_roots() {
+        for command in [MediaCommand::PlayPause, MediaCommand::PauseAll] {
+            assert!(media_script(command).contains("shadowRoot"));
+        }
     }
 
     #[test]
