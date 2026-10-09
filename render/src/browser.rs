@@ -380,7 +380,7 @@ fn browser_window(
     commands: &mut Vec<BrowserCommand>,
 ) {
     let mut open = true;
-    let mut window = egui::Window::new(window_title(view, rect.width()))
+    let mut window = egui::Window::new(window_title(ctx, view, rect.width()))
         .id(Id::new("reminedog-browser"))
         .open(&mut open)
         .collapsible(false)
@@ -430,20 +430,54 @@ fn browser_window(
 
 /// "ブラウザ：<title>", short enough for the page's width (the window grows to fit its
 /// title).
-fn window_title(view: &BrowserView, width: f32) -> String {
+fn window_title(ctx: &egui::Context, view: &BrowserView, width: f32) -> String {
     let title = if view.title.is_empty() {
         &view.url
     } else {
         &view.title
     };
-    // A full-width character is about 14 points wide.
-    let room = ((width - 80.0) / 14.0).max(4.0) as usize;
-    let text = shorten(title, room);
-    if text.is_empty() {
-        "ブラウザ".to_owned()
-    } else {
-        format!("ブラウザ：{text}")
+    if title.is_empty() {
+        return "ブラウザ".to_owned();
     }
+    // Measured in the title bar's font. egui does not shrink the title of a window sized to
+    // its contents, so a longer title would draw the title bar wider than the window. The bar
+    // also holds the close button (a square of the font's row height) and gaps between the
+    // title, the space around it and the button.
+    let room = title_room(ctx, width);
+    let style = ctx.global_style();
+    let font = egui::TextStyle::Heading.resolve(&style);
+    let fits = |text: &str| {
+        ctx.fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE)
+                .size()
+                .x
+        }) <= room
+    };
+    let titled = |chars: usize| format!("ブラウザ：{}", shorten(title, chars));
+    let count = title.chars().count();
+    if fits(&titled(count)) {
+        return titled(count);
+    }
+    // The most characters that fit, with "…".
+    let (mut fit, mut over) = (0, count);
+    while over - fit > 1 {
+        let middle = (fit + over) / 2;
+        if fits(&titled(middle)) {
+            fit = middle;
+        } else {
+            over = middle;
+        }
+    }
+    titled(fit)
+}
+
+/// The width the title's text may take in a window `width` points wide.
+fn title_room(ctx: &egui::Context, width: f32) -> f32 {
+    let style = ctx.global_style();
+    let font = egui::TextStyle::Heading.resolve(&style);
+    let button = ctx.fonts_mut(|fonts| fonts.row_height(&font));
+    width - button - style.spacing.item_spacing.x * 3.0 - 1.0
 }
 
 /// The first `max` characters of `text`, with "…" when there are more (reading no further).
@@ -1123,16 +1157,45 @@ mod tests {
     }
 
     #[test]
-    fn long_titles_are_cut() {
+    fn long_titles_are_cut_to_the_page_width() {
+        let ctx = egui::Context::default();
+        // Fonts are there after the first pass.
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
+        let width = |text: &str| {
+            let font = egui::TextStyle::Heading.resolve(&ctx.global_style());
+            ctx.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(text.to_owned(), font, Color32::WHITE)
+                    .size()
+                    .x
+            })
+        };
         let view = BrowserView {
-            title: "あ".repeat(100),
+            title: "Long title of a page ".repeat(20),
             ..BrowserView::default()
         };
-        let title = window_title(&view, 360.0);
-        assert!(title.starts_with("ブラウザ：あ"));
-        assert!(title.ends_with('…'));
-        assert_eq!(title.chars().count(), "ブラウザ：".chars().count() + 20 + 1);
-        assert_eq!(window_title(&BrowserView::default(), 360.0), "ブラウザ");
+        for page in [200.0, 360.0, 800.0] {
+            let title = window_title(&ctx, &view, page);
+            assert!(title.starts_with("ブラウザ：Long"), "{title}");
+            assert!(title.ends_with('…'), "{title}");
+            assert!(
+                width(&title) <= title_room(&ctx, page),
+                "{title} is wider than the title bar of {page}"
+            );
+        }
+        // Wider pages show more of it.
+        assert!(window_title(&ctx, &view, 800.0).len() > window_title(&ctx, &view, 360.0).len());
+        let short = BrowserView {
+            title: "Wiki".into(),
+            ..BrowserView::default()
+        };
+        assert_eq!(window_title(&ctx, &short, 360.0), "ブラウザ：Wiki");
+        assert_eq!(
+            window_title(&ctx, &BrowserView::default(), 360.0),
+            "ブラウザ"
+        );
     }
 
     /// Runs the window for a few frames with these events in the last one; the commands of
