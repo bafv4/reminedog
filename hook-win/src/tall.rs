@@ -299,11 +299,25 @@ fn pack([w, h]: [i32; 2]) -> u64 {
     (u64::from(w as u32) << 32) | u64::from(h as u32)
 }
 
+thread_local! {
+    /// The agent itself asks for the window's size (through SDL), not the game.
+    static OWN_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f`, whose window size queries are the agent's own: the zoom's diagnostics count
+/// the game's only.
+pub fn own_query<R>(f: impl FnOnce() -> R) -> R {
+    OWN_QUERY.set(true);
+    let result = f();
+    OWN_QUERY.set(false);
+    result
+}
+
 /// The size to report to the game for `window` instead of the real one, while zooming.
 pub fn size_override(window: *mut c_void) -> Option<[i32; 2]> {
     let current = *SIZE_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
     let size = current.and_then(|(w, size)| (w == window as usize).then_some(size));
-    if size.is_some() {
+    if size.is_some() && !OWN_QUERY.get() {
         SIZE_QUERIES.fetch_add(1, Ordering::Relaxed);
     }
     size
@@ -351,8 +365,9 @@ pub struct TallZoom {
     misses: u32,
     /// When the current run of misses began.
     first_miss: Option<Instant>,
-    /// Why the high-resolution zoom is not available, for the menu.
-    failure: Option<String>,
+    /// Why the high-resolution zoom is not available, for the menu, and whether a change of
+    /// the zoom's settings tries again ([`retry`](TallZoom::retry)).
+    failure: Option<(String, bool)>,
 }
 
 /// The overlay is going away (its drawable changed, or a frame panicked) mid-zoom: stop
@@ -393,7 +408,41 @@ struct Active {
 
 impl TallZoom {
     pub fn failure(&self) -> Option<&str> {
-        self.failure.as_deref()
+        self.failure.as_ref().map(|(text, _)| text.as_str())
+    }
+
+    /// The zoom's settings changed: a failure that may depend on them (the size, the game's
+    /// rendering at it) is tried again.
+    pub fn retry(&mut self) {
+        if self.failure.as_ref().is_some_and(|&(_, retry)| retry) {
+            log::debug!("zoom: trying the high resolution again");
+            self.failure = None;
+        }
+    }
+
+    /// Ends the zoom and frees the tall framebuffer (with the game's context current, else
+    /// only the zoom ends): before the overlay goes, or while the window is minimized.
+    pub fn release(&mut self) {
+        let current = wgl::get().map_or(0, |wgl| wgl.current().1 as usize);
+        let in_game_context = current != 0
+            && self
+                .game
+                .as_ref()
+                .is_some_and(|game| game.context == current);
+        if let Some(active) = &self.active {
+            let real = active.real;
+            if in_game_context {
+                self.stop(real);
+            } else {
+                REDIRECT.store(0, Ordering::Relaxed);
+                TALL_VIEWPORT.store(0, Ordering::Relaxed);
+                let active = self.active.take().expect("checked");
+                set_size(active.window as *mut c_void, None, real);
+            }
+        }
+        if in_game_context && let Some(game) = &mut self.game {
+            game.delete_target();
+        }
     }
 
     /// Called in the swap detour before the overlay draws, with the game's context
@@ -483,7 +532,11 @@ impl TallZoom {
                     self.misses,
                     seen()
                 );
-                self.failure = Some("ゲームが縦長の解像度で描かなかった".into());
+                self.failure = Some((
+                    "ゲームが縦長の解像度で描かなかった（倍率か「高精細にする」を変えると試し直す）"
+                        .into(),
+                    true,
+                ));
             }
             if !want || resized || self.failure.is_some() {
                 self.stop(real);
@@ -497,7 +550,10 @@ impl TallZoom {
             return fallback;
         }
         if BIND_FRAMEBUFFER.get().is_none() && BIND_FRAMEBUFFER_EXT.get().is_none() {
-            self.failure = Some("ゲームの OpenGL の関数をフックできなかった".into());
+            self.failure = Some((
+                "ゲームの OpenGL の関数をフックできなかった（ゲームを再起動すると試し直す）".into(),
+                false,
+            ));
             log::warn!(
                 "zoom: the game did not look up glBindFramebuffer through wglGetProcAddress"
             );
@@ -505,7 +561,7 @@ impl TallZoom {
         }
         if let Err(e) = self.start(window, context, real, factor) {
             log::warn!("zoom: no high resolution: {e}");
-            self.failure = Some(e);
+            self.failure = Some((e, true));
         }
         // This frame is still the normal one; the tall frames start with the next.
         fallback
@@ -530,6 +586,8 @@ impl TallZoom {
         let id = framebuffer.0.get();
         GAME_CONTEXT.store(context, Ordering::Relaxed);
         REDIRECTED.store(false, Ordering::Relaxed);
+        // A resize reported while no zoom ran (or by an overlay since gone) is not this one's.
+        REAL_RESIZED.store(false, Ordering::Relaxed);
         TALL_VIEWPORT.store(pack(tall), Ordering::Relaxed);
         TALL_VIEWPORT_SEEN.store(false, Ordering::Relaxed);
         VIEWPORT_CALLS.store(0, Ordering::Relaxed);
@@ -563,10 +621,12 @@ impl TallZoom {
         REDIRECT.store(0, Ordering::Relaxed);
         TALL_VIEWPORT.store(0, Ordering::Relaxed);
         TALL_VIEWPORT_SEEN.store(false, Ordering::Relaxed);
-        if let Some(game) = &self.game
+        if let Some(game) = &mut self.game
             && let Some(target) = &game.target
         {
             game.swap_binding(Some(target.framebuffer), None);
+            // A few hundred MB at large factors; made again at the next zoom.
+            game.delete_target();
         }
         set_size(active.window as *mut c_void, None, real);
         log::debug!("zoom: game back at {}x{}", real[0], real[1]);
@@ -657,19 +717,25 @@ impl TallZoom {
 }
 
 impl GameGl {
-    /// Our framebuffer at `size` (colour and depth-stencil renderbuffers).
-    fn ensure_target(&mut self, size: [i32; 2]) -> Result<glow::Framebuffer, String> {
-        if let Some(target) = &self.target {
-            if target.size == size {
-                return Ok(target.framebuffer);
-            }
-            let target = self.target.take().expect("checked");
+    /// Deletes our framebuffer, if any. The game's context must be current.
+    fn delete_target(&mut self) {
+        if let Some(target) = self.target.take() {
             // SAFETY: our objects, in the game's context (current).
             unsafe {
                 self.gl.delete_framebuffer(target.framebuffer);
                 self.gl.delete_renderbuffer(target.color);
                 self.gl.delete_renderbuffer(target.depth);
             }
+        }
+    }
+
+    /// Our framebuffer at `size` (colour and depth-stencil renderbuffers).
+    fn ensure_target(&mut self, size: [i32; 2]) -> Result<glow::Framebuffer, String> {
+        if let Some(target) = &self.target {
+            if target.size == size {
+                return Ok(target.framebuffer);
+            }
+            self.delete_target();
         }
         let gl = &self.gl;
         // SAFETY: the game's context is current; its bindings are restored.

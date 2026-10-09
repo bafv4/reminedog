@@ -125,8 +125,17 @@ fn on_module(module: HMODULE, path: &str) {
     if crate::tall::is_opengl32(path) {
         crate::tall::attach(module);
     } else if crate::glfw::is_glfw(module) {
-        crate::glfw::attach(module, path);
+        // One window library only: the game's is loaded first.
+        if crate::sdl::attached() {
+            log::warn!("a GLFW library was loaded after SDL3 and is ignored: {path}");
+        } else {
+            crate::glfw::attach(module, path);
+        }
     } else if crate::sdl::is_sdl3(module) {
-        crate::sdl::attach(module, path);
+        if crate::glfw::attached() {
+            log::warn!("an SDL3 library was loaded after GLFW (a mod's) and is ignored: {path}");
+        } else {
+            crate::sdl::attach(module, path);
+        }
     }
 }

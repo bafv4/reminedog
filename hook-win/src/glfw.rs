@@ -126,6 +126,11 @@ pub fn is_glfw(module: HMODULE) -> bool {
     export(module, c"glfwInit").is_some() && export(module, c"glfwSwapBuffers").is_some()
 }
 
+/// Whether a GLFW library was hooked.
+pub fn attached() -> bool {
+    GLFW.get().is_some()
+}
+
 pub fn attach(module: HMODULE, path: &str) {
     let _guard = ATTACH.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = GLFW.get() {
@@ -214,6 +219,7 @@ unsafe extern "C" fn swap_buffers_detour(window: *mut c_void) {
     // A waypoint request: F3+C, now that the frame is out and no lock is held.
     ffi::catch("F3+C", || crate::glfw_input::run_f3c(window));
     ffi::catch("rebinds", || crate::glfw_input::release_lost_keys(window));
+    ffi::catch("hotkeys", crate::rebind_state::forget_lost_presses);
 }
 
 /// Reports the tall size to the game while zooming.

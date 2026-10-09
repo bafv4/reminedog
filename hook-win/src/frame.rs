@@ -9,15 +9,17 @@ use std::time::{Duration, Instant};
 use glow::HasContext as _;
 use reminedog_core::{InputId, Naming, Settings, input_by_name, input_name, settings_path};
 use reminedog_render::{
-    FrameInput, FrameParams, Hotkeys, Overlay, PointerSpeed, StatusLine, ZoomView, gl_summary,
-    hotkeys, resolve,
+    BrowserState, FrameInput, FrameParams, Hotkeys, Notice, Overlay, PointerSpeed, StatusLine,
+    ZoomView, gl_summary, hotkeys, hotkeys_quiet, resolve,
 };
 
 use crate::agent::{self, Globals};
 use crate::browser;
+use crate::clipboard;
 use crate::fonts;
 use crate::input;
 use crate::pointer;
+use crate::saver;
 use crate::tall::TallZoom;
 use crate::waypoints;
 use crate::wgl::{self, OwnContext, Wgl};
@@ -26,8 +28,14 @@ use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
 use windows_sys::Win32::UI::WindowsAndMessaging::IsIconic;
 
 /// Settings are saved after this long without further changes (or, changed in the menu, when
-/// it closes), so neither dragging a slider nor the browser's pages write the file each time.
+/// it closes), so dragging a slider does not write the file each time.
 const SAVE_DELAY: Duration = Duration::from_secs(1);
+/// A failed save is tried again after this long.
+const SAVE_RETRY: Duration = Duration::from_secs(10);
+/// How long the overlay going away waits for the settings to be saved.
+const SAVE_WAIT: Duration = Duration::from_secs(2);
+/// How long a failed save's notice shows, in seconds.
+const NOTICE_SECONDS: f64 = 6.0;
 
 /// The menu's note when keys cannot be rebound.
 const NO_KEY_REBINDS: &str = "ゲームがキーの状態を読む関数をフックできなかったので、キーボードのキーは置き換えられない（マウスのボタンは置き換えられる）";
@@ -85,12 +93,19 @@ pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
         return;
     }
     // A minimized window has nothing to draw on, and GetDC hands out a new temporary DC on
-    // every call instead of the window's own one; skip the frame and keep the overlay.
+    // every call instead of the window's own one; skip the frame and keep the overlay. A zoom
+    // ends: the game would go on drawing its tall frames unseen.
     // SAFETY: a valid window handle.
     if ws
         .hwnd(window)
         .is_some_and(|hwnd| unsafe { IsIconic(hwnd) } != 0)
     {
+        if let Ok(mut state) = STATE.try_lock()
+            && let State::Ready(runtime) = &mut *state
+            && runtime.window == window as usize
+        {
+            runtime.tall.release();
+        }
         return;
     }
     // Contended means another thread is swapping another window; poisoned means a panic
@@ -203,8 +218,19 @@ struct Runtime {
     ui_was_open: bool,
     settings: Settings,
     settings_path: PathBuf,
-    /// When the settings last changed, if not saved since, and whether the menu was open then.
+    /// When the settings are to be saved, if not saved since they changed, and whether they
+    /// changed in the menu (then they are saved when it closes).
     unsaved: Option<(Instant, bool)>,
+    /// A save on the saving thread.
+    saving: Option<saver::Pending>,
+    /// What was wrong with the settings file when it was read ([`settings_problem`]).
+    load_problem: Option<String>,
+    /// Why the last save failed.
+    save_problem: Option<String>,
+    /// For the next frame.
+    notices: Vec<Notice>,
+    /// The browser's picture last taken ([`browser::frame_if_new`]).
+    page_version: u64,
     tall: TallZoom,
     /// The router's hotkeys, from `settings`.
     hotkeys: Hotkeys,
@@ -248,6 +274,7 @@ impl Runtime {
 
         let settings_path = settings_path(&agent.game_dir);
         let settings = Settings::load(&settings_path);
+        let load_problem = settings_problem(&settings);
         log::info!(
             "settings: {} (menu {}, zoom {}, waypoint {}, navigate {}, {})",
             settings_path.display(),
@@ -302,7 +329,7 @@ impl Runtime {
             StatusLine::new("ウィンドウ", ws.describe()),
             StatusLine::new("ゲームのGL", game_gl),
             StatusLine::new("オーバーレイのGL", overlay_gl),
-            StatusLine::new("ゲームフォルダ", agent.game_dir.display().to_string()),
+            StatusLine::new("ゲームフォルダ", screen_path(&agent.game_dir)),
             StatusLine::new("処理時間", "-"),
         ];
         Ok(Box::new(Self {
@@ -318,6 +345,11 @@ impl Runtime {
             settings,
             settings_path,
             unsaved: None,
+            saving: None,
+            load_problem,
+            save_problem: None,
+            notices: Vec::new(),
+            page_version: browser::NO_PICTURE,
             tall: TallZoom::default(),
             hotkeys: keys,
             key_rebinds,
@@ -365,6 +397,13 @@ impl Runtime {
             input::router().set_pointer_speed(pointer_speed(ws, window));
         }
         self.ui_was_open = ui_open;
+        // Ctrl+V in a text field: the clipboard is read with the router unlocked, and its
+        // text goes in with this frame's events.
+        if input::router().take_paste_request()
+            && let Some(text) = ws.hwnd(window).and_then(clipboard::read_text)
+        {
+            input::router().paste(&text);
+        }
 
         // The zoom works in the game's context, which is current at the swap. It ends when
         // the game shows a menu (the inventory opened with the zoom key held).
@@ -391,6 +430,8 @@ impl Runtime {
             let marks = waypoints::before_frame(&agent.game_dir, self.window, playing, ws.naming());
             let (browser, browser_notices) = browser::before_frame();
             let browser_shown = browser.shown;
+            // The browser's keys only while there is a page to act on.
+            let browser_keys = browser_shown && browser.state == BrowserState::Ready;
             // Only the menu shows them.
             let (game_bindings, unsupported_inputs) = if ui_open {
                 (
@@ -404,7 +445,7 @@ impl Runtime {
                 let mut router = input::router();
                 router.set_enabled(true);
                 router.set_screen([width as u32, height as u32], scale);
-                router.set_browser_shown(browser_shown);
+                router.set_browser_shown(browser_keys);
                 let input = FrameInput {
                     events: router.take_events(),
                     modifiers: router.modifiers(),
@@ -414,31 +455,43 @@ impl Runtime {
                     captured: router.take_captured(),
                     high_res_note,
                     waypoints: marks.view,
-                    notices: marks.notices.into_iter().chain(browser_notices).collect(),
+                    notices: marks
+                        .notices
+                        .into_iter()
+                        .chain(browser_notices)
+                        .chain(self.notices.drain(..))
+                        .collect(),
                     reserved_keys: marks.reserved_keys,
                     game_bindings,
                     rebind_note: self.rebind_note.clone(),
+                    settings_note: self.settings_note(),
                     unsupported_inputs,
                     browser,
                 };
                 (input, router.take_browser_actions())
             };
-            // The browser thread waits while the picture is uploaded; a picture it is writing
-            // right now waits for the next frame. Hidden, the last one stays.
-            let frame = browser_shown.then(browser::frame).flatten();
+            // The browser thread waits only while a new picture is uploaded; a picture it is
+            // writing right now waits for the next frame. Hidden, the last one stays.
+            if browser_shown {
+                let frame = browser::frame_if_new(&mut self.page_version);
+                // SAFETY: our context is current.
+                unsafe {
+                    self.overlay
+                        .upload_page(frame.as_deref().map(browser::pixels))
+                };
+            }
             let output = self.overlay.render(FrameParams {
                 framebuffer_size: [width as u32, height as u32],
                 pixels_per_point: scale,
                 time: agent.start.elapsed().as_secs_f64(),
                 status: &self.status,
                 input,
-                browser_pixels: frame.as_deref().map(browser::pixels),
             });
-            drop(frame);
             // The rules again only when they or the hotkeys changed: resolving logs them (the
-            // zoom's slider changes the settings every frame while dragged).
+            // zoom's slider changes the settings every frame while dragged). The hotkeys'
+            // problems were logged when the settings were read.
             let changed = output.settings.as_ref().map(|settings| {
-                let keys = hotkeys(settings);
+                let keys = hotkeys_quiet(settings);
                 let rules = (settings.rebinds_enabled != self.settings.rebinds_enabled
                     || settings.rebinds != self.settings.rebinds
                     || keys != self.hotkeys)
@@ -447,6 +500,7 @@ impl Runtime {
             });
             let active = {
                 let mut router = input::router();
+                router.set_text_focus(output.text_focus);
                 if output.close_ui {
                     router.set_ui_open(false);
                 }
@@ -477,8 +531,20 @@ impl Runtime {
                 self.hotkeys = keys;
             }
             if let Some(settings) = output.settings {
+                if settings.zoom_factor != self.settings.zoom_factor
+                    || settings.zoom_high_res != self.settings.zoom_high_res
+                {
+                    self.tall.retry();
+                }
                 self.settings = settings;
-                self.unsaved = Some((Instant::now(), ui_open));
+                self.unsaved = Some((Instant::now() + SAVE_DELAY, ui_open));
+            }
+            if let Some(text) = &output.copied_text
+                && !ws
+                    .hwnd(window)
+                    .is_some_and(|hwnd| clipboard::write_text(hwnd, text))
+            {
+                log::debug!("cannot put the menu's copied text on the clipboard");
             }
             self.log_gl_errors();
             (
@@ -516,30 +582,98 @@ impl Runtime {
         Ok(())
     }
 
+    /// Hands the settings to the saving thread once they are due, and takes in how the last
+    /// save went. A failed save is told once and tried again later.
     fn save_settings_when_due(&mut self) {
-        let Some((changed, in_menu)) = self.unsaved else {
+        if let Some(saving) = &self.saving {
+            let Some(result) = saving.poll() else {
+                return;
+            };
+            self.saving = None;
+            self.saved(result);
+        }
+        let Some((due, in_menu)) = self.unsaved else {
             return;
         };
         let menu_closed = in_menu && !input::router().ui_open();
-        if changed.elapsed() < SAVE_DELAY && !menu_closed {
+        if Instant::now() < due && !menu_closed {
             return;
         }
         self.unsaved = None;
-        match self.settings.save(&self.settings_path) {
-            Ok(()) => log::info!(
-                "settings saved (menu {}, zoom {}, waypoint {}, navigate {}, ×{:.1}, high resolution {}, {})",
-                self.settings.menu_key,
-                self.settings.zoom_key,
-                self.settings.waypoint_key,
-                self.settings.navigate_key,
-                self.settings.zoom_factor,
-                self.settings.zoom_high_res,
-                rebinds_summary(&self.settings)
-            ),
-            Err(e) => log::error!(
-                "cannot save settings to {}: {e}",
-                self.settings_path.display()
-            ),
+        if self.settings.unreadable {
+            log::debug!("settings: not saved; the file could not be read");
+            return;
+        }
+        match self.settings.to_json() {
+            Ok(bytes) => self.saving = Some(saver::write(self.settings_path.clone(), bytes)),
+            Err(e) => self.saved(Err(e)),
+        }
+    }
+
+    fn saved(&mut self, result: std::io::Result<()>) {
+        match result {
+            Ok(()) => {
+                if self.save_problem.take().is_some() {
+                    log::info!("settings saved after an earlier failure");
+                }
+                log::info!(
+                    "settings saved (menu {}, zoom {}, waypoint {}, navigate {}, ×{:.1}, high resolution {}, {})",
+                    self.settings.menu_key,
+                    self.settings.zoom_key,
+                    self.settings.waypoint_key,
+                    self.settings.navigate_key,
+                    self.settings.zoom_factor,
+                    self.settings.zoom_high_res,
+                    rebinds_summary(&self.settings)
+                );
+            }
+            Err(e) => {
+                let problem = format!("設定を保存できなかった：{e}（あとで保存し直す）");
+                if self.save_problem.as_ref() != Some(&problem) {
+                    log::error!(
+                        "cannot save settings to {}: {e}",
+                        self.settings_path.display()
+                    );
+                    self.notices
+                        .push(Notice::new(problem.clone(), true, NOTICE_SECONDS));
+                    self.save_problem = Some(problem);
+                }
+                // A newer change is saved at its own time; else these again, later.
+                self.unsaved
+                    .get_or_insert((Instant::now() + SAVE_RETRY, false));
+            }
+        }
+    }
+
+    /// What the menu says about the settings file.
+    fn settings_note(&self) -> Option<String> {
+        let notes: Vec<&str> = [self.load_problem.as_deref(), self.save_problem.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        (!notes.is_empty()).then(|| notes.join("\n"))
+    }
+
+    /// Saves what is not saved yet before the overlay goes (it is made again from the file),
+    /// waiting a little for it.
+    fn flush_settings(&mut self) {
+        if let Some(saving) = self.saving.take()
+            && let Some(result) = saving.wait(SAVE_WAIT)
+        {
+            self.saved(result);
+        }
+        if self.unsaved.take().is_none() || self.settings.unreadable {
+            return;
+        }
+        let result = self
+            .settings
+            .to_json()
+            .map(|bytes| saver::write(self.settings_path.clone(), bytes))
+            .map(|saving| saving.wait(SAVE_WAIT));
+        match result {
+            Ok(Some(result)) => self.saved(result),
+            Ok(None) => log::warn!("settings: still saving as the overlay goes"),
+            Err(e) => self.saved(Err(e)),
         }
     }
 
@@ -558,8 +692,11 @@ impl Runtime {
         }
     }
 
-    /// Frees GL resources and deletes the context. Best effort: the DC may be gone.
-    fn teardown(self: Box<Self>) {
+    /// Saves the settings, ends the zoom (with the game's context current, as in the swap),
+    /// frees GL resources and deletes the context. Best effort: the DC may be gone.
+    fn teardown(mut self: Box<Self>) {
+        self.flush_settings();
+        self.tall.release();
         let Ok(wgl) = wgl::get() else {
             return;
         };
@@ -574,6 +711,42 @@ impl Runtime {
         }
         context.delete(wgl);
     }
+}
+
+/// `path` for the screen, with the user's folders as `%APPDATA%` and the like: the status
+/// can be on the screen while streaming, and the full path has the user's name.
+fn screen_path(path: &std::path::Path) -> String {
+    let text = path.display().to_string();
+    for var in ["APPDATA", "LOCALAPPDATA", "USERPROFILE"] {
+        let Some(dir) = std::env::var_os(var).filter(|dir| !dir.is_empty()) else {
+            continue;
+        };
+        let dir = dir.to_string_lossy();
+        let dir = dir.trim_end_matches('\\');
+        if let Some(head) = text.get(..dir.len())
+            && head.eq_ignore_ascii_case(dir)
+            && (text.len() == dir.len() || text[dir.len()..].starts_with('\\'))
+        {
+            return format!("%{var}%{}", &text[dir.len()..]);
+        }
+    }
+    text
+}
+
+/// The menu's note about a settings file that was not read as it is.
+fn settings_problem(settings: &Settings) -> Option<String> {
+    if let Some(moved) = &settings.moved_aside_to {
+        let name = moved
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        return Some(format!(
+            "settings.json の書き方に誤りがあったので reminedog/{name} に移し、既定の設定で起動した（直して settings.json に戻すと、次の起動で読み込む）"
+        ));
+    }
+    settings.unreadable.then(|| {
+        "settings.json を読み込めなかったので既定の設定で動いている（上書きしないよう、この起動中は設定を保存しない）"
+            .to_owned()
+    })
 }
 
 /// The key rebinding's rules in `settings` the router uses ([`resolve`]): less those the

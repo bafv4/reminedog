@@ -12,6 +12,7 @@
 
 mod agent;
 mod browser;
+mod clipboard;
 mod f3c;
 mod ffi;
 mod fonts;
@@ -23,6 +24,7 @@ mod input;
 mod loader;
 mod pointer;
 mod rebind_state;
+mod saver;
 mod sdl;
 mod sdl_input;
 mod tall;

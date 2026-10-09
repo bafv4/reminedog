@@ -14,11 +14,12 @@
 //! events and F3+C's checks read it. Mouse buttons are not in it: the game never asks for their
 //! state.
 //!
-//! Lock order: `router -> SUSPECTS`. The table takes no lock; only the router's holder writes it.
+//! Lock order: `router -> SUSPECTS` and `router -> PRESS_SUSPECTS`. The table takes no lock;
+//! only the router's holder writes it.
 
 use std::ops::RangeInclusive;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use reminedog_core::{InputId, SCANCODE_COUNT, input_name, win_scancode_of};
@@ -47,6 +48,11 @@ pub const MODIFIER_SCANCODES: RangeInclusive<usize> = 224..=231;
 const LOST_RELEASE_DELAY: Duration = Duration::from_millis(100);
 
 static TABLE: [AtomicU8; SCANCODE_COUNT] = [const { AtomicU8::new(REAL) }; SCANCODE_COUNT];
+/// The keys whose entry is not `REAL`, the first [`FORCED_KEY_COUNT`] of them (more than fit:
+/// `usize::MAX`), so a copied key state is patched at those keys only ([`patch_forced`]).
+static FORCED_KEYS: [AtomicU16; MAX_FORCED_KEYS] = [const { AtomicU16::new(0) }; MAX_FORCED_KEYS];
+static FORCED_KEY_COUNT: AtomicUsize = AtomicUsize::new(0);
+const MAX_FORCED_KEYS: usize = 32;
 /// The window (`GLFWwindow*` or `SDL_Window*`) of the events the table was last written for.
 static WINDOW: AtomicUsize = AtomicUsize::new(0);
 /// Some entry is not `REAL`.
@@ -59,6 +65,8 @@ static REBOUND: AtomicBool = AtomicBool::new(false);
 static PASSED: AtomicBool = AtomicBool::new(false);
 /// Ids the safety net watches that Windows reported as up at the last checks, and since when.
 static SUSPECTS: Mutex<Vec<(InputId, Instant)>> = Mutex::new(Vec::new());
+/// The same for the router's own presses ([`forget_lost_presses`]).
+static PRESS_SUSPECTS: Mutex<Vec<(InputId, Instant)>> = Mutex::new(Vec::new());
 
 fn key_index(id: InputId) -> Option<usize> {
     match id {
@@ -100,6 +108,21 @@ pub fn apply(window: usize, state: &RebindState) {
             entry.store(value, Ordering::Relaxed);
         }
     }
+    let mut count = 0;
+    for (index, _) in table.iter().enumerate().filter(|&(_, &v)| v != REAL) {
+        if let Some(slot) = FORCED_KEYS.get(count) {
+            slot.store(index as u16, Ordering::Relaxed);
+        }
+        count += 1;
+    }
+    FORCED_KEY_COUNT.store(
+        if count <= MAX_FORCED_KEYS {
+            count
+        } else {
+            usize::MAX
+        },
+        Ordering::Release,
+    );
     MODIFIERS_FORCED.store(
         table[MODIFIER_SCANCODES].iter().any(|&v| v != REAL),
         Ordering::Release,
@@ -132,6 +155,31 @@ pub fn forced_in(window: usize, id: InputId) -> Option<bool> {
 /// Whether the game reads `id` as held: the rebinding's say, else `physically()`.
 pub fn held(id: InputId, physically: impl FnOnce() -> bool) -> bool {
     forced(id).unwrap_or_else(physically)
+}
+
+/// Copies the key state `real` (a C bool per SDL scancode) into `out`, with the rebinding's
+/// say on the few keys it has one on. False (nothing done) when it has a say on too many keys
+/// to list: [`forced`] must be asked for each key then.
+pub fn patch_forced(real: &[u8], out: &[AtomicU8]) -> bool {
+    let count = FORCED_KEY_COUNT.load(Ordering::Acquire);
+    if count > MAX_FORCED_KEYS {
+        return false;
+    }
+    for (entry, &down) in out.iter().zip(real) {
+        entry.store(down, Ordering::Relaxed);
+    }
+    for slot in &FORCED_KEYS[..count] {
+        let index = usize::from(slot.load(Ordering::Relaxed));
+        let (Some(entry), Some(value)) = (out.get(index), TABLE.get(index)) else {
+            continue;
+        };
+        match value.load(Ordering::Relaxed) {
+            PRESSED => entry.store(1, Ordering::Relaxed),
+            RELEASED => entry.store(0, Ordering::Relaxed),
+            _ => {}
+        }
+    }
+    true
 }
 
 /// Whether any key's state is the rebinding's.
@@ -218,6 +266,31 @@ pub fn lost_releases(window: usize) -> Vec<Output> {
     }
     apply(window, &router.rebind_state());
     releases
+}
+
+/// The safety net for the router's own presses (the zoom key, the in-game hotkeys, the debug
+/// modifier the game has down; [`reminedog_render::InputRouter::held_presses`]): one that
+/// Windows reports as up for [`LOST_RELEASE_DELAY`] is forgotten, as its release would have
+/// made it (26.x drops input events while it loads a world or leaves one). Else the zoom
+/// would come back in the next world, or the hotkeys keep the game's text. Called every frame
+/// after the swap.
+pub fn forget_lost_presses() {
+    let mut router = input::router();
+    let held = router.held_presses();
+    let mut suspects = PRESS_SUSPECTS.lock().unwrap_or_else(|e| e.into_inner());
+    if held.is_empty() {
+        suspects.clear();
+        return;
+    }
+    let (lost, still) = check_suspects(&held, &suspects, Instant::now(), is_up);
+    *suspects = still;
+    for id in lost {
+        log::debug!(
+            "input: {} is up, but its release never came; forgetting its press",
+            input_name(id)
+        );
+        router.forget_press(id);
+    }
 }
 
 /// Of the `watched` ids (held rules' sources, rule outputs pressed as they were), those up (by
