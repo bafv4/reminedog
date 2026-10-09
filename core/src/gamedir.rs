@@ -165,6 +165,7 @@ mod tests {
         let world = WorldId::Multiplayer {
             host: "Example.com".into(),
             port: 25565,
+            label: None,
         };
         assert_eq!(
             waypoints_path(&game, &world),

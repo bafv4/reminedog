@@ -222,36 +222,45 @@ impl WaypointStore {
         Some(self.waypoints.remove(index))
     }
 
-    /// Writes the store atomically: `<file>.tmp` in the same directory is written and
-    /// synced, then renamed over the target. Parent directories are created as needed.
+    /// Writes the store atomically ([`write_file`]).
     pub fn save(&self) -> Result<(), StoreError> {
-        let io_error = |path: &Path| {
-            let path = path.to_owned();
-            move |source| StoreError::Io { path, source }
-        };
-        if let Some(dir) = self.path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            fs::create_dir_all(dir).map_err(io_error(dir))?;
-        }
+        write_file(&self.path, &self.to_json()?).map_err(|source| StoreError::Io {
+            path: self.path.clone(),
+            source,
+        })
+    }
+
+    /// The file's contents, for [`write_file`] (on another thread).
+    pub fn to_json(&self) -> Result<Vec<u8>, StoreError> {
         let mut json = serde_json::to_vec_pretty(&FileOut {
             version: FORMAT_VERSION,
             world: &self.world,
             next_id: self.next_id,
             waypoints: &self.waypoints,
         })
-        .map_err(|e| io_error(&self.path)(io::Error::other(e)))?;
+        .map_err(|e| StoreError::Io {
+            path: self.path.clone(),
+            source: io::Error::other(e),
+        })?;
         json.push(b'\n');
-
-        let tmp = tmp_path(&self.path);
-        let result = write_synced(&tmp, &json)
-            .map_err(io_error(&tmp))
-            .and_then(|()| fs::rename(&tmp, &self.path).map_err(io_error(&self.path)));
-        if result.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        result?;
-        sync_parent_dir(&self.path);
-        Ok(())
+        Ok(json)
     }
+}
+
+/// Writes `data` to `path` atomically: `<file>.tmp` in the same directory is written and
+/// synced, then renamed over the target. Parent directories are created as needed.
+pub fn write_file(path: &Path, data: &[u8]) -> io::Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        fs::create_dir_all(dir)?;
+    }
+    let tmp = tmp_path(path);
+    let result = write_synced(&tmp, data).and_then(|()| fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result?;
+    sync_parent_dir(path);
+    Ok(())
 }
 
 fn load(path: &Path) -> Result<Option<FileIn>, StoreError> {

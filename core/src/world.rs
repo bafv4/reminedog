@@ -2,13 +2,16 @@
 //!
 //! Multiplayer servers come from the `Connecting to <host>, <port>` line in `logs/latest.log`.
 //! For singleplayer the log only says that the integrated server started, so the world folder
-//! is the one whose `session.lock` was touched most recently.
+//! is the one whose `session.lock` was touched most recently. Its name in the game is in its
+//! `level.dat`.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::SystemTime;
+
+use flate2::read::GzDecoder;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -19,46 +22,85 @@ pub const DEFAULT_PORT: u16 = 25565;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WorldId {
     /// A world folder under `saves/`.
-    Singleplayer {
-        folder: String,
-    },
+    Singleplayer { folder: String },
     Multiplayer {
         host: String,
         port: u16,
+        /// The user's name for the world behind the address (a network's lobby and survival
+        /// share it), `None` for the address alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
     },
 }
 
 impl WorldId {
-    /// A file name stem that is safe on Windows and Linux: `sp-<folder>` or
-    /// `mp-<host>-<port>`, with the host lowercased.
+    /// A file name stem that is safe on Windows and Linux: `sp-<folder>`, or
+    /// `mp-<host>-<port>` with the host lowercased and `@<label>` after it for a label. A host
+    /// with `@` (no real one has it) is changed and hashed, so a label always starts at the
+    /// first `@`.
     pub fn file_stem(&self) -> String {
         match self {
             WorldId::Singleplayer { folder } => format!("sp-{}", sanitize_file_component(folder)),
-            WorldId::Multiplayer { host, port } => {
-                format!(
+            WorldId::Multiplayer { host, port, label } => {
+                let mut stem = format!(
                     "mp-{}-{port}",
-                    sanitize_file_component(&host.to_lowercase())
-                )
+                    sanitize_component(&host.to_lowercase(), &['@'])
+                );
+                if let Some(label) = label {
+                    stem.push('@');
+                    stem.push_str(&sanitize_file_component(label));
+                }
+                stem
             }
         }
     }
 
-    /// A name for the UI: the folder name, or `host[:port]` (IPv6 in brackets).
+    /// A name for the UI: the folder name, or `host[:port]` (IPv6 in brackets) with the label
+    /// after it.
     pub fn display_name(&self) -> String {
         match self {
             WorldId::Singleplayer { folder } => folder.clone(),
-            WorldId::Multiplayer { host, port } => {
-                let host = if host.contains(':') {
+            WorldId::Multiplayer { host, port, label } => {
+                let mut name = if host.contains(':') {
                     format!("[{host}]")
                 } else {
                     host.clone()
                 };
-                if *port == DEFAULT_PORT {
-                    host
-                } else {
-                    format!("{host}:{port}")
+                if *port != DEFAULT_PORT {
+                    name.push_str(&format!(":{port}"));
                 }
+                if let Some(label) = label {
+                    name.push_str(&format!("（{label}）"));
+                }
+                name
             }
+        }
+    }
+
+    /// The same world under `label` (a server only; a singleplayer world is returned as it
+    /// is). An empty label is none.
+    pub fn with_label(&self, label: Option<&str>) -> WorldId {
+        match self {
+            WorldId::Multiplayer { host, port, .. } => WorldId::Multiplayer {
+                host: host.clone(),
+                port: *port,
+                label: label
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_owned),
+            },
+            WorldId::Singleplayer { .. } => self.clone(),
+        }
+    }
+
+    /// The server's address as a key for its label: `host:port` with the host lowercased.
+    /// `None` for a singleplayer world.
+    pub fn address_key(&self) -> Option<String> {
+        match self {
+            WorldId::Multiplayer { host, port, .. } => {
+                Some(format!("{}:{port}", host.to_lowercase()))
+            }
+            WorldId::Singleplayer { .. } => None,
         }
     }
 }
@@ -73,10 +115,18 @@ const MAX_COMPONENT_LEN: usize = 80;
 /// result at 80 bytes (on a char boundary). If anything had to change, `-` and 8 hex digits of
 /// a stable hash of `s` are appended so that different inputs stay distinct.
 pub fn sanitize_file_component(s: &str) -> String {
+    sanitize_component(s, &[])
+}
+
+/// [`sanitize_file_component`] that also replaces the characters in `extra`.
+fn sanitize_component(s: &str, extra: &[char]) -> String {
     let mut out: String = s
         .chars()
         .map(|c| {
-            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+            if c.is_control()
+                || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+                || extra.contains(&c)
+            {
                 '_'
             } else {
                 c
@@ -199,7 +249,11 @@ pub fn parse_log_line(line: &str) -> Option<LogEvent> {
             port,
         });
     }
-    if msg.starts_with("Starting integrated minecraft server version") {
+    // Only the game's own server thread: tools that start integrated servers in the
+    // background (SeedQueue's `Server thread #N`) would make every start a world change.
+    if msg.starts_with("Starting integrated minecraft server version")
+        && &caps["thread"] == "Server thread"
+    {
         return Some(LogEvent::IntegratedServerStarting);
     }
     if msg == "Stopping server" && &caps["thread"] == "Server thread" {
@@ -208,8 +262,22 @@ pub fn parse_log_line(line: &str) -> Option<LogEvent> {
     None
 }
 
+/// Whether `line` may be one [`parse_log_line`] recognizes: a cheap check on the bytes, so
+/// the other lines are never decoded.
+pub fn might_be_world_line(line: &[u8]) -> bool {
+    const NEEDLES: [&[u8]; 3] = [
+        b"Connecting to ",
+        b"Starting integrated minecraft server",
+        b"Stopping server",
+    ];
+    NEEDLES
+        .iter()
+        .any(|needle| line.windows(needle.len()).any(|window| window == *needle))
+}
+
 const FINGERPRINT_LEN: usize = 256;
-const MAX_READ_PER_POLL: u64 = 8 * 1024 * 1024;
+/// The game's thread reads the log; a long file is read over several polls.
+const MAX_READ_PER_POLL: u64 = 1024 * 1024;
 const MAX_LINE_LEN: usize = 1024 * 1024;
 
 /// Incrementally reads lines appended to a log file.
@@ -220,6 +288,8 @@ const MAX_LINE_LEN: usize = 1024 * 1024;
 #[derive(Debug)]
 pub struct LogTail {
     path: PathBuf,
+    /// Lines for which this is false are dropped undecoded.
+    keep: fn(&[u8]) -> bool,
     offset: u64,
     /// The first `min(offset, FINGERPRINT_LEN)` bytes consumed so far.
     fingerprint: Vec<u8>,
@@ -233,8 +303,14 @@ pub struct LogTail {
 
 impl LogTail {
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self::filtered(path, |_| true)
+    }
+
+    /// A tail that returns only the lines `keep` accepts (given without the line terminator).
+    pub fn filtered(path: impl Into<PathBuf>, keep: fn(&[u8]) -> bool) -> Self {
         Self {
             path: path.into(),
+            keep,
             offset: 0,
             fingerprint: Vec::new(),
             partial: Vec::new(),
@@ -318,7 +394,9 @@ impl LogTail {
             if !self.discarding && self.partial.len() + segment.len() <= MAX_LINE_LEN {
                 self.partial.extend_from_slice(segment);
                 let line = self.partial.strip_suffix(b"\r").unwrap_or(&self.partial);
-                lines.push(String::from_utf8_lossy(line).into_owned());
+                if (self.keep)(line) {
+                    lines.push(String::from_utf8_lossy(line).into_owned());
+                }
             }
             self.partial.clear();
             self.discarding = false;
@@ -367,18 +445,31 @@ impl WorldTracker {
     /// the most recently locked world folder after `IntegratedServerStarting`, and `None`
     /// after `IntegratedServerStopping` or before any event.
     pub fn resolve(&self, saves_dir: &Path) -> Option<WorldId> {
+        self.resolve_since(saves_dir, None)
+    }
+
+    /// [`resolve`](Self::resolve), where a singleplayer world must have been locked at
+    /// `not_before` or later.
+    pub fn resolve_since(
+        &self,
+        saves_dir: &Path,
+        not_before: Option<SystemTime>,
+    ) -> Option<WorldId> {
         match self.last.as_ref()? {
             LogEvent::ConnectingToServer { host, port } => Some(WorldId::Multiplayer {
                 host: host.to_lowercase(),
                 port: *port,
+                label: None,
             }),
-            LogEvent::IntegratedServerStarting => match detect_singleplayer_world(saves_dir) {
-                Ok(folder) => folder.map(|folder| WorldId::Singleplayer { folder }),
-                Err(e) => {
-                    log::warn!("cannot scan {}: {e}", saves_dir.display());
-                    None
+            LogEvent::IntegratedServerStarting => {
+                match detect_singleplayer_world_since(saves_dir, not_before) {
+                    Ok(folder) => folder.map(|folder| WorldId::Singleplayer { folder }),
+                    Err(e) => {
+                        log::warn!("cannot scan {}: {e}", saves_dir.display());
+                        None
+                    }
                 }
-            },
+            }
             LogEvent::IntegratedServerStopping => None,
         }
     }
@@ -388,6 +479,14 @@ impl WorldTracker {
 /// recently (the game writes it when a world is loaded), or `None` if there is none.
 /// Non-directories and entries that cannot be read are skipped.
 pub fn detect_singleplayer_world(saves_dir: &Path) -> io::Result<Option<String>> {
+    detect_singleplayer_world_since(saves_dir, None)
+}
+
+/// [`detect_singleplayer_world`], counting only locks modified at `not_before` or later.
+pub fn detect_singleplayer_world_since(
+    saves_dir: &Path,
+    not_before: Option<SystemTime>,
+) -> io::Result<Option<String>> {
     let entries = match fs::read_dir(saves_dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -396,14 +495,23 @@ pub fn detect_singleplayer_world(saves_dir: &Path) -> io::Result<Option<String>>
     let mut newest: Option<(SystemTime, String)> = None;
     for entry in entries.flatten() {
         let path = entry.path();
-        // Follows symlinks, so linked world folders count.
-        if !fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
+        // The entry's own type needs no extra call; a symlink is followed, so linked world
+        // folders count.
+        let is_dir = match entry.file_type() {
+            Ok(kind) if kind.is_symlink() => fs::metadata(&path).is_ok_and(|m| m.is_dir()),
+            Ok(kind) => kind.is_dir(),
+            Err(_) => false,
+        };
+        if !is_dir {
             continue;
         }
         let Ok(modified) = fs::metadata(path.join("session.lock")).and_then(|m| m.modified())
         else {
             continue;
         };
+        if not_before.is_some_and(|not_before| modified < not_before) {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().into_owned();
         // Ties are broken by name so the result does not depend on directory order.
         if newest
@@ -414,6 +522,176 @@ pub fn detect_singleplayer_world(saves_dir: &Path) -> io::Result<Option<String>>
         }
     }
     Ok(newest.map(|(_, name)| name))
+}
+
+/// The largest `level.dat` read, decompressed. Real ones are a few KiB.
+const MAX_LEVEL_DAT: u64 = 8 * 1024 * 1024;
+
+/// The world's name in the game (`Data.LevelName` in its gzipped NBT `level.dat`), or `None`
+/// when it cannot be read.
+pub fn level_name(world_dir: &Path) -> Option<String> {
+    let file = File::open(world_dir.join("level.dat")).ok()?;
+    let mut data = Vec::new();
+    GzDecoder::new(file)
+        .take(MAX_LEVEL_DAT)
+        .read_to_end(&mut data)
+        .ok()?;
+    let name = nbt_level_name(&data)?;
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// NBT tag ids.
+const TAG_END: u8 = 0;
+const TAG_STRING: u8 = 8;
+const TAG_LIST: u8 = 9;
+const TAG_COMPOUND: u8 = 10;
+/// Deeper nesting than any real file; stops a crafted one from overflowing the stack.
+const MAX_NBT_DEPTH: u32 = 512;
+
+/// `Data.LevelName` in an uncompressed `level.dat`.
+fn nbt_level_name(data: &[u8]) -> Option<String> {
+    let mut nbt = Nbt { data, pos: 0 };
+    if nbt.byte()? != TAG_COMPOUND {
+        return None;
+    }
+    nbt.string()?;
+    // The root compound: find `Data`.
+    loop {
+        let tag = nbt.byte()?;
+        if tag == TAG_END {
+            return None;
+        }
+        let name = nbt.string()?;
+        if tag == TAG_COMPOUND && name == "Data" {
+            break;
+        }
+        nbt.skip(tag, 0)?;
+    }
+    loop {
+        let tag = nbt.byte()?;
+        if tag == TAG_END {
+            return None;
+        }
+        let name = nbt.string()?;
+        if tag == TAG_STRING && name == "LevelName" {
+            return nbt.string();
+        }
+        nbt.skip(tag, 0)?;
+    }
+}
+
+/// A reader over NBT's big-endian payloads. Every read is bounds-checked (`None` at the end).
+struct Nbt<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl Nbt<'_> {
+    fn bytes(&mut self, len: usize) -> Option<&[u8]> {
+        let end = self.pos.checked_add(len)?;
+        let bytes = self.data.get(self.pos..end)?;
+        self.pos = end;
+        Some(bytes)
+    }
+
+    fn byte(&mut self) -> Option<u8> {
+        self.bytes(1).map(|b| b[0])
+    }
+
+    fn len_i32(&mut self) -> Option<usize> {
+        let bytes = self.bytes(4)?;
+        let len = i32::from_be_bytes(bytes.try_into().ok()?);
+        usize::try_from(len.max(0)).ok()
+    }
+
+    fn len_u16(&mut self) -> Option<usize> {
+        let bytes = self.bytes(2)?;
+        Some(usize::from(u16::from_be_bytes([bytes[0], bytes[1]])))
+    }
+
+    fn string(&mut self) -> Option<String> {
+        let len = self.len_u16()?;
+        self.bytes(len).map(java_modified_utf8)
+    }
+
+    /// Skips the payload of a `tag`.
+    fn skip(&mut self, tag: u8, depth: u32) -> Option<()> {
+        if depth > MAX_NBT_DEPTH {
+            return None;
+        }
+        let len = match tag {
+            1 => Some(1),
+            2 => Some(2),
+            3 | 5 => Some(4),
+            4 | 6 => Some(8),
+            7 => self.len_i32(),
+            11 => self.len_i32()?.checked_mul(4),
+            12 => self.len_i32()?.checked_mul(8),
+            TAG_STRING => self.len_u16(),
+            TAG_LIST => {
+                let item = self.byte()?;
+                let count = self.len_i32()?;
+                for _ in 0..count {
+                    self.skip(item, depth + 1)?;
+                }
+                Some(0)
+            }
+            TAG_COMPOUND => {
+                loop {
+                    let tag = self.byte()?;
+                    if tag == TAG_END {
+                        break;
+                    }
+                    let len = self.len_u16()?;
+                    self.bytes(len)?;
+                    self.skip(tag, depth + 1)?;
+                }
+                Some(0)
+            }
+            _ => None,
+        }?;
+        self.bytes(len).map(|_| ())
+    }
+}
+
+/// Decodes Java's modified UTF-8 (NBT strings): UTF-8 with supplementary characters as two
+/// encoded surrogates and NUL as two bytes. Malformed bytes become U+FFFD.
+fn java_modified_utf8(bytes: &[u8]) -> String {
+    let mut units = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let continuation = |b: Option<&u8>| {
+        b.filter(|&&b| b & 0xc0 == 0x80)
+            .map(|&b| u16::from(b & 0x3f))
+    };
+    while i < bytes.len() {
+        let b = bytes[i];
+        let (unit, len) = if b < 0x80 {
+            (Some(u16::from(b)), 1)
+        } else if b & 0xe0 == 0xc0 {
+            let unit = continuation(bytes.get(i + 1)).map(|c| (u16::from(b & 0x1f) << 6) | c);
+            (unit, 2)
+        } else if b & 0xf0 == 0xe0 {
+            let unit = continuation(bytes.get(i + 1))
+                .zip(continuation(bytes.get(i + 2)))
+                .map(|(c1, c2)| (u16::from(b & 0x0f) << 12) | (c1 << 6) | c2);
+            (unit, 3)
+        } else {
+            (None, 1)
+        };
+        match unit {
+            Some(unit) => {
+                units.push(unit);
+                i += len;
+            }
+            None => {
+                units.push(0xfffd);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf16_lossy(&units)
 }
 
 #[cfg(test)]
@@ -432,6 +710,7 @@ mod tests {
 
     fn mp(host: &str, port: u16) -> WorldId {
         WorldId::Multiplayer {
+            label: None,
             host: host.into(),
             port,
         }
@@ -570,6 +849,21 @@ mod tests {
         assert_eq!(mp("::1", 25566).file_stem(), "mp-__1-eb56b0b4-25566");
         // Folder names keep their case.
         assert_ne!(sp("World").file_stem(), sp("world").file_stem());
+        // A label follows the first `@`; a host cannot have one.
+        let labelled = mp("example.com", 25565).with_label(Some("survival"));
+        assert_eq!(labelled.file_stem(), "mp-example.com-25565@survival");
+        assert_eq!(
+            mp("example.com", 25565).with_label(Some("  ")),
+            mp("example.com", 25565)
+        );
+        assert_ne!(
+            mp("x-1@y", 2).file_stem(),
+            mp("x", 1).with_label(Some("y-2")).file_stem()
+        );
+        assert_eq!(
+            mp("example.com", 25565).with_label(Some("a/b")).file_stem(),
+            "mp-example.com-25565@a_b-e2480c78"
+        );
     }
 
     #[test]
@@ -579,11 +873,29 @@ mod tests {
         assert_eq!(mp("example.com", 25566).display_name(), "example.com:25566");
         assert_eq!(mp("::1", 25565).display_name(), "[::1]");
         assert_eq!(mp("2001:db8::1", 1234).display_name(), "[2001:db8::1]:1234");
+        assert_eq!(
+            mp("example.com", 25566)
+                .with_label(Some("ロビー"))
+                .display_name(),
+            "example.com:25566（ロビー）"
+        );
+        assert_eq!(
+            mp("Example.com", 25566)
+                .with_label(Some("x"))
+                .address_key()
+                .as_deref(),
+            Some("example.com:25566")
+        );
+        assert_eq!(sp("w").address_key(), None);
     }
 
     #[test]
     fn world_id_serde() {
         let id = mp("example.com", 25565);
+        let json = serde_json::to_string(&id).unwrap();
+        assert!(!json.contains("label"), "{json}");
+        assert_eq!(serde_json::from_str::<WorldId>(&json).unwrap(), id);
+        let id = id.with_label(Some("survival"));
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(serde_json::from_str::<WorldId>(&json).unwrap(), id);
     }
@@ -690,6 +1002,9 @@ mod tests {
             "[12:34:56] [Server thread/WARN]: Stopping server",
             "[12:34:56] [Render thread/WARN]: Connecting to example.com, 25565",
             "[12:34:56] [Server thread/INFO]: Stopping server now",
+            // Integrated servers started in the background by tools (SeedQueue).
+            "[12:34:56] [Server thread #2/INFO]: Starting integrated minecraft server version 1.16.1",
+            "[12:34:56] [Render thread/INFO]: Starting integrated minecraft server version 1.16.1",
             "[12:34:56] [Render thread/INFO]: Connecting to example.com",
             "[12:34:56] [Render thread/INFO]: Connecting to example.com, 65536",
             "[12:34:56] [Render thread/INFO]: Connecting to example.com, 123456",
@@ -932,6 +1247,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("latest.log");
         let mut tail = LogTail::new(&path);
+        // Each part below within one read.
+        tail.max_read = 4 * MAX_LINE_LEN as u64;
         let huge = vec![b'x'; MAX_LINE_LEN + 1];
         append(&path, b"before\n");
         append(&path, &huge[..MAX_LINE_LEN / 2]);
@@ -1000,6 +1317,90 @@ mod tests {
         assert_eq!(detect_singleplayer_world(dir.path()).unwrap(), None);
         fs::create_dir(dir.path().join("empty world")).unwrap();
         assert_eq!(detect_singleplayer_world(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn detect_since_skips_older_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        set_lock_time(&dir.path().join("old"), 1_700_000_000);
+        let since = |secs| Some(UNIX_EPOCH + Duration::from_secs(secs));
+        assert_eq!(
+            detect_singleplayer_world_since(dir.path(), since(1_700_000_000))
+                .unwrap()
+                .as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            detect_singleplayer_world_since(dir.path(), since(1_700_000_001)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn only_lines_that_may_matter_are_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("latest.log");
+        append(
+            &path,
+            b"[12:00:00] [Render thread/INFO]: Setting user: Steve\n\
+              [12:00:01] [Render thread/INFO]: Connecting to example.com, 25565\n\
+              [12:00:02] [Server thread/INFO]: Stopping server\n",
+        );
+        let mut tail = LogTail::filtered(&path, might_be_world_line);
+        let lines = tail.poll().unwrap();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines.iter().all(|line| parse_log_line(line).is_some()));
+    }
+
+    /// A gzipped level.dat with `Data.LevelName` among other tags.
+    fn write_level_dat(world: &Path, name_bytes: &[u8]) {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        fn named(out: &mut Vec<u8>, tag: u8, name: &str) {
+            out.push(tag);
+            out.extend_from_slice(&(name.len() as u16).to_be_bytes());
+            out.extend_from_slice(name.as_bytes());
+        }
+        let mut nbt = Vec::new();
+        named(&mut nbt, TAG_COMPOUND, "");
+        named(&mut nbt, 3, "Version");
+        nbt.extend_from_slice(&1i32.to_be_bytes());
+        named(&mut nbt, TAG_COMPOUND, "Data");
+        named(&mut nbt, TAG_LIST, "ServerBrands");
+        nbt.push(TAG_STRING);
+        nbt.extend_from_slice(&1i32.to_be_bytes());
+        nbt.extend_from_slice(&7u16.to_be_bytes());
+        nbt.extend_from_slice(b"vanilla");
+        named(&mut nbt, 12, "Seeds");
+        nbt.extend_from_slice(&2i32.to_be_bytes());
+        nbt.extend_from_slice(&[0; 16]);
+        named(&mut nbt, TAG_STRING, "LevelName");
+        nbt.extend_from_slice(&(name_bytes.len() as u16).to_be_bytes());
+        nbt.extend_from_slice(name_bytes);
+        nbt.push(TAG_END);
+        nbt.push(TAG_END);
+        fs::create_dir_all(world).unwrap();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        std::io::Write::write_all(&mut encoder, &nbt).unwrap();
+        fs::write(world.join("level.dat"), encoder.finish().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn level_names_from_level_dat() {
+        let dir = tempfile::tempdir().unwrap();
+        let world = dir.path().join("New World (1)");
+        write_level_dat(&world, "サバイバル".as_bytes());
+        assert_eq!(level_name(&world).as_deref(), Some("サバイバル"));
+        // Java writes a supplementary character as two encoded surrogates.
+        write_level_dat(&world, &[0xed, 0xa0, 0xbc, 0xed, 0xbf, 0xb2, b'!']);
+        assert_eq!(level_name(&world).as_deref(), Some("\u{1f3f2}!"));
+        write_level_dat(&world, b"  ");
+        assert_eq!(level_name(&world), None);
+        fs::write(world.join("level.dat"), b"not gzip").unwrap();
+        assert_eq!(level_name(&world), None);
+        assert_eq!(level_name(&dir.path().join("missing")), None);
+        // Truncated NBT.
+        assert_eq!(nbt_level_name(&[TAG_COMPOUND, 0, 0, TAG_COMPOUND]), None);
     }
 
     #[test]

@@ -38,10 +38,11 @@ pub use location::{Location, ParseError, parse_f3c};
 pub use logfile::FileLogger;
 pub use nav::{Bearing, Cardinal, Guide, bearing, convert_xz, guide, wrap_degrees};
 pub use options::AgentOptions;
-pub use session::{WaypointBook, WorldState, WorldWatcher, unix_now};
+pub use session::{SaveJob, ServerLabels, WaypointBook, WorldState, WorldWatcher, unix_now};
 pub use settings::{Rebind, Settings, settings_path};
-pub use waypoint::{StoreError, Waypoint, WaypointStore};
+pub use waypoint::{StoreError, Waypoint, WaypointStore, write_file};
 pub use world::{
-    LogEvent, LogTail, WorldId, WorldTracker, detect_singleplayer_world, parse_log_line,
+    LogEvent, LogTail, WorldId, WorldTracker, detect_singleplayer_world,
+    detect_singleplayer_world_since, level_name, might_be_world_line, parse_log_line,
     sanitize_file_component,
 };
