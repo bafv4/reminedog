@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Download the LWJGL 3 jars the smoke harness needs (core, GLFW, OpenGL and their
-# natives-windows jars) from Maven Central into DEST_DIR, verifying each against its
-# published SHA-1. Already-present jars are kept, so re-running is cheap.
+# natives-windows jars) from Maven Central into DEST_DIR, verifying each against the SHA-256
+# in ci/smoke/lwjgl.sha256 (a jar without one there is refused). Already-present jars are
+# checked again and kept, so re-running is cheap.
 # Prints the path of every jar on stdout (progress goes to stderr).
-# Needs only bash, curl and sha1sum, so it also runs in Git Bash on Windows runners.
+# Needs only bash, curl and sha256sum, so it also runs in Git Bash on Windows runners.
 #
 # Usage: ci/smoke/fetch-lwjgl.sh VERSION DEST_DIR
 set -euo pipefail
@@ -41,26 +42,29 @@ fetch() {
   return 1
 }
 
+hashes=$(dirname "${BASH_SOURCE[0]}")/lwjgl.sha256
+
 mkdir -p "$dest"
 for module in lwjgl lwjgl-glfw lwjgl-opengl ${LWJGL_EXTRA_MODULES:-}; do
   for classifier in "" "-natives-windows"; do
     name="$module-$version$classifier.jar"
     out="$dest/$name"
+    want=$(tr -d '\r' <"$hashes" | awk -v name="$name" '$2 == name { print $1 }')
+    if [ -z "$want" ]; then
+      echo "fetch-lwjgl: no SHA-256 for $name in $hashes" >&2
+      exit 1
+    fi
     if [ ! -s "$out" ]; then
       url="$base/$module/$version/$name"
       echo "fetch-lwjgl: $url" >&2
       fetch "$url" "$out.part"
-      fetch "$url.sha1" "$out.sha1"
-      # Maven Central's .sha1 holds the bare hash (sometimes followed by a file name).
-      want=$(tr -d '\r' <"$out.sha1" | cut -d ' ' -f 1)
-      got=$(sha1sum "$out.part" | cut -d ' ' -f 1)
-      rm -f "$out.sha1"
-      if [ "$want" != "$got" ]; then
-        rm -f "$out.part"
-        echo "fetch-lwjgl: SHA-1 mismatch for $name (expected '$want', got '$got')" >&2
-        exit 1
-      fi
       mv -f "$out.part" "$out"
+    fi
+    got=$(sha256sum "$out" | cut -d ' ' -f 1)
+    if [ "$want" != "$got" ]; then
+      rm -f "$out"
+      echo "fetch-lwjgl: SHA-256 mismatch for $name (expected '$want', got '$got')" >&2
+      exit 1
     fi
     echo "$out"
   done

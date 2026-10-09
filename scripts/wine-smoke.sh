@@ -141,7 +141,14 @@ while [ "$#" -gt 0 ]; do
         --seconds) smoke_flags+=("--seconds=$2") ;;
         --xdotool) xdotool_cmds=$2 ;;
         --xdotool-delay) xdotool_delay=$2 ;;
-        --grab) grab=$(cd "$(dirname "$2")" && pwd)/$(basename "$2") ;;
+        --grab)
+          grab_dir=$(dirname "$2")
+          if [ ! -d "$grab_dir" ]; then
+            echo "wine-smoke: --grab: no folder $grab_dir" >&2
+            exit 2
+          fi
+          grab=$(cd "$grab_dir" && pwd)/$(basename "$2")
+          ;;
       esac
       shift 2
       ;;

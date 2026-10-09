@@ -1,0 +1,10 @@
+# The workflows pin their actions to commit hashes; Dependabot proposes the updates.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

@@ -42,6 +42,8 @@ import java.nio.IntBuffer;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.Version;
 import org.lwjgl.opengl.GL;
+import org.lwjgl.opengl.WGL;
+import org.lwjgl.system.Platform;
 import org.lwjgl.sdl.SDL_Event;
 import org.lwjgl.sdl.SDL_KeyboardEvent;
 import org.lwjgl.sdl.SDL_MouseButtonEvent;
@@ -131,9 +133,6 @@ public final class SmokeSdl {
                 screenshot = true;
                 continue;
             }
-            if (arg.startsWith("--")) {
-                continue; // Smoke.java's other flags; not supported here
-            }
             try {
                 frames = Integer.parseInt(arg);
             } catch (NumberFormatException e) {
@@ -181,6 +180,9 @@ public final class SmokeSdl {
             SDL_SetWindowRelativeMouseMode(window, true);
         }
         GL.createCapabilities();
+        // The game's WGL context must stay current across the agent's swaps (it draws with its
+        // own context and switches back).
+        long wglContext = Platform.get() == Platform.WINDOWS ? WGL.wglGetCurrentContext() : 0;
         System.out.println("GL_VERSION " + glGetString(GL_VERSION));
         System.out.println("GL_RENDERER " + glGetString(GL_RENDERER));
 
@@ -227,6 +229,9 @@ public final class SmokeSdl {
                 }
                 if (!SDL_GL_SwapWindow(window)) {
                     throw new Fail("frame " + frame + ": SDL_GL_SwapWindow failed: " + SDL_GetError());
+                }
+                if (wglContext != 0 && WGL.wglGetCurrentContext() != wglContext) {
+                    throw new Fail("frame " + frame + ": WGL context is no longer current after swap");
                 }
                 while (SDL_PollEvent(event)) {
                     switch (event.type()) {

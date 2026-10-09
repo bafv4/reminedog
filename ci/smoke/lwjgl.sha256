@@ -1,0 +1,22 @@
+# SHA-256 of the LWJGL jars the smoke tests fetch (ci/smoke/fetch-lwjgl.sh checks each against
+# this list). A new LWJGL version needs its jars' hashes here: sha256sum <jar>.
+59e8c44b4a119da9321bb117a9edc68c8dbefb60c72c0739233ada0b6114d715  lwjgl-3.2.2-natives-windows.jar
+600591641bf3e168102cc0bc8ff31e57cd6717fcf882dbf453aa98cb92fb0a9b  lwjgl-3.2.2.jar
+1e3d07b431f9329294eb2c79036831c3ed8ab4ebc2ff6c8c37996c4ca7fc7dcb  lwjgl-glfw-3.2.2-natives-windows.jar
+45b6ec9491f09260f0c8218762c021bffe0e1b96f650891d9c773d50fdc945c9  lwjgl-glfw-3.2.2.jar
+f43182267b06c367fedf1ea2c1be6be0483bc43531bf3a736cdf388b87e86139  lwjgl-opengl-3.2.2-natives-windows.jar
+8ef989f6b6956dcafffc76a57389d46cbcec749c3b87a2a53a51dd28229f185b  lwjgl-opengl-3.2.2.jar
+5ee63a19187efe5bb8747fd24f7b13257db348df5ad641113a3695e43f213959  lwjgl-3.3.3-natives-windows.jar
+dc9c7b2d48e8396d68895f8902ffa01e46253de44dfe927533ff09457ebfeec4  lwjgl-3.3.3.jar
+98155b451dfc6f585089dec77a12f9c05789c4dceb8da472f9d308160101a70d  lwjgl-glfw-3.3.3-natives-windows.jar
+bedc757fd2b1b255146db26b74b9cbd1fcf5644b89b47b104fa721c741604259  lwjgl-glfw-3.3.3.jar
+f45e5f60596b03b2e3d8b98a123c855ebd0b5154c8155dc2a56b890ccc907477  lwjgl-opengl-3.3.3-natives-windows.jar
+5062da750e5f7ec89e27e8b67b7d40fa8c4b16890159e35f828116ce6c8eca1e  lwjgl-opengl-3.3.3.jar
+19949bca7b780f55e5d2db12ac061a7657a4c1b7c860c30607f5406e7017aa2b  lwjgl-3.4.3-natives-windows.jar
+46eeca5471833c3cf5da3c1da015b41e3bb3eb16dd3da03f366886da10096751  lwjgl-3.4.3.jar
+de2826d6bc8e73127b42250a282cbfcf91b3c3435edf7f9fd16afcabc25e88ec  lwjgl-glfw-3.4.3-natives-windows.jar
+2a60dbe93711632129a2ce6aa7e073aa58fa5450a88cde48a6af0a4dfeed606d  lwjgl-glfw-3.4.3.jar
+0e082b9203ca4112c740735789cc4dd9dcaf2032212b64ba9089ac7dca035a40  lwjgl-opengl-3.4.3-natives-windows.jar
+a92cf30f25b6fb6066f3508511f83c5c4fe2a0cff14fc2e7373bc1f6c726374f  lwjgl-opengl-3.4.3.jar
+0c76c67fb12c8ab1c88bc89bf9f87fabb313d2b4d735b274f1267f71df3613ad  lwjgl-sdl-3.4.3-natives-windows.jar
+dcb33abcbd946553176bb668be80d7adc60cb9d919ab5c71fb01fc51cacc4c8f  lwjgl-sdl-3.4.3.jar

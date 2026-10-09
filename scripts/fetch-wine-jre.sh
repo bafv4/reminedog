@@ -29,7 +29,10 @@ if [ ! -f "$java" ]; then
   python3 -m zipfile -e "$tmp/jdk4py-$version-py3-none-win_amd64.whl" "$tmp/wheel"
 
   # LWJGL needs java.base and jdk.unsupported (sun.misc.Unsafe).
-  modules=$(grep '^MODULES=' "$tmp/wheel/jdk4py/java-runtime/release")
+  modules=$(grep '^MODULES=' "$tmp/wheel/jdk4py/java-runtime/release") || {
+    echo "fetch-wine-jre: the runtime's release file lists no modules" >&2
+    exit 1
+  }
   for module in java.base jdk.unsupported; do
     case " ${modules//\"/ } " in
       *" $module "*) ;;
