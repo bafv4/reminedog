@@ -356,6 +356,10 @@ fn a_file_input_opens_no_dialog() {
     wait_for("a picture", Duration::from_secs(10), || {
         center_pixel().is_some()
     });
+    // The first picture can be the blank page from before the document loaded.
+    wait_for("the page's script", Duration::from_secs(10), || {
+        eval("window.cancelled === false") == "true"
+    });
     click([20.0, 20.0]);
     // The page hears the dialog was cancelled. Had it opened (in this process, on the browser
     // thread), the script would get no answer.

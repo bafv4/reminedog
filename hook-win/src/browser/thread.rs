@@ -15,16 +15,24 @@ use windows::Win32::System::WinRT::{
     CreateDispatcherQueueController, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT, DispatcherQueueOptions,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG,
-    PostThreadMessageW, RegisterClassExW, TranslateMessage, WINDOW_EX_STYLE, WM_QUIT, WNDCLASSEXW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer, MSG,
+    PostThreadMessageW, RegisterClassExW, SetTimer, TranslateMessage, WINDOW_EX_STYLE, WM_QUIT,
+    WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows_core::w;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
-use super::webview::Browser;
-use super::{Command, Mailbox, Start, WM_APP_COMMAND, WM_APP_FRAME, report, thread_ended};
+use super::webview::{self, Browser};
+use super::{
+    Command, Mailbox, Start, WM_APP_COMMAND, WM_APP_FRAME, last_page, report, thread_ended,
+};
 use crate::ffi;
+
+/// The timer that brings the loop back to the mailbox after a nested message loop (one that
+/// a dialog of the WebView runs) dispatched the wake-up away.
+const WAKE_TIMER: usize = 1;
+/// How often it fires, in milliseconds.
+const WAKE_INTERVAL: u32 = 100;
 
 pub(super) fn spawn(generation: u64, mailbox: Arc<Mailbox>, start: Start) -> io::Result<()> {
     std::thread::Builder::new()
@@ -109,12 +117,14 @@ fn shut_down(queue: &DispatcherQueueController) {
 
 fn run_with_window(generation: u64, mailbox: &Mailbox, start: Start, window: HWND) -> BrowserState {
     log::info!("browser: starting");
+    let url = last_page(&start.last_page).unwrap_or(start.url);
     let mut browser = match Browser::create(
         generation,
         window,
-        &start.url,
+        &url,
         start.layout,
         &start.data_dir,
+        start.last_page,
     ) {
         Ok(browser) => browser,
         Err(e) => {
@@ -138,7 +148,12 @@ fn run_with_window(generation: u64, mailbox: &Mailbox, start: Start, window: HWN
             // WM_QUIT (nobody posts it) or an error.
             return BrowserState::Off;
         }
-        if msg.hwnd == window && msg.message == WM_APP_COMMAND {
+        let wake_timer = msg.message == WM_TIMER && msg.wParam.0 == WAKE_TIMER;
+        if msg.hwnd == window && (msg.message == WM_APP_COMMAND || wake_timer) {
+            if wake_timer {
+                // SAFETY: our window's timer.
+                let _ = unsafe { KillTimer(Some(window), WAKE_TIMER) };
+            }
             if !run_commands(&mut browser, mailbox) {
                 return BrowserState::Off;
             }
@@ -150,6 +165,10 @@ fn run_with_window(generation: u64, mailbox: &Mailbox, start: Start, window: HWN
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+        }
+        // The browser's process is gone (an event handler said so): nothing will work again.
+        if let Some(state) = webview::take_ending() {
+            return state;
         }
     }
 }
@@ -219,6 +238,13 @@ fn host_window() -> windows_core::Result<HWND> {
 }
 
 extern "system" fn window_proc(window: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if msg == WM_APP_COMMAND {
+        // Only a nested message loop dispatches this (the thread's loop takes it first), and
+        // would lose it: the timer wakes the thread's loop again once that one is back.
+        // SAFETY: our own window, on its thread.
+        unsafe { SetTimer(Some(window), WAKE_TIMER, WAKE_INTERVAL, None) };
+        return LRESULT(0);
+    }
     // SAFETY: forwarding the window's own message.
     unsafe { DefWindowProcW(window, msg, wparam, lparam) }
 }

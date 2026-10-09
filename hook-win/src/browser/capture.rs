@@ -23,18 +23,23 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
 };
-use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+use windows::Win32::Graphics::Dxgi::{
+    DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, IDXGIDevice,
+};
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
 use windows_core::Interface;
 use windows_numerics::Vector2;
 
-use super::{FRAME, WM_APP_FRAME, lock, post};
+use super::{FRAME, WM_APP_FRAME, frame_changed, lock, post};
 
 /// The shortest time between two pictures (a 60 Hz cap, in 100 ns units). Windows before
 /// 11 24H2 ignores it and hands over a picture on every refresh of the screen.
 const MIN_UPDATE_INTERVAL: TimeSpan = TimeSpan { Duration: 166_667 };
+/// Times the Direct3D device is made again after the GPU removed or reset it (a driver
+/// update, a GPU switch) before the capture gives up.
+const MAX_DEVICE_RESETS: u32 = 3;
 
 pub(super) struct Capture {
     device: ID3D11Device,
@@ -54,6 +59,9 @@ pub(super) struct Capture {
     window: usize,
     frames: u64,
     started: Option<Instant>,
+    /// The size captured at ([`Capture::start`]).
+    size: Option<[u32; 2]>,
+    device_resets: u32,
 }
 
 struct Session {
@@ -70,6 +78,41 @@ impl Drop for Session {
     }
 }
 
+/// A hardware Direct3D 11 device for the capture, as WinRT wants it too.
+fn create_device() -> windows_core::Result<(ID3D11Device, ID3D11DeviceContext, IDirect3DDevice)> {
+    let mut device = None;
+    let mut context = None;
+    // SAFETY: plain out parameters.
+    unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )?;
+    }
+    let (Some(device), Some(context)) = (device, context) else {
+        return Err(windows_core::Error::from_hresult(
+            windows::Win32::Foundation::E_POINTER,
+        ));
+    };
+    let dxgi: IDXGIDevice = device.cast()?;
+    // SAFETY: a valid DXGI device.
+    let winrt_device: IDirect3DDevice =
+        unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }?.cast()?;
+    Ok((device, context, winrt_device))
+}
+
+/// Whether `error` says the GPU removed or reset the device.
+fn is_device_lost(error: &windows_core::Error) -> bool {
+    error.code() == DXGI_ERROR_DEVICE_REMOVED || error.code() == DXGI_ERROR_DEVICE_RESET
+}
+
 struct Staging {
     texture: ID3D11Texture2D,
     width: u32,
@@ -79,31 +122,7 @@ struct Staging {
 impl Capture {
     /// Needs a DispatcherQueue on this thread (the compositor and the frame pool use it).
     pub(super) fn new(generation: u64, window: HWND) -> windows_core::Result<Self> {
-        let mut device = None;
-        let mut context = None;
-        // SAFETY: plain out parameters.
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )?;
-        }
-        let (Some(device), Some(context)) = (device, context) else {
-            return Err(windows_core::Error::from_hresult(
-                windows::Win32::Foundation::E_POINTER,
-            ));
-        };
-        let dxgi: IDXGIDevice = device.cast()?;
-        // SAFETY: a valid DXGI device.
-        let winrt_device: IDirect3DDevice =
-            unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }?.cast()?;
+        let (device, context, winrt_device) = create_device()?;
         let compositor = Compositor::new()?;
         let root = compositor.CreateContainerVisual()?;
         Ok(Self {
@@ -119,12 +138,15 @@ impl Capture {
             window: window.0 as usize,
             frames: 0,
             started: None,
+            size: None,
+            device_resets: 0,
         })
     }
 
     /// Sizes the visual (in pixels) and captures it at that size from now on.
     pub(super) fn start(&mut self, size: [u32; 2]) -> windows_core::Result<()> {
         self.stop();
+        self.size = Some(size);
         let [width, height] = size.map(|v| v.max(1));
         self.root
             .SetSize(Vector2::new(width as f32, height as f32))?;
@@ -164,6 +186,7 @@ impl Capture {
 
     pub(super) fn stop(&mut self) {
         self.session = None;
+        self.size = None;
     }
 
     /// Copies the newest picture into [`FRAME`] (older ones still waiting are dropped).
@@ -180,10 +203,40 @@ impl Capture {
         let Some(frame) = newest else {
             return;
         };
-        if let Err(e) = self.copy(&frame) {
-            log::debug!("browser: copying a picture failed: {e}");
-        }
+        let copied = self.copy(&frame);
         let _ = frame.Close();
+        if let Err(e) = copied {
+            if is_device_lost(&e) {
+                self.reset_device(&e);
+            } else {
+                log::debug!("browser: copying a picture failed: {e}");
+            }
+        }
+    }
+
+    /// The GPU removed or reset the device (a driver update, a GPU switch): nothing is copied
+    /// with it again. A new device takes over, and the capture starts again on it.
+    fn reset_device(&mut self, error: &windows_core::Error) {
+        let Some(size) = self.size else {
+            return;
+        };
+        self.session = None;
+        self.staging = None;
+        if self.device_resets >= MAX_DEVICE_RESETS {
+            log::warn!("browser: the Direct3D device was lost again ({error}); no more pictures");
+            return;
+        }
+        self.device_resets += 1;
+        log::warn!("browser: the Direct3D device was lost ({error}); making a new one");
+        let restarted = create_device().and_then(|(device, context, winrt_device)| {
+            self.device = device;
+            self.context = context;
+            self.winrt_device = winrt_device;
+            self.start(size)
+        });
+        if let Err(e) = restarted {
+            log::warn!("browser: capturing again failed: {e}");
+        }
     }
 
     fn copy(&mut self, frame: &Direct3D11CaptureFrame) -> windows_core::Result<()> {
@@ -228,6 +281,7 @@ impl Capture {
                 std::mem::swap(&mut slot.bgra, &mut self.back);
                 slot.size = [width, height];
                 slot.seq += 1;
+                frame_changed();
             }
         }
         self.frames += 1;

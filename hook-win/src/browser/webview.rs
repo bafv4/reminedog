@@ -5,44 +5,79 @@
 //! loses the keyboard and minimizes): context menus, dialogs, new windows, downloads and
 //! external apps are turned off or refused.
 
-use std::path::Path;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::mpsc;
 
 use reminedog_core::browser::{MediaCommand, PageInput, PageModifiers, media_notice, media_script};
-use reminedog_render::{BrowserState, PageLayout};
+use reminedog_render::{BrowserState, Notice, PageLayout};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_BOUNDS_MODE_USE_RAW_PIXELS, COREWEBVIEW2_COLOR,
     COREWEBVIEW2_PERMISSION_STATE_DENY, COREWEBVIEW2_PROCESS_FAILED_KIND,
-    COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED, COREWEBVIEW2_SCRIPT_DIALOG_KIND,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE, COREWEBVIEW2_SCRIPT_DIALOG_KIND,
     COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT, COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD,
-    COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY, ICoreWebView2, ICoreWebView2_4, ICoreWebView2_8,
-    ICoreWebView2_10, ICoreWebView2_18, ICoreWebView2CompositionController,
-    ICoreWebView2Controller, ICoreWebView2Controller2, ICoreWebView2Controller3,
-    ICoreWebView2Environment, ICoreWebView2Environment3, ICoreWebView2EnvironmentOptions,
-    ICoreWebView2Settings3, ICoreWebView2Settings4, ICoreWebView2Settings5, ICoreWebView2Settings6,
+    COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY, ICoreWebView2, ICoreWebView2_4, ICoreWebView2_5,
+    ICoreWebView2_8, ICoreWebView2_10, ICoreWebView2_18, ICoreWebView2_27,
+    ICoreWebView2CompositionController, ICoreWebView2Controller, ICoreWebView2Controller2,
+    ICoreWebView2Controller3, ICoreWebView2Environment, ICoreWebView2Environment3,
+    ICoreWebView2EnvironmentOptions, ICoreWebView2Settings3, ICoreWebView2Settings4,
+    ICoreWebView2Settings5, ICoreWebView2Settings6,
 };
 use webview2_com::{
     AddScriptToExecuteOnDocumentCreatedCompletedHandler, BasicAuthenticationRequestedEventHandler,
-    CallDevToolsProtocolMethodCompletedHandler, CoreWebView2EnvironmentOptions,
-    CreateCoreWebView2CompositionControllerCompletedHandler, DocumentTitleChangedEventHandler,
-    DownloadStartingEventHandler, ExecuteScriptCompletedHandler, HistoryChangedEventHandler,
-    LaunchingExternalUriSchemeEventHandler, NavigationCompletedEventHandler,
-    NewWindowRequestedEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
+    CallDevToolsProtocolMethodCompletedHandler, ClientCertificateRequestedEventHandler,
+    CoreWebView2EnvironmentOptions, CreateCoreWebView2CompositionControllerCompletedHandler,
+    DocumentTitleChangedEventHandler, DownloadStartingEventHandler, ExecuteScriptCompletedHandler,
+    HistoryChangedEventHandler, LaunchingExternalUriSchemeEventHandler,
+    NavigationCompletedEventHandler, NewWindowRequestedEventHandler,
+    PermissionRequestedEventHandler, ProcessFailedEventHandler, ScreenCaptureStartingEventHandler,
     ScriptDialogOpeningEventHandler, SourceChangedEventHandler, take_pwstr,
 };
 use windows::Win32::Foundation::{HWND, RECT};
 use windows_core::{BOOL, HSTRING, Interface, PCWSTR, PWSTR};
 
 use super::capture::Capture;
-use super::{notice, report};
+use super::{keep_last_page, notice, report};
 
 /// Edge's switches: video plays without a click first (the hotkeys start it), and the page
 /// keeps drawing though its host window is never on the screen.
 const BROWSER_ARGUMENTS: &str =
     "--autoplay-policy=no-user-gesture-required --disable-features=CalculateNativeWinOcclusion";
 
-/// Run in every page before its own scripts: printing would open a dialog.
-const PAGE_SCRIPT: &str = "window.print = () => {};";
+/// Run in every page before its own scripts. Printing and the file pickers would open a
+/// dialog, and a page focusing itself might bring its window forward: they do nothing (a
+/// page then falls back to its `<input type=file>`, whose dialog is cancelled). Frames the
+/// page makes itself (`about:blank`, which the script does not run in) get the same through
+/// `contentWindow`, as far as a page reaches them that way.
+const PAGE_SCRIPT: &str = "(() => {\
+    const quiet = (w) => { try {\
+        w.print = () => {}; w.focus = () => {};\
+        delete w.showOpenFilePicker; delete w.showSaveFilePicker; delete w.showDirectoryPicker;\
+    } catch (e) {} return w; };\
+    quiet(window);\
+    const frame = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');\
+    if (frame && frame.get) {\
+        Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', { ...frame,\
+            get() { const w = frame.get.call(this); return w ? quiet(w) : w; } });\
+    }\
+})();";
+
+/// The longest address and title shown (a page can make its address hundreds of KB long);
+/// longer ones are cut, in characters.
+const MAX_SHOWN: usize = 2048;
+
+thread_local! {
+    /// How the thread's browser ended, set by an event handler for the thread's loop.
+    static ENDING: RefCell<Option<BrowserState>> = const { RefCell::new(None) };
+}
+
+/// How the browser ended, if an event said it did (once).
+pub(super) fn take_ending() -> Option<BrowserState> {
+    ENDING.with(|ending| ending.borrow_mut().take())
+}
 
 /// Japanese text for the menu, and the details for the log.
 pub(super) struct StartError {
@@ -86,13 +121,14 @@ impl Browser {
         url: &str,
         layout: PageLayout,
         data_dir: &Path,
+        last_page: PathBuf,
     ) -> Result<Self, StartError> {
         let capture = Capture::new(generation, window)
             .map_err(|e| StartError::new("画面の取り込みを準備できません", e))?;
         let environment = environment(data_dir)?;
         let composition = composition_controller(&environment, window)
             .map_err(|e| StartError::new("ブラウザを作れません", e))?;
-        let mut browser = Self::setup(generation, composition, capture, layout)
+        let mut browser = Self::setup(generation, composition, capture, layout, last_page)
             .map_err(|e| StartError::new("ブラウザを設定できません", e))?;
         browser.navigate(url);
         browser.shown = true;
@@ -105,6 +141,7 @@ impl Browser {
         composition: ICoreWebView2CompositionController,
         capture: Capture,
         layout: PageLayout,
+        last_page: PathBuf,
     ) -> windows_core::Result<Self> {
         let controller: ICoreWebView2Controller = composition.cast()?;
         // SAFETY: COM calls on the thread that created the controller.
@@ -125,7 +162,7 @@ impl Browser {
         // SAFETY: as above.
         let webview = unsafe { controller.CoreWebView2() }?;
         configure(&webview)?;
-        subscribe(&webview, generation)?;
+        subscribe(&webview, generation, last_page)?;
         let browser = Self {
             generation,
             controller,
@@ -308,7 +345,9 @@ impl Browser {
         self.eval(&media_script(command), move |json| {
             if let Some(text) = media_notice(command, json) {
                 report(generation, |shared| {
-                    shared.notices.push(notice(text, false))
+                    shared
+                        .notices
+                        .push(notice(text, false).replacing(Notice::MEDIA))
                 });
             }
         });
@@ -362,9 +401,16 @@ fn environment(data_dir: &Path) -> Result<ICoreWebView2Environment, StartError> 
 fn no_runtime_message(error: &webview2_com::Error) -> String {
     // HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND): no WebView2 Runtime installed.
     const NOT_FOUND: i32 = 0x8007_0002_u32 as i32;
+    // HRESULT_FROM_WIN32(ERROR_INVALID_STATE): the user data folder is in use with other
+    // options (another game's browser, under another version of reminedog).
+    const INVALID_STATE: i32 = 0x8007_139F_u32 as i32;
     match error {
         webview2_com::Error::WindowsError(e) if e.code().0 == NOT_FOUND => {
             "WebView2 ランタイムが見つかりません（Microsoft Edge WebView2 Runtime を入れてください）"
+                .to_owned()
+        }
+        webview2_com::Error::WindowsError(e) if e.code().0 == INVALID_STATE => {
+            "別のゲームが違う版の reminedog でブラウザを使っているので起動できません（そちらのブラウザを終了するか、版をそろえてください）"
                 .to_owned()
         }
         _ => "ブラウザを起動できません".to_owned(),
@@ -451,9 +497,15 @@ fn configure(webview: &ICoreWebView2) -> windows_core::Result<()> {
     Ok(())
 }
 
-/// Reports the page's state on its events, and refuses what would open a window.
-fn subscribe(webview: &ICoreWebView2, generation: u64) -> windows_core::Result<()> {
+/// Reports the page's state on its events, keeps the last page in `last_page`, and refuses
+/// what would open a window.
+fn subscribe(
+    webview: &ICoreWebView2,
+    generation: u64,
+    last_page: PathBuf,
+) -> windows_core::Result<()> {
     let mut token = 0i64;
+    let kept = Rc::new(RefCell::new(String::new()));
     // SAFETY: COM calls on the browser thread; every handler runs on it too.
     unsafe {
         webview.add_SourceChanged(
@@ -477,21 +529,45 @@ fn subscribe(webview: &ICoreWebView2, generation: u64) -> windows_core::Result<(
             })),
             &mut token,
         )?;
+        // A page loaded: the next start opens it (only documents loaded, not a page changing
+        // its own address, which some do all the time).
         webview.add_NavigationCompleted(
-            &NavigationCompletedEventHandler::create(Box::new(move |sender, _| {
+            &NavigationCompletedEventHandler::create(Box::new(move |sender, args| {
+                let mut success = BOOL::default();
+                if let Some(args) = &args {
+                    args.IsSuccess(&mut success)?;
+                }
+                if let Some(webview) = &sender
+                    && success.as_bool()
+                {
+                    let mut url = PWSTR::null();
+                    let _ = webview.Source(&mut url);
+                    let url = take_pwstr(url);
+                    if *kept.borrow() != url {
+                        keep_last_page(&last_page, &url);
+                        *kept.borrow_mut() = url;
+                    }
+                }
                 refresh(sender, generation);
                 Ok(())
             })),
             &mut token,
         )?;
-        // A link to a new window opens here instead.
+        // A link to a new window opens here instead; a page opening one by itself (an ad on a
+        // timer) gets nothing, as a popup blocker would.
         webview.add_NewWindowRequested(
             &NewWindowRequestedEventHandler::create(Box::new(move |sender, args| {
                 if let (Some(webview), Some(args)) = (sender, args) {
+                    let mut user = BOOL::default();
+                    args.IsUserInitiated(&mut user)?;
+                    args.SetHandled(true)?;
+                    if !user.as_bool() {
+                        log::debug!("browser: a window the user did not ask for was refused");
+                        return Ok(());
+                    }
                     let mut uri = PWSTR::null();
                     args.Uri(&mut uri)?;
                     let uri = take_pwstr(uri);
-                    args.SetHandled(true)?;
                     webview.Navigate(&HSTRING::from(uri))?;
                 }
                 Ok(())
@@ -531,13 +607,15 @@ fn subscribe(webview: &ICoreWebView2, generation: u64) -> windows_core::Result<(
                 }
                 log::warn!("browser: a browser process failed ({})", kind.0);
                 if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED {
-                    report(generation, |shared| {
-                        shared.view.state = BrowserState::Failed(
-                            "ブラウザのプロセスが終了しました（終了してから表示し直してください）"
-                                .into(),
-                        );
+                    // The WebView is dead: the thread ends, and the next show starts afresh.
+                    ENDING.with(|ending| {
+                        *ending.borrow_mut() = Some(BrowserState::Failed(
+                            "ブラウザのプロセスが終了しました（表示し直すと起動し直します）".into(),
+                        ));
                     });
-                } else {
+                } else if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
+                    || kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE
+                {
                     report(generation, |shared| {
                         shared.notices.push(notice(
                             "ページが応答しなくなりました。再読み込みしてください",
@@ -545,6 +623,7 @@ fn subscribe(webview: &ICoreWebView2, generation: u64) -> windows_core::Result<(
                         ));
                     });
                 }
+                // Other processes (a frame's, the GPU's) are made again by WebView2.
                 Ok(())
             })),
             &mut token,
@@ -568,6 +647,31 @@ fn subscribe(webview: &ICoreWebView2, generation: u64) -> windows_core::Result<(
         if let Ok(webview) = webview.cast::<ICoreWebView2_10>() {
             webview.add_BasicAuthenticationRequested(
                 &BasicAuthenticationRequestedEventHandler::create(Box::new(|_, args| {
+                    if let Some(args) = args {
+                        args.SetCancel(true)?;
+                    }
+                    Ok(())
+                })),
+                &mut token,
+            )?;
+        }
+        // A site asking for a client certificate would get the system's picker: it goes on
+        // without one.
+        if let Ok(webview) = webview.cast::<ICoreWebView2_5>() {
+            webview.add_ClientCertificateRequested(
+                &ClientCertificateRequestedEventHandler::create(Box::new(|_, args| {
+                    if let Some(args) = args {
+                        args.SetHandled(true)?;
+                    }
+                    Ok(())
+                })),
+                &mut token,
+            )?;
+        }
+        // Sharing the screen would open the system's picker.
+        if let Ok(webview) = webview.cast::<ICoreWebView2_27>() {
+            webview.add_ScreenCaptureStarting(
+                &ScreenCaptureStartingEventHandler::create(Box::new(|_, args| {
                     if let Some(args) = args {
                         args.SetCancel(true)?;
                     }
@@ -614,6 +718,7 @@ fn refresh(webview: Option<ICoreWebView2>, generation: u64) {
             forward.as_bool(),
         )
     };
+    let (url, title) = (cut(url), cut(title));
     report(generation, |shared| {
         let view = &mut shared.view;
         if view.url != url {
@@ -627,9 +732,51 @@ fn refresh(webview: Option<ICoreWebView2>, generation: u64) {
     });
 }
 
-/// `https://example.com/a?b` → `example.com`.
+/// `text` cut to [`MAX_SHOWN`] characters, with "…" when cut.
+fn cut(mut text: String) -> String {
+    if let Some((end, _)) = text.char_indices().nth(MAX_SHOWN) {
+        text.truncate(end);
+        text.push('…');
+    }
+    text
+}
+
+/// `https://example.com/a?b` → `example.com`; only the scheme of other addresses (`data`,
+/// `about`), whose rest is no host.
 fn host_of(url: &str) -> &str {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return "";
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return scheme;
+    }
+    let rest = rest.trim_start_matches('/');
     let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
     host.rsplit_once('@').map_or(host, |(_, host)| host)
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    #[test]
+    fn hosts_for_the_log() {
+        assert_eq!(host_of("https://example.com/a?b#c"), "example.com");
+        assert_eq!(
+            host_of("http://user:pw@example.com:8123/"),
+            "example.com:8123"
+        );
+        assert_eq!(host_of("data:text/html,<a href='https://x/'>"), "data");
+        assert_eq!(host_of("about:blank"), "about");
+        assert_eq!(host_of("nothing"), "");
+    }
+
+    #[test]
+    fn long_text_is_cut() {
+        assert_eq!(cut("short".into()), "short");
+        let long = "あ".repeat(MAX_SHOWN + 5);
+        let cut = cut(long);
+        assert_eq!(cut.chars().count(), MAX_SHOWN + 1);
+        assert!(cut.ends_with('…'));
+    }
 }

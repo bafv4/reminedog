@@ -9,8 +9,12 @@
 //! Nothing exists until the browser is first shown. Each start gets a new generation; the
 //! thread of an older one (still closing) no longer writes [`FRAME`] or [`SHARED`].
 //!
-//! Locks: [`CONTROL`], [`SHARED`], [`FRAME`] and a mailbox's queue are leaves: none is held
-//! while taking another one, or while calling into WebView2.
+//! The last page opened is kept in `browser.json` next to WebView2's data (not in the game
+//! folder's settings: an address can hold tokens), and the next start opens it.
+//!
+//! Locks: [`SHARED`], [`FRAME`] and a mailbox's queue are leaves: none is held while taking
+//! another one, or while calling into WebView2. [`CONTROL`] is held while a command goes into
+//! the mailbox's queue and its window is woken (never the other way round).
 //!
 //! Only the MSVC build has the browser itself. Its thread imports Direct3D 11, WinRT and
 //! COM (CoreMessaging, combase), which an agent built for Wine (GNU) could not load with:
@@ -42,7 +46,7 @@ mod thread {
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use reminedog_core::Settings;
@@ -76,6 +80,18 @@ static FRAME: Mutex<FrameSlot> = Mutex::new(FrameSlot {
     bgra: Vec::new(),
     seq: 0,
 });
+
+/// Counts the changes of [`FRAME`] (made with it locked), so the game's thread locks it only
+/// for a new picture.
+static FRAME_VERSION: AtomicU64 = AtomicU64::new(0);
+
+/// A version no picture has: [`frame_if_new`] takes the next one.
+pub const NO_PICTURE: u64 = u64::MAX;
+
+/// Notes a change of [`FRAME`]; call with it locked.
+fn frame_changed() {
+    FRAME_VERSION.fetch_add(1, Ordering::Release);
+}
 
 /// What the browser thread reports.
 #[derive(Debug, Clone)]
@@ -117,12 +133,7 @@ fn report(generation: u64, update: impl FnOnce(&mut Shared)) {
 const NOTICE_SECONDS: f64 = 2.5;
 
 fn notice(text: impl Into<String>, warn: bool) -> Notice {
-    Notice {
-        text: text.into(),
-        warn,
-        seconds: NOTICE_SECONDS,
-        arrow: None,
-    }
+    Notice::new(text, warn, NOTICE_SECONDS)
 }
 
 /// Locks one of the module's statics (a panic while holding it left nothing half done).
@@ -213,14 +224,18 @@ fn control() -> MutexGuard<'static, Control> {
 
 /// What the browser thread needs to start.
 struct Start {
+    /// The page to open when `last_page` has none.
     url: String,
     layout: PageLayout,
     /// WebView2's user data folder (cookies, cache).
     data_dir: PathBuf,
+    /// Where the last page opened is kept ([`last_page`]).
+    last_page: PathBuf,
 }
 
-/// Shows the browser, starting it on `url` if it is not running.
-pub fn show(url: &str, data_dir: PathBuf) {
+/// Shows the browser, starting it if it is not running: on the last page opened, else on
+/// `url`. `dir`: the browser's folder ([`browser_dir`]).
+pub fn show(url: &str, dir: PathBuf) {
     let mut control = control();
     control.shown = true;
     if let Some(mailbox) = &control.mailbox {
@@ -237,7 +252,8 @@ pub fn show(url: &str, data_dir: PathBuf) {
     let start = Start {
         url: url.to_owned(),
         layout: control.layout,
-        data_dir,
+        data_dir: dir.join("WebView2"),
+        last_page: dir.join("browser.json"),
     };
     drop(control);
     *lock(&SHARED) = Shared::new(generation, BrowserState::Starting);
@@ -245,6 +261,7 @@ pub fn show(url: &str, data_dir: PathBuf) {
         let mut frame = lock(&FRAME);
         frame.generation = generation;
         frame.seq = 0;
+        frame_changed();
     }
     if let Err(e) = thread::spawn(generation, mailbox, start) {
         let why = if e.kind() == std::io::ErrorKind::Unsupported {
@@ -303,14 +320,20 @@ pub fn shown() -> bool {
     control().shown
 }
 
-/// The newest picture, unless the browser thread is writing it right now (then the last one
-/// uploaded stays).
-pub fn frame() -> Option<MutexGuard<'static, FrameSlot>> {
-    match FRAME.try_lock() {
-        Ok(frame) => Some(frame),
-        Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
-        Err(TryLockError::WouldBlock) => None,
+/// The newest picture if it changed since `version` (which it updates), unless the browser
+/// thread is writing it right now (then the last one uploaded stays).
+pub fn frame_if_new(version: &mut u64) -> Option<MutexGuard<'static, FrameSlot>> {
+    let current = FRAME_VERSION.load(Ordering::Acquire);
+    if current == *version {
+        return None;
     }
+    let frame = match FRAME.try_lock() {
+        Ok(frame) => frame,
+        Err(TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(TryLockError::WouldBlock) => return None,
+    };
+    *version = current;
+    Some(frame)
 }
 
 /// What the overlay shows of the browser this frame, and the browser's new notices.
@@ -343,7 +366,7 @@ pub fn after_frame(
 ) {
     for command in commands {
         match command {
-            BrowserCommand::Show => show(&settings.browser_url, data_dir(game_dir)),
+            BrowserCommand::Show => show(&settings.browser_url, browser_dir(game_dir)),
             BrowserCommand::Hide => hide(),
             BrowserCommand::Quit => quit(),
             BrowserCommand::Navigate(url) => send(Command::Navigate(url)),
@@ -358,7 +381,7 @@ pub fn after_frame(
     for action in actions {
         match action {
             BrowserAction::Toggle if shown() => hide(),
-            BrowserAction::Toggle => show(&settings.browser_url, data_dir(game_dir)),
+            BrowserAction::Toggle => show(&settings.browser_url, browser_dir(game_dir)),
             BrowserAction::PageUp => send(Command::Scroll(-1.0)),
             BrowserAction::PageDown => send(Command::Scroll(1.0)),
             BrowserAction::PlayPause => send(Command::Media(MediaCommand::PlayPause)),
@@ -368,13 +391,40 @@ pub fn after_frame(
     }
 }
 
-/// WebView2's user data (cookies, so logins, and the cache), shared by every instance of the
-/// game: `%LOCALAPPDATA%\reminedog\WebView2`.
-fn data_dir(game_dir: &Path) -> PathBuf {
+/// The browser's own folder, shared by every instance of the game: `%LOCALAPPDATA%\reminedog`
+/// (WebView2's user data with cookies, so logins, and the cache; the last page).
+fn browser_dir(game_dir: &Path) -> PathBuf {
     match std::env::var_os("LOCALAPPDATA") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("reminedog").join("WebView2"),
-        _ => reminedog_core::data_dir(game_dir).join("WebView2"),
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("reminedog"),
+        _ => reminedog_core::data_dir(game_dir),
     }
+}
+
+/// The longest address kept as the last page.
+const MAX_LAST_PAGE: usize = 8 * 1024;
+
+/// The last page opened, from `path` (`{"url": "https://..."}`).
+fn last_page(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let url = value.get("url")?.as_str()?;
+    (is_web(url) && url.len() <= MAX_LAST_PAGE).then(|| url.to_owned())
+}
+
+/// Keeps `url` as the last page in `path`, if it is a web page of a sensible length.
+fn keep_last_page(path: &Path, url: &str) {
+    if !is_web(url) || url.len() > MAX_LAST_PAGE {
+        return;
+    }
+    let mut json = serde_json::json!({ "url": url }).to_string().into_bytes();
+    json.push(b'\n');
+    if let Err(e) = reminedog_core::write_file(path, &json) {
+        log::debug!("browser: cannot keep the last page: {e}");
+    }
+}
+
+fn is_web(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
 }
 
 /// Generation `generation` is over: the picture goes and the state says `state`.
@@ -385,6 +435,7 @@ fn stopped(generation: u64, state: BrowserState) {
             frame.generation = 0;
             frame.seq = 0;
             frame.bgra = Vec::new();
+            frame_changed();
         }
     }
     let mut shared = lock(&SHARED);
