@@ -813,3 +813,59 @@ MSVC のリリースビルドの依存は `dumpbin /dependents` で確かめた�
 - 修正：`SDL_WarpMouseInWindow` をフックし、大きさを偽っている間は y を「本当のピクセルの高さ ÷ 縦長のピクセルの高さ」倍にして、本当のウィンドウに戻す（x は幅を変えないのでそのまま）。大きさを偽っていないときは触らない。GLFW の版（1.21）はウィンドウの大きさを偽らず、フレームバッファの大きさの変更でマウスを捕まえ直さないので関係ない
 - 確かめたこと：テスト、clippy、SDL3 版のスモークテストでフックが入ること。実機では未確認（`docs/TESTING.md` のズームの項目）
 
+
+## 追記：試作：LWJGL の呼び出しを JVMTI で横取りする（2026-10-16）
+
+Linux・macOS に向けて、MinHook（関数の先頭の書き換え）を使わずに、LWJGL から GLFW・SDL3・OpenGL への呼び出しを横取りできるかを試した。
+できれば、OS が違っても同じ仕組みで済む。試作は `spike/nmb/`（本体のワークスペースの外の別のクレート。依存なし。`reminedog_nmb.dll`）。
+
+### 分かったこと（LWJGL 3.2.2・3.3.3・3.4.3 の jar と、手元のスモークで確認）
+
+- LWJGL は GLFW・SDL の関数を `JNI.invoke*`（関数のアドレスを最後の引数で渡す汎用の呼び出し）で呼ぶ。`glfwSwapBuffers` は `invokePV(JJ)V`、`SDL_GL_SwapWindow`・`SDL_PollEvent` は `invokePZ(JJ)Z`
+- `JNI.invoke*` は 3.3 までは JNI のネイティブ。ただし 3.2.2 の `lwjgl.dll` には `JavaCritical_` の入口が 1377 個あり、Java 8 では JIT がそちらを直接呼ぶことがある（NativeMethodBind の差し替えを通らない）
+- **LWJGL 3.4.3 は、Java 25 では `JNI.invoke*` を FFM（`java.lang.foreign` のダウンコール）で呼ぶ**（multi-release の jar の `META-INF/versions/25/org/lwjgl/system/JNI.class`）。
+  26.x は Java 25 なので、JNI のネイティブを差し替えても GLFW・SDL の呼び出しは見えない（試作の最初の版では、SDL3 版のスワップが 0 回だった）
+- 関数のアドレスを引くところは、どの版でも JNI のネイティブ（3.4.3 の versions/25 にもない）。Windows は `WinBase.nGetProcAddress`（3.2・3.3 は `(JJ)J`、3.4 は先頭に last error の引数が増えて `(JJJ)J`）、Linux・macOS は `DynamicLinkLoader.ndlsym(JJ)J`
+- GL の関数（`GL30C.glBindFramebuffer(II)V` など）は、どの版でも関数ごとの JNI のネイティブ（3.2.2 の `lwjgl_opengl.dll` に `JavaCritical_` はない）
+
+### 方式
+
+- `Agent_OnLoad` で JVMTI の NativeMethodBind（`can_generate_native_method_bind_events`）を有効にする。JVM がネイティブを結び付けるたびに呼ばれ、結び付けるアドレスを差し替えられる
+- GLFW・SDL：アドレスを引くネイティブを差し替える。LWJGL が `glfwSwapBuffers`・`SDL_GL_SwapWindow`・`SDL_PollEvent` を引いたら、本物のアドレスを覚えて、自分の関数（同じ C の型で、本物を呼ぶ）のアドレスを返す。
+  LWJGL がそのアドレスを JNI・`JavaCritical_`・FFM のどれで呼んでも、自分の関数に来る
+- GL：GL のネイティブ自体を差し替える（JNI の関数の型で、元のネイティブを呼ぶ）
+- 試作は、数（スワップ、`SDL_PollEvent`、`glBindFramebuffer`）と LWJGL のネイティブの結び付けを作業フォルダの `reminedog-nmb.log` に書く。
+  Windows では、スワップの直前にゲームのコンテキストで左下にマゼンタの四角を描く（opengl32 の GL 1.1、状態は戻す。`nomarker` で描かない）
+
+### 確かめたこと（2026-10-16、Windows、`ci/smoke` の `--mc`）
+
+| 組み合わせ | フレーム | 横取りしたスワップ | `glBindFramebuffer` |
+|---|---|---|---|
+| GLFW、LWJGL 3.3.3、Java 25 | 381 | 381 | 1525 |
+| SDL3、LWJGL 3.4.3、Java 25（FFM） | 382 | 382 | 1529（`SDL_PollEvent` は 398 回） |
+| GLFW、LWJGL 3.2.2、Java 8 | 384 | 384 | 1537 |
+| GLFW、LWJGL 3.2.2、Java 8、`-Xcomp`（最初から JIT） | 379 | 379 | 1517 |
+
+GLFW 版・SDL3 版とも、`PrintWindow` で撮ったウィンドウに四角が出た。
+
+実機（2026-10-16、利用者の Windows、どちらも短い起動）でも、四角が出て、スワップを横取りできた：
+
+| 版 | 横取りしたスワップ | `glBindFramebuffer`（うち 0 へ） | ほか |
+|---|---|---|---|
+| 1.21.11（Fabric＋Sodium・Iris、LWJGL 3.3.3） | 459 | 10320（5160） | |
+| 26.3（SDL3、LWJGL 3.4.3、Java 25） | 221 | 4924（2462） | `SDL_PollEvent` 368 回（イベント 148） |
+
+どちらも、フレームバッファと viewport は GL のコアのクラス（`GL30C.glBindFramebuffer`、`GL45C.glBlitNamedFramebuffer`・`glCreateFramebuffers`・`glNamedFramebufferTexture`、`GL11C.glViewport`）のネイティブで呼んでいて、EXT・ARB のクラスは使っていなかった。
+
+### 確かめていないこと
+
+- 1.16.1（Java 8・LWJGL 3.2.2 の実機）と、長く遊んだとき（JIT の後）の実機
+- Linux・macOS（`ndlsym` の差し替え。macOS の LWJGL が GLFW を `dlopen` の経路で引くか）
+- LWJGL を経ない呼び出しは見えない（GLFW・SDL の中の処理）。ゲームが登録するコールバックは、登録の関数を差し替えれば包める見込み
+- 起動時に `-agentpath:` で読み込むのが前提（途中で attach すると、結び付けの済んだネイティブは差し替えられない）
+
+### 本体に移すなら
+
+- 今の MinHook のフック（GLFW・SDL の関数）と、`wglGetProcAddress` 経由の GL のラッパー（`tall.rs`）は、この 2 つの差し替えに置き換えられる見込み。DLL の読み込みの監視（`loader.rs`）も要らなくなる。
+  OS に依存しない部分にでき、Linux・macOS で使い回せる
+- OS ごとに残る部分：自前の GL のコンテキスト（WGL／GLX・EGL／CGL）、キーの状態の安全網、フォント、クリップボード、ポインターの設定、ブラウザ

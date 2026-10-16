@@ -1,0 +1,13 @@
+[package]
+name = "reminedog-nmb-spike"
+description = "Spike: intercept LWJGL's JNI natives with JVMTI NativeMethodBind instead of detours"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "reminedog_nmb"
+crate-type = ["cdylib"]
+
+# Not part of the main workspace: builds on its own, with no dependencies, on any OS.
+[workspace]
