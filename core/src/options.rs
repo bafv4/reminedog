@@ -1,8 +1,9 @@
 //! Agent options: the text after `=` in `-agentpath:C:\x\reminedog.dll=<options>`.
 //!
 //! Comma-separated `key=value` items with case-insensitive keys:
-//! `gamedir=<path>`, `log=off|error|warn|info|debug|trace`, `overlay=on|off|true|false|1|0`
-//! and `scale=<0.5..=4>`. Problems produce warnings and leave the default in place.
+//! `gamedir=<path>`, `log=off|error|warn|info|debug|trace`, `overlay=on|off|true|false|1|0`,
+//! `scale=<0.5..=4>` and `jvmti=on|off|...`. Problems produce warnings and leave the default in
+//! place.
 
 use std::path::PathBuf;
 
@@ -16,6 +17,8 @@ pub struct AgentOptions {
     /// Draw the in-game overlay (default `true`).
     pub overlay: bool,
     pub ui_scale: Option<f32>,
+    /// See LWJGL's calls through JVMTI (default `true`); off, only the detours do.
+    pub jvmti: bool,
 }
 
 impl Default for AgentOptions {
@@ -25,6 +28,7 @@ impl Default for AgentOptions {
             log_level: None,
             overlay: true,
             ui_scale: None,
+            jvmti: true,
         }
     }
 }
@@ -92,8 +96,14 @@ pub fn parse(s: &str) -> (AgentOptions, Vec<String>) {
                     "invalid scale `{value}`; expected a number from {MIN_UI_SCALE} to {MAX_UI_SCALE}"
                 )),
             },
+            "jvmti" => match parse_bool(value) {
+                Some(on) => options.jvmti = on,
+                None => warnings.push(format!(
+                    "invalid jvmti value `{value}`; expected on, off, true, false, 1 or 0"
+                )),
+            },
             _ => warnings.push(format!(
-                "unknown option `{}`; known options are gamedir, log, overlay and scale",
+                "unknown option `{}`; known options are gamedir, log, overlay, scale and jvmti",
                 key
             )),
         }
@@ -148,6 +158,7 @@ mod tests {
     fn defaults() {
         let defaults = AgentOptions::default();
         assert!(defaults.overlay);
+        assert!(defaults.jvmti);
         assert_eq!(defaults.game_dir, None);
         assert_eq!(defaults.log_level, None);
         assert_eq!(defaults.ui_scale, None);
@@ -158,7 +169,8 @@ mod tests {
 
     #[test]
     fn all_keys() {
-        let options = parse_ok("gamedir=/home/me/.minecraft,log=debug,overlay=off,scale=1.5");
+        let options =
+            parse_ok("gamedir=/home/me/.minecraft,log=debug,overlay=off,scale=1.5,jvmti=off");
         assert_eq!(
             options,
             AgentOptions {
@@ -166,6 +178,7 @@ mod tests {
                 log_level: Some(LevelFilter::Debug),
                 overlay: false,
                 ui_scale: Some(1.5),
+                jvmti: false,
             }
         );
         assert_eq!(
@@ -243,6 +256,15 @@ mod tests {
                 "{value}"
             );
         }
+    }
+
+    #[test]
+    fn jvmti_values() {
+        assert!(!parse_ok("jvmti=off").jvmti);
+        assert!(parse_ok("JVMTI=on").jvmti);
+        let (options, warnings) = parse("jvmti=maybe");
+        assert!(options.jvmti);
+        assert_eq!(warnings.len(), 1);
     }
 
     #[test]

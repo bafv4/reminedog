@@ -29,7 +29,7 @@ core/      OS に依存しない処理（テストあり）
                InputId（キーは SDL のスキャンコード、マウスは SDL の番号）と、名前（Naming で 1.21 と 26.x を読み分ける）・ラベル・GLFW／SDL のコードの変換
   keytable.rs  26.3 と 1.21.11 のキーの名前の表（jar から抜き出した TSV から生成）
   nav.rs       方角・距離、ネザー座標の変換、guide（ウェイポイントへの案内）
-  options.rs   -agentpath:...=<オプション> の解析（gamedir, log, overlay, scale）
+  options.rs   -agentpath:...=<オプション> の解析（gamedir, log, overlay, scale, jvmti）
   gamedir.rs   ゲームフォルダの判定、reminedog/ 以下のパス
   settings.rs  settings.json（キー、ズームの倍率、キーの置き換えなど）
   logfile.rs   log クレートのファイル出力
@@ -50,6 +50,8 @@ hook-win/  Windows のエージェント（reminedog.dll）
   lib.rs/agent.rs  Agent_OnLoad。オプション、ログ、パニックフック
   loader.rs    LdrRegisterDllNotification で DLL の読み込みを監視（glfw / SDL3 / opengl32）
   hook.rs      MinHook によるデトア
+  jvmti.rs     JVMTI の NativeMethodBind：LWJGL の WinBase.nGetProcAddress を差し替え、glfwSwapBuffers・SDL_GL_SwapWindow を引いたら自前の関数を渡す（Substitute）。
+               スワップは MinHook のフックからも来るので、frame::SwapEntry で先に来た方だけが処理する
   glfw.rs, glfw_input.rs  GLFW（Minecraft 1.21 まで）：glfwSwapBuffers、コールバックの差し替え。F3+C（glfwSetClipboardString・glfwGetKey のフック、キーコールバックへの送信）。
                           キーの置き換え（出力をコールバックで送る、mods の補正、glfwGetKey の偽装）
   sdl.rs, sdl_input.rs    SDL3（Minecraft 26.x）：SDL_GL_SwapWindow、SDL_PollEvent のフィルタ。F3+C（SDL_SetClipboardText のフック、キーのイベントの注入）。
@@ -150,6 +152,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 | キーの置き換え（キーとマウスのボタン、ゲーム中だけ。メニューの「キーの置き換え」） | 手元のスモーク（GLFW・SDL3）で確認済み。実機では未確認 |
 | ゲーム内ブラウザ（WebView2。メニューで表示・移動・大きさの変更・ページの操作、ゲーム中の PageUp／PageDown と ↓←→ の動画の操作） | WebView2 を動かすテストと手元のスモーク（GLFW）で確認済み。実機では未確認 |
 | インストーラー（公式ランチャー、MultiMC、Prism Launcher、MCSR Launcher） | 設定ファイルの写しに対して画面から操作して確認済み、Java 8・17・21・25 で表示を確認。本物のランチャーでは未確認。ダウンロードと「最新版に更新」はリリースがないので失敗する（置き換えは単体テストで確認） |
+| スワップを JVMTI の差し替えで受ける（`jvmti.rs`。Linux・macOS への準備の段階 1） | 手元のスモーク（GLFW 3.3.3・SDL3 3.4.3・Java 8 の 3.2.2）で確認済み。実機では未確認。試作（`spike/nmb/`）は実機の 1.21.11・26.3 で確認済み |
 | 監査（`docs/AUDIT-2026-10-09.md`）の全件の修正 | テスト・clippy・インストーラーのビルドで確認。実機では未確認（`docs/TESTING.md` の「監査の修正で確認すること」）。設計は HANDOFF.md の「追記：監査の修正」 |
 
 ### 高精細のズームの仕組み（`hook-win/src/tall.rs`）

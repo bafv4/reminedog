@@ -50,7 +50,7 @@ pub const VERSION: &str = env!("REMINEDOG_VERSION");
 /// Identifies the build in logs; CI sets it to the commit hash ("local" otherwise).
 pub const BUILD_ID: &str = env!("REMINEDOG_BUILD_ID");
 
-pub fn on_load(raw_options: &str) {
+pub fn on_load(raw_options: &str, vm: *mut std::ffi::c_void) {
     if GLOBALS.get().is_some() {
         // The same DLL twice in the JVM's arguments: the JVM calls Agent_OnLoad again.
         log::warn!(
@@ -116,6 +116,12 @@ pub fn on_load(raw_options: &str) {
 
     if globals().is_some_and(|globals| globals.options.overlay) {
         crate::fonts::preload();
+    }
+    if globals().is_some_and(|globals| globals.options.jvmti) {
+        // SAFETY: the JavaVM the JVM passed Agent_OnLoad.
+        if let Err(e) = unsafe { crate::jvmti::start(vm) } {
+            log::warn!("jvmti: not started, only the detours see the game's calls: {e}");
+        }
     }
     if let Err(e) = crate::loader::watch() {
         log::error!("cannot watch DLL loads, the overlay will not work: {e}");

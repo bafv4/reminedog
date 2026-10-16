@@ -280,6 +280,7 @@ Windows に入っている Microsoft Edge WebView2 ランタイムを使いま�
 | `log`     | `off` / `error` / `warn` / `info` / `debug` / `trace`    | `info`                                   |
 | `overlay` | `on` / `off`（`off` ならフックだけ入れて何も描きません） | `on`                                     |
 | `scale`   | UI の拡大率（0.5〜4）                                    | `1`                                      |
+| `jvmti`   | `on` / `off`（`off` ならスワップを MinHook のフックだけで受けます。うまく動かないときの切り分け用） | `on` |
 
 ### ログとうまく動かないとき
 
@@ -296,6 +297,8 @@ Windows に入っている Microsoft Edge WebView2 ランタイムを使いま�
 
 - `reminedog.dll` は JVM のエージェント（JVMTI の `Agent_OnLoad` を持つ DLL）として、ゲームのコードより先に読み込まれます。そこでオプションとログを準備し、DLL の読み込みの監視（`LdrRegisterDllNotification`）を始めます
 - ゲームが LWJGL のウィンドウのライブラリ（1.21 までは GLFW、26.x は SDL3）と `opengl32.dll` を読み込んだら、必要な関数に MinHook でフック（デトア）を入れます。フックの中で問題が起きても、ゲームは止めません（失敗したら何もしません）
+- あわせて JVMTI の NativeMethodBind で、LWJGL が関数のアドレスを引くネイティブ（`WinBase.nGetProcAddress`）を差し替えます。LWJGL がスワップの関数（`glfwSwapBuffers`・`SDL_GL_SwapWindow`）を引いたら、reminedog の関数を渡します。
+  コードを書き換えずに済むので、ほかの OS でも同じ仕組みを使えます。今は MinHook のフックも残していて、先に呼ばれた方がそのフレームを処理します
 
 ### オーバーレイの描画
 

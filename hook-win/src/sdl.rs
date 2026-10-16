@@ -1,11 +1,12 @@
 //! SDL3, which Minecraft 26.x opens its window with instead of GLFW (LWJGL 3.4).
 //!
 //! 26.x renders with OpenGL through SDL3 (its "RenderPearl OpenGL" backend), so the overlay
-//! works as with GLFW: `SDL_GL_SwapWindow` is detoured and hands each frame to
-//! [`frame::before_swap`]. `SDL_GetWindowSizeInPixels` reports the tall size during the
-//! high-resolution zoom ([`crate::tall`]), and `SDL_WarpMouseInWindow` maps the game's warps
-//! from that size back into the real window. The other detours only log how the game uses SDL3
-//! (window flags, OpenGL context or Vulkan surface), for diagnosing future versions.
+//! works as with GLFW: `SDL_GL_SwapWindow` is detoured, and handed to LWJGL as the agent's own
+//! function when it looks it up ([`crate::jvmti`]); each frame goes to [`frame::before_swap`].
+//! `SDL_GetWindowSizeInPixels` reports the tall size during the high-resolution zoom
+//! ([`crate::tall`]), and `SDL_WarpMouseInWindow` maps the game's warps from that size back
+//! into the real window. The other detours only log how the game uses SDL3 (window flags,
+//! OpenGL context or Vulkan surface), for diagnosing future versions.
 //!
 //! Only one window library is hooked, the first loaded: a mod's SDL (controller support) in
 //! a GLFW game is left alone.
@@ -20,6 +21,7 @@ use windows_sys::Win32::Foundation::{HMODULE, HWND};
 use crate::ffi;
 use crate::frame::{self, WindowSystem};
 use crate::hook::{self, export};
+use crate::jvmti::Substitute;
 
 type CreateWindowFn =
     unsafe extern "C" fn(title: *const c_char, w: c_int, h: c_int, flags: u64) -> *mut c_void;
@@ -54,6 +56,8 @@ static GET_WINDOW_SIZE_IN_PIXELS: OnceLock<GetWindowSizeInPixelsFn> = OnceLock::
 static VULKAN_CREATE_SURFACE: OnceLock<VulkanCreateSurfaceFn> = OnceLock::new();
 static WARP_MOUSE_IN_WINDOW: OnceLock<WarpMouseInWindowFn> = OnceLock::new();
 static SDL: OnceLock<Sdl> = OnceLock::new();
+/// The real SDL_GL_SwapWindow, behind the function LWJGL was handed.
+pub static LWJGL_GL_SWAP_WINDOW: Substitute = Substitute::new();
 
 static ATTACHED: Mutex<bool> = Mutex::new(false);
 static RENDERER_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -369,10 +373,29 @@ unsafe extern "C" fn gl_create_context_detour(window: *mut c_void) -> *mut c_voi
 }
 
 unsafe extern "C" fn gl_swap_window_detour(window: *mut c_void) -> bool {
-    let Some(original) = GL_SWAP_WINDOW.get() else {
+    let Some(&original) = GL_SWAP_WINDOW.get() else {
         return false;
     };
-    ffi::catch("SDL_GL_SwapWindow detour", || {
+    // SAFETY: same arguments the caller passed us.
+    gl_swap_window(window, "the detour", || unsafe { original(window) })
+}
+
+/// What LWJGL calls as SDL_GL_SwapWindow.
+pub unsafe extern "C" fn lwjgl_gl_swap_window(window: *mut c_void) -> bool {
+    let Some(real) = LWJGL_GL_SWAP_WINDOW.real::<GlSwapWindowFn>() else {
+        return false;
+    };
+    // SAFETY: same arguments LWJGL passed us.
+    gl_swap_window(window, "the function LWJGL looked up", || unsafe {
+        real(window)
+    })
+}
+
+fn gl_swap_window(window: *mut c_void, path: &str, original: impl FnOnce() -> bool) -> bool {
+    let Some(_entry) = frame::SwapEntry::begin("SDL_GL_SwapWindow", path) else {
+        return original();
+    };
+    ffi::catch("SDL_GL_SwapWindow", || {
         let n = SWAPS.fetch_add(1, Ordering::Relaxed) + 1;
         if n == 1 {
             log::info!("SDL_GL_SwapWindow: first frame");
@@ -382,8 +405,7 @@ unsafe extern "C" fn gl_swap_window_detour(window: *mut c_void) -> bool {
         }
     });
     let swapping = crate::tall::Swapping::begin();
-    // SAFETY: same arguments the caller passed us.
-    let swapped = unsafe { original(window) };
+    let swapped = original();
     drop(swapping);
     ffi::catch("rebinds", || crate::sdl_input::release_lost_keys(window));
     ffi::catch("hotkeys", crate::rebind_state::forget_lost_presses);

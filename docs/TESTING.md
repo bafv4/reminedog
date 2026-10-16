@@ -391,6 +391,16 @@ J と K は、Minecraft の F3+C で座標を取る。reminedog が送った F3+
 
 うまく動かないときは `=log=debug` を付けて起動し、ログを送ってほしい。26.x では、ログの `SDL3 input:` で始まる行が特に知りたい（ゲームが入力をどの関数で読んでいるかが分かる）。
 
+## スワップを JVMTI で受ける変更で確認すること（2026-10-16）
+
+1.21.11 と 26.3 の両方で、いつもの `-agentpath:C:\reminedog\reminedog.dll`（26.3 は `=log=debug` 付き）で起動する。
+
+- [ ] オーバーレイ（左上のヒント、Ctrl+I のメニュー）が今までどおり出る
+- [ ] ログに `the game's swaps come through the function LWJGL looked up` の行がある（1.21.11 は `glfwSwapBuffers:`、26.3 は `SDL_GL_SwapWindow:` で始まる）
+- [ ] 高精細のズーム（Z）が今までどおり動く。26.3 ではズーム中にクリックしても、マウスが外れない
+- [ ] しばらく（10 分ほど）遊んでも、オーバーレイが消えない（JIT が働いた後も、同じ経路で来る）
+- [ ] `=jvmti=off` を付けて（26.3 は `=log=debug,jvmti=off`）起動すると、ログが `... come through the detour` になり、オーバーレイも出る。確かめたら外す
+
 ## プロトタイプ 1 で確認したこと
 
 メニューの「状態」か、「メニューを閉じても状態を表示する」をオンにすると、次の情報が出る。
@@ -429,6 +439,8 @@ J と K は、Minecraft の F3+C で座標を取る。reminedog が送った F3+
 | `agent loaded` | JVM が DLL を読み込んだ |
 | `DLL loaded: ...glfw.dll` | LWJGL が GLFW を読み込んだ場所（資料の未検証の前提 1） |
 | `GLFW hooks installed` | `glfwSwapBuffers` をフックできた |
+| `jvmti: LWJGL looked up glfwSwapBuffers; it calls the agent's function` | LWJGL がスワップの関数を引いたときに、reminedog の関数を渡した（26.x は `SDL_GL_SwapWindow`） |
+| `...: the game's swaps come through ...` | ゲームのスワップがどちらの経路で来たか。`the function LWJGL looked up` なら JVMTI の差し替え、`the detour` なら MinHook のフック |
 | `OpenGL hooks installed` | 高精細のズームのために `wglGetProcAddress` をフックできた |
 | `F3+C: clipboard hooks ready` | 座標を取るためのフック（クリップボード、キー）が揃った。`F3+C: hooks missing; no waypoints` なら、ウェイポイントは使えない |
 | `settings: ...` | 設定ファイルの場所と、メニュー・ズーム・記録・更新のキー、キーの置き換えの数（`rebinds N`。「キーの置き換えを使う」が外れていれば `rebinds off (N)`） |

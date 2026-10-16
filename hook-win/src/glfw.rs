@@ -1,8 +1,9 @@
 //! The GLFW library LWJGL loads, and the detours on it.
 //!
 //! LWJGL resolves GLFW's exports once with `GetProcAddress` and calls through the saved
-//! pointers, so patching the functions' first instructions (inline detour) is the only
-//! way to see those calls; import-table hooks would not.
+//! pointers, so patching the functions' first instructions (inline detour) sees those calls;
+//! import-table hooks would not. `glfwSwapBuffers` is also handed to LWJGL as the agent's
+//! own function when it looks it up ([`crate::jvmti`]).
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::{Mutex, OnceLock};
@@ -15,6 +16,7 @@ use windows_sys::Win32::Foundation::{HMODULE, HWND};
 use crate::ffi;
 use crate::frame::{self, WindowSystem};
 use crate::hook::{self, export};
+use crate::jvmti::Substitute;
 
 type SwapBuffersFn = unsafe extern "C" fn(window: *mut c_void);
 type GetFramebufferSizeFn =
@@ -117,6 +119,8 @@ static GLFW: OnceLock<Glfw> = OnceLock::new();
 static SWAP_BUFFERS: OnceLock<SwapBuffersFn> = OnceLock::new();
 /// Trampoline to the original glfwGetFramebufferSize (the overlay needs the real size).
 static GET_FRAMEBUFFER_SIZE: OnceLock<GetFramebufferSizeFn> = OnceLock::new();
+/// The real glfwSwapBuffers, behind the function LWJGL was handed.
+pub static LWJGL_SWAP_BUFFERS: Substitute = Substitute::new();
 /// Serializes `attach`; the loader lock already does, but don't rely on it.
 static ATTACH: Mutex<()> = Mutex::new(());
 
@@ -203,16 +207,37 @@ fn install(module: HMODULE, path: &str) -> Result<Glfw, String> {
 }
 
 unsafe extern "C" fn swap_buffers_detour(window: *mut c_void) {
-    ffi::catch("glfwSwapBuffers detour", || {
+    let Some(&original) = SWAP_BUFFERS.get() else {
+        return;
+    };
+    // SAFETY: same arguments GLFW's caller passed us.
+    swap_buffers(window, "the detour", || unsafe { original(window) });
+}
+
+/// What LWJGL calls as glfwSwapBuffers.
+pub unsafe extern "C" fn lwjgl_swap_buffers(window: *mut c_void) {
+    let Some(real) = LWJGL_SWAP_BUFFERS.real::<SwapBuffersFn>() else {
+        return;
+    };
+    // SAFETY: same arguments LWJGL passed us.
+    swap_buffers(window, "the function LWJGL looked up", || unsafe {
+        real(window)
+    });
+}
+
+fn swap_buffers(window: *mut c_void, path: &str, original: impl FnOnce()) {
+    let Some(_entry) = frame::SwapEntry::begin("glfwSwapBuffers", path) else {
+        original();
+        return;
+    };
+    ffi::catch("glfwSwapBuffers", || {
         if let Some(glfw) = GLFW.get() {
             frame::before_swap(glfw, window);
         }
     });
-    if let Some(original) = SWAP_BUFFERS.get() {
-        let _swapping = crate::tall::Swapping::begin();
-        // SAFETY: same arguments GLFW's caller passed us.
-        unsafe { original(window) };
-    }
+    let swapping = crate::tall::Swapping::begin();
+    original();
+    drop(swapping);
     // Starting or ending the zoom: the game resizes right away, between two frames.
     if let Some((window, [w, h])) = crate::tall::take_pending() {
         crate::glfw_input::send_framebuffer_size(window, w, h);

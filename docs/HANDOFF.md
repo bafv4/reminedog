@@ -869,3 +869,16 @@ GLFW 版・SDL3 版とも、`PrintWindow` で撮ったウィンドウに四角�
 - 今の MinHook のフック（GLFW・SDL の関数）と、`wglGetProcAddress` 経由の GL のラッパー（`tall.rs`）は、この 2 つの差し替えに置き換えられる見込み。DLL の読み込みの監視（`loader.rs`）も要らなくなる。
   OS に依存しない部分にでき、Linux・macOS で使い回せる
 - OS ごとに残る部分：自前の GL のコンテキスト（WGL／GLX・EGL／CGL）、キーの状態の安全網、フォント、クリップボード、ポインターの設定、ブラウザ
+
+## 追記：スワップを JVMTI で受ける（2026-10-16）
+
+試作の方式を本体に移す段階 1。段階は、1 スワップ → 2 入力（GLFW のコールバックの登録、`SDL_PollEvent`、クリップボード、キーの状態）→ 3 高精細のズーム（GL のネイティブの差し替え）→ 4 MinHook と `loader.rs` を外し、OS に依存しない部分を分ける。
+
+- `hook-win/src/jvmti.rs`：`Agent_OnLoad` で NativeMethodBind を有効にし（`AgentOptions::jvmti`、既定でオン。`jvmti=off` で止める）、`WinBase.nGetProcAddress`（`(JJ)J` と `(JJJ)J`）を差し替える。
+  LWJGL が引いた名前が `substitute` の表にあれば、本物のアドレスを `Substitute` に覚え、自前の関数（`glfw::lwjgl_swap_buffers`・`sdl::lwjgl_gl_swap_window`）を返す
+- MinHook のスワップのフックは残す。LWJGL が呼ぶ自前の関数 → 本物（MinHook で書き換えてある）→ フック、の順に同じスワップが 2 回来るので、`frame::SwapEntry`（スレッドごとの印）で先に来た方だけが処理し、後の方は元の関数を呼ぶだけにする。
+  どちらの経路で来たかを最初の 1 回だけログに出す（`... the game's swaps come through ...`）。CI のスモークは、3 つの組み合わせで `the function LWJGL looked up` を確かめる
+- 今のところ、ほかのフック（入力、大きさの偽装、ズームの GL のラッパー）は MinHook のまま。ゲームのウィンドウのライブラリの検出（`Glfw`・`Sdl` の関数の表）も `loader.rs` のまま
+
+確かめたこと：テスト、clippy（警告 0）、手元のスモーク（GLFW 3.3.3＋Java 25、SDL3 3.4.3＋Java 25、GLFW 3.2.2＋Java 8＋`-Xcomp`）で LWJGL の経路から来てオーバーレイが描かれること、`jvmti=off` でフックの経路になること、GLFW 版でズームが縦長で描かれること。
+確かめていないこと：実機（`docs/TESTING.md` の「スワップを JVMTI で受ける変更で確認すること」）
