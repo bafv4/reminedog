@@ -1,0 +1,20 @@
+[package]
+name = "reminedog-hook-linux"
+description = "Linux JVMTI agent: the agent with Linux's Os (dlsym, GLX, fontconfig)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# Not "reminedog": hook-win builds an empty libreminedog.so on Linux (and this crate an empty
+# reminedog_linux.dll on Windows), and two libraries of one name would collide.
+name = "reminedog_linux"
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+reminedog-agent.workspace = true
+reminedog-core.workspace = true
+reminedog-render.workspace = true
+libc.workspace = true
+log.workspace = true

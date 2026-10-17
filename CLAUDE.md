@@ -2,7 +2,7 @@
 
 Minecraft Java Edition（1.13 以降、26.x を含む）のサバイバル向けゲーム内ツール。
 Mod ではなく、JVM に `-agentpath:` で読み込ませる Rust 製のネイティブのエージェント（JVMTI）。ゲームのウィンドウにオーバーレイ（egui）を描き、入力を横取りする。
-まず Windows。Linux は後回し。
+まず Windows。Linux（X11）は作り始めたところ（`hook-linux/`。手元のスモークで動く。本物のゲームでは未確認）。
 
 - 設計と経緯：[docs/HANDOFF.md](docs/HANDOFF.md)（最初の設計資料に、実装で分かったことを「追記」として順に足している）
 - 使い方：[README.md](README.md)
@@ -78,6 +78,13 @@ hook-win/  Windows のエージェント（reminedog.dll）：agent に Windows 
   fonts.rs     日本語フォント（游ゴシック → メイリオ → MS ゴシック）。読み込みの直後に別スレッドで読み、プロセスの間持つ
   browser.rs   ゲーム内ブラウザ（WebView2）のゲームのスレッド側：表示・非表示・終了、コマンドのメールボックス、状態、最新の絵（FRAME）。Os::browser の WebView2
   browser/     ブラウザのスレッド（thread.rs）、WebView2 の作成・設定・イベント（webview.rs）、画面の取り込み（capture.rs）。MSVC のビルドだけ（GNU では外す）
+hook-linux/ Linux のエージェント（libreminedog_linux.so。hook-win が Linux で空の libreminedog.so を作るので、名前を分けた）：agent に Linux の Os を渡す
+  lib.rs/agent.rs  Agent_OnLoad。オプション、ログ、パニックフック、globals::init、os::set、jvmti::start
+  linux.rs     Linux の Os（dlsym・dlinfo、glfwGetX11Window・SDL.window.x11.window、GLX、fonts）。物理のキーの状態・クリップボード・ポインターの速度はまだ読まない。ブラウザはない
+  glx.rs       GLX（ゲームが読み込んだ libGL・libX11 から引く）：今のコンテキストと描画先、ゲームのコンテキストの GLX_FBCONFIG_ID で自前のコンテキストを作る、
+               切り替え・削除。Xlib の既定のエラー処理はプロセスを終えるので、失敗しうる呼び出しは自前のエラー処理の下で行う（trap_x_errors）
+  dl.rs        dlsym、dlinfo（ライブラリのパス）、RTLD_NOLOAD で読み込み済みのライブラリ
+  fonts.rs     日本語フォント（fc-match の sans-serif:lang=ja、なければ Noto Sans CJK・IPA ゴシックのよくある場所）。読み込みの直後に別スレッドで読む
 installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）。Java 8 以降で動く 1 つの jar（reminedog-installer.jar）
   Main.kt            FlatLaf（Windows のダークモードに合わせる）と画面の起動
   InstallerFrame.kt  画面：DLL（GitHub からダウンロードするか、PC のファイル）、インスタンスの一覧と状態、インストール／アンインストール、
@@ -113,7 +120,11 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 - Linux（Docker。手元は Docker Desktop と WSL2）：`scripts/linux/run.sh <コマンド>` で、`scripts/linux/Dockerfile` のコンテナ（Java 25、CI と同じ Rust、Xvfb、Mesa の llvmpipe）の中で動かす。
   リポジトリは `/src`、ビルドの出力は `/target`（Docker のボリューム）。`scripts/linux/run.sh cargo test -p reminedog-agent`、
   `scripts/linux/run.sh scripts/linux/smoke.sh --agent /target/release/<.so> [--sdl --lwjgl 3.4.3] -- --seconds=5 --mc`（LWJGL の natives-linux の jar は `ci/smoke/fetch-lwjgl.sh` が `LWJGL_NATIVES=natives-linux` で取る）。
-  Docker Desktop が止まっていると動かない（利用者に起動してもらう）。シェルスクリプトと Dockerfile は `.gitattributes` で LF
+  Docker Desktop が止まっていると動かない（利用者に起動してもらう）。シェルスクリプトと Dockerfile は `.gitattributes` で LF。
+  Linux のエージェントは `scripts/linux/run.sh cargo build --release -p reminedog-hook-linux`（`/target/release/libreminedog_linux.so`）。
+  キーは `smoke.sh --xdotool "key j sleep 2 keydown z sleep 1.5 keyup z" -- --seconds=10 --mc --capture --world=test` のように送る（ウィンドウマネージャがないので、GLFW のウィンドウは名前で探してフォーカスを移す。
+  SDL3 は自分でフォーカスを取る。SDL3 のウィンドウの名前は `_NET_WM_NAME` だけで xdotool から見えないので、別のウィンドウにフォーカスを移すと SDL3 がフォーカスを失い、キーのイベントのウィンドウ番号が 0 になる）。
+  コンテナを止めるときは `docker ps --filter ancestor=reminedog-linux -q | xargs -r docker kill`（ほかのコンテナに触れない）
 - Linux からは `--target x86_64-pc-windows-gnu` で DLL をビルドし、`scripts/wine-smoke.sh` で試せる（README の「開発」）。Windows では DLL を置いてゲームで確かめるのが早い
 - テスト用プログラムを Windows で直接動かすなら、`ci/smoke/*.java` を LWJGL の jar と一緒にコンパイルし、`java -agentpath:...\reminedog.dll -cp ... Smoke --seconds=20 --capture --mc` のように動かす（`.github/workflows/ci.yml` の `smoke-windows` ジョブが手順の見本）。
   Prism の libraries に LWJGL のネイティブの jar がないときは、ゲームが展開したもの（`-Dorg.lwjgl.librarypath=%TEMP%\lwjgl_yuanq\3.3.3+5\x64` など）を使う
@@ -167,6 +178,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 | ゲーム内ブラウザ（WebView2。メニューで表示・移動・大きさの変更・ページの操作、ゲーム中の PageUp／PageDown と ↓←→ の動画の操作） | WebView2 を動かすテストと手元のスモーク（GLFW）で確認済み。実機では未確認 |
 | インストーラー（公式ランチャー、MultiMC、Prism Launcher、MCSR Launcher） | 設定ファイルの写しに対して画面から操作して確認済み、Java 8・17・21・25 で表示を確認。本物のランチャーでは未確認。ダウンロードと「最新版に更新」はリリースがないので失敗する（置き換えは単体テストで確認） |
 | フックを JVMTI の差し替えだけで渡す（`agent/` の `jvmti.rs`・`library.rs`・`hook.rs`・`tall.rs`。Linux・macOS への準備の段階 1〜4） | MinHook をやめた版（ズーム中の OBS の録画の修正を含む）は実機の 1.21.11・26.3 で確認済み。エージェント本体を `agent/` に移し、OS に頼ることを `Os` に分けた版は手元のスモーク（Windows）と、Linux のビルド・テストで確認済み |
+| Linux（`hook-linux/`。X11 の GLX） | Docker の Xvfb＋Mesa のスモーク（GLFW 3.3.3・3.2.2、SDL3 3.4.3）で、オーバーレイ（日本語）、メニュー、J でウェイポイント、Z の高精細のズームまで確認済み（CI の `smoke-linux` も同じ）。本物のゲーム・Wayland（EGL）・物理のキーの状態・クリップボード・ポインターの速度は未対応 |
 | 監査（`docs/AUDIT-2026-10-09.md`）の全件の修正 | テスト・clippy・インストーラーのビルドで確認。実機では未確認（`docs/TESTING.md` の「監査の修正で確認すること」）。設計は HANDOFF.md の「追記：監査の修正」 |
 
 ### 高精細のズームの仕組み（`hook-win/src/tall.rs`）
@@ -217,7 +229,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
    - インストーラーのダウンロードには、公開されたリポジトリの公開済みのリリース（`release.yml` で作った下書きを公開したもの）が要る（今は非公開でリリースもない）
 2. CI のスモークテストで F3+C とキーの置き換えを確かめる（`--world`・`--f3c-refuse`、settings.json のルールと `--screen-key`・`--watch-keys` を使い、マーカーに `F3+C: clipboard hooks ready`・`SETALL` などを足す。今の CI は新しいオプションを使っていない。`scripts/wine-smoke.sh` もまだ渡せない）
 3. IME の変換中の文字をメニューの入力欄に出す（今は確定した文字だけ）
-4. Linux（Fedora）・macOS 対応。フックは JVMTI で渡す（`DynamicLinkLoader.ndlsym` を差し替える）ので、デトアは要らない。OS に依存しない部分をクレートに分け、自前のコンテキスト（GLX／EGL、CGL）などを OS ごとに書く。方針は HANDOFF.md の「追記：試作：LWJGL の呼び出しを JVMTI で横取りする」以降
+4. Linux の続き（`hook-linux/`）：本物のゲーム（WSLg か本物の Linux）、Wayland（EGL）、物理のキーの状態（安全網）、クリップボード、ポインターの速度、メニューのブラウザの欄（Linux では使えない）。macOS（CGL）。方針は HANDOFF.md の「追記：試作：LWJGL の呼び出しを JVMTI で横取りする」以降
 
 ## 開発環境についての注意
 

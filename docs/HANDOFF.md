@@ -999,3 +999,22 @@ OS に頼ることを `agent/src/os.rs` の `Os`（とブラウザの `Browser`�
 GLFW のスモークで B でブラウザが開いて絵が取り込まれた。
 確かめていないこと：実機（動きは変えていないつもり）。次は Linux の `Os`（`hook-linux`）
 
+## 追記：Linux のエージェント（2026-10-18）
+
+`hook-linux/`（`libreminedog_linux.so`）。`agent` に Linux の `Os` を渡すだけで、Windows と同じ処理（JVMTI のフック、F3+C、ズーム、オーバーレイ）が動く。まず X11 の GLX。
+
+- 名前：`hook-win` は Linux では空の `libreminedog.so` を作るので、ワークスペースで名前がぶつからないよう `reminedog_linux` にした（リリースのときに名前を変えて配ってもよい）
+- `linux.rs`：関数の引き当ては `dlsym`（LWJGL の `ndlsym` に渡るハンドル）、パスは `dlinfo(RTLD_DI_LINKMAP)`。GLFW のネイティブのウィンドウは `glfwGetX11Window`、SDL3 は数のプロパティ `SDL.window.x11.window`
+- ウィンドウの描画先は、スワップの時点の `glXGetCurrentDrawable`。GLFW は X11 で `glXCreateWindow` の GLX ウィンドウに描くので、X のウィンドウとは別
+- `glx.rs`：自前のコンテキストは、ゲームのコンテキストの `GLX_FBCONFIG_ID` と `GLX_SCREEN` を `glXQueryContext` で聞き、`glXChooseFBConfig` で同じ設定を取って `glXCreateNewContext`（共有なし、直接描画）で作る。
+  切り替えは `glXMakeContextCurrent`（描画と読み取りを同じ描画先に）。ディスプレイはゲームのコンテキストが今のときの `glXGetCurrentDisplay` を覚える。
+  Xlib の既定のエラー処理はプロセスを終える（ゲームが落ちる）ので、作成・切り替え・削除は `XSetErrorHandler` で自前の処理に替え、`XSync` までのエラーを拾って元に戻す
+- フォント：`fc-match --format=%{file}\n%{index} sans-serif:lang=ja`、なければ Noto Sans CJK と IPA ゴシックのよくある場所
+- まだ：物理のキーの状態（安全網は何も離さない）、クリップボード、ポインターの速度（相対移動をそのまま使う）、ブラウザ（なし。メニューに欄は出る）、Wayland（EGL。今のコンテキストが GLX でなければ作れずにオーバーレイが止まる）
+- 確かめるとき：`scripts/linux/smoke.sh` に `--xdotool` を足した。Xvfb にはウィンドウマネージャがないので `windowactivate` は返ってこない。GLFW のウィンドウは名前で探して `windowfocus` で、
+  SDL3 は自分でフォーカスを取る（SDL3 のウィンドウの名前は `_NET_WM_NAME` だけで xdotool の `--name` に当たらず、画面全体の別のウィンドウにフォーカスを移すと SDL3 がフォーカスを失って、キーのイベントのウィンドウ番号が 0 になり、ゲーム中と見なされない）
+
+確かめたこと（Docker、Xvfb＋Mesa の llvmpipe）：fmt、clippy（警告 0）、テスト。GLFW 3.3.3・3.2.2、SDL3 3.4.3 のスモークで、オーバーレイ（日本語の案内、Ctrl+I のメニュー）、F3+C のフック、J でウェイポイントの記録、Z の高精細のズーム（854x1920）、スワップの間の結び付け直し。警告・エラーなし。
+CI に `smoke-linux`（同じ 3 つの組み合わせ、Java 25）を足した。
+確かめていないこと：本物のゲーム（WSLg か本物の Linux）、本物の GPU のドライバー（NVIDIA など）、Wayland
+

@@ -350,9 +350,10 @@ core/      OS に依存しない処理（テストあり）：F3+C のパース�
 render/    glow + egui_glow によるオーバーレイの描画（OS に依存しない、テストあり）：メニュー、入力の振り分け、キーの置き換えの状態、ズームの計算、ブラウザの窓
 agent/     エージェント本体（OS に依存しない、テストあり）：JVMTI、GLFW・SDL3 のフック、キーの置き換え、毎フレームの処理、高精細のズーム、F3+C、ウェイポイント
 hook-win/  Windows 用のエージェント（reminedog.dll）：エージェントに渡す Windows の機能（WGL、キーの状態、クリップボード、フォント、ブラウザ（WebView2））
+hook-linux/ Linux 用のエージェント（libreminedog_linux.so。作り始めたところ）：エージェントに渡す Linux の機能（GLX、フォント）
 installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）：DLL を置き、ランチャーのインスタンスの JVM 引数に -agentpath を足す
 ci/        DLL の確認のスクリプト（check-dll.ps1）と、LWJGL で Minecraft と同じようにウィンドウを作るテスト用のプログラム（ci/smoke/。GLFW 版と SDL3 版）
-scripts/   Linux 上で Wine を使ってエージェントを動かすスクリプト
+scripts/   Linux 上で Wine を使ってエージェントを動かすスクリプト、Linux の開発環境（Docker。scripts/linux/）
 ```
 
 ファイルごとの役割は [CLAUDE.md](CLAUDE.md) の「構成」にあります。
@@ -370,6 +371,19 @@ cargo clippy --workspace --all-targets
 - MSVC では CRT を静的にリンクします（`.cargo/config.toml` の `+crt-static`。Java 8 に vcruntime140 がないためです）
 - ブラウザ（WebView2）を実際に動かすテストは、WebView2 ランタイムと画面のあるセッションが必要なので、通常は実行しません：`cargo test -p reminedog-hook-win browser -- --ignored --test-threads=1`
 - コミットする前に `cargo fmt --all`、clippy（警告 0）、テストを通してください
+
+### Linux（Docker）
+
+Linux 版のエージェント（`hook-linux/`）は作り始めたところで、X11（GLX）だけです。Docker の中でビルドし、画面なしの X サーバー（Xvfb）とソフトウェアで描く Mesa の上で、テスト用のプログラムに読み込ませて確かめます（Windows では Docker Desktop と WSL2 が必要です）。
+
+```sh
+scripts/linux/run.sh cargo test -p reminedog-agent                     # コンテナの中でテスト
+scripts/linux/run.sh cargo build --release -p reminedog-hook-linux     # /target/release/libreminedog_linux.so
+scripts/linux/run.sh scripts/linux/smoke.sh --agent /target/release/libreminedog_linux.so \
+  --xdotool "key j sleep 2 keydown z sleep 1.5 keyup z" -- --seconds=10 --mc --capture --screenshot
+```
+
+`--sdl --lwjgl 3.4.3` で SDL3 版（Minecraft 26.x と同じ形）になります。ログは `/tmp/smoke-run/reminedog/reminedog.log` です。
 
 ### Linux から（Wine）
 
@@ -407,6 +421,7 @@ jar には FlatLaf と Kotlin のライブラリが入っていて、Java 8 以�
 GitHub Actions（`.github/workflows/ci.yml`）で、push のたびに次を行います。
 
 - Linux：fmt、clippy、テスト、mingw でのクロスビルドの clippy
+- Linux のスモークテスト：Linux 版のエージェントを、Xvfb と Mesa の上のテスト用のプログラムに読み込ませ、xdotool で J（ウェイポイント）と Z（高精細のズーム）を送ります（LWJGL 3.2.2、3.3.3、3.4.3 の SDL3。Java 25）
 - インストーラー：テストと jar のビルド（成果物 `reminedog-installer`）
 - Windows：clippy、テスト
 - Windows（DLL）：リリースビルド、`ci/check-dll.ps1` での DLL の確認（x64 であること、`Agent_OnLoad` があること、CRT を静的にリンクしていること、どの PC にもある DLL だけを読み込むこと、バージョン情報）、成果物 `reminedog-windows-x64`

@@ -12,6 +12,7 @@ RUN apt-get update \
         libgl1 libglx-mesa0 libgl1-mesa-dri libegl1 libegl-mesa0 \
         libx11-6 libxrandr2 libxinerama1 libxcursor1 libxi6 libxext6 libxxf86vm1 \
         libxkbcommon0 libwayland-client0 libwayland-egl1 libdecor-0-0 \
+        fontconfig fonts-ipafont-gothic \
     && rm -rf /var/lib/apt/lists/*
 
 ENV RUSTUP_HOME=/usr/local/rustup \

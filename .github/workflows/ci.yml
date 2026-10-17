@@ -47,14 +47,78 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace
 
-      # hook-win is empty off Windows; lint its real code for the GNU Windows target too
-      # (MinGW gcc builds the C sources of its minhook dependency).
+      # hook-win is empty off Windows; lint its real code for the GNU Windows target too.
       - name: Install MinGW-w64
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
       - name: Add Windows GNU target
         run: rustup target add x86_64-pc-windows-gnu
       - name: Clippy (hook-win, x86_64-pc-windows-gnu)
         run: cargo clippy --locked -p reminedog-hook-win --target x86_64-pc-windows-gnu -- -D warnings
+
+  # The Linux agent (hook-linux) in the LWJGL smoke harness on Xvfb with Mesa llvmpipe, as in
+  # the development container (scripts/linux): GLFW and SDL3, with J (a waypoint) and Z (the
+  # high-resolution zoom) sent by xdotool.
+  smoke-linux:
+    name: Smoke Linux (LWJGL ${{ matrix.lwjgl }}${{ matrix.sdl && ', SDL3' || '' }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lwjgl: "3.2.2"
+            sdl: ""
+          - lwjgl: "3.3.3"
+            sdl: ""
+          - lwjgl: "3.4.3"
+            sdl: --sdl
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Install Xvfb, Mesa, xdotool and a Japanese font
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb x11-utils xdotool \
+            libgl1 libglx-mesa0 libgl1-mesa-dri libegl1 fontconfig fonts-ipafont-gothic
+      - name: Build the agent
+        run: cargo build --locked --release -p reminedog-hook-linux
+      - name: Smoke
+        env:
+          SMOKE_SRC: ${{ github.workspace }}
+          SMOKE_CACHE: ${{ runner.temp }}/smoke-cache
+          SMOKE_RUN: ${{ runner.temp }}/smoke-run
+          SMOKE_TIMEOUT: "90"
+        run: |
+          bash scripts/linux/smoke.sh ${{ matrix.sdl }} --lwjgl ${{ matrix.lwjgl }} \
+            --agent "$PWD/target/release/libreminedog_linux.so" --agent-options log=debug \
+            --xdotool "key j sleep 2 keydown z sleep 1.5 keyup z sleep 0.5" \
+            -- --seconds=10 --mc --capture --world=citest | tee "$RUNNER_TEMP/smoke.txt"
+          fail=0
+          grep -qF "SMOKE OK" "$RUNNER_TEMP/smoke.txt" || { echo "::error::the harness did not print 'SMOKE OK'"; fail=1; }
+          log=$SMOKE_RUN/reminedog/reminedog.log
+          IFS='|' read -ra markers <<<"agent loaded|hooks installed|handed the agent's hook|LWJGL's glBindFramebuffer native goes through the agent|overlay: first frame rendered|F3+C: clipboard hooks ready|waypoint 1 recorded|zoom: game renders at"
+          for marker in "${markers[@]}"; do
+            grep -qF "$marker" "$log" || { echo "::error::agent log lacks '$marker'"; fail=1; }
+          done
+          if grep -F "[ERROR]" "$log"; then
+            echo "::error::agent log has [ERROR] lines"
+            fail=1
+          fi
+          exit "$fail"
+      - name: Show the agent log
+        if: always()
+        run: cat "$RUNNER_TEMP/smoke-run/reminedog/reminedog.log" 2>/dev/null || true
 
   # The installer (Kotlin, Swing + FlatLaf): its tests and the jar to double-click.
   installer:
