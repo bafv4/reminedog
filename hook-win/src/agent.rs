@@ -1,11 +1,12 @@
-//! Process-wide agent state and the `Agent_OnLoad` sequence.
+//! The `Agent_OnLoad` sequence: options, logging, the agent's globals and OS, JVMTI.
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
+use reminedog_agent::globals::{self, Globals};
+use reminedog_agent::{jvmti, os};
 use reminedog_core::gamedir::{data_dir, detect_game_dir};
 use reminedog_core::logfile::FileLogger;
 use reminedog_core::options::AgentOptions;
@@ -30,19 +31,6 @@ const MAX_FRAMES: usize = 32;
 
 static PANICS: AtomicU32 = AtomicU32::new(0);
 
-pub struct Globals {
-    pub options: AgentOptions,
-    pub game_dir: PathBuf,
-    pub start: Instant,
-}
-
-static GLOBALS: OnceLock<Globals> = OnceLock::new();
-
-/// `None` until `Agent_OnLoad` has run.
-pub fn globals() -> Option<&'static Globals> {
-    GLOBALS.get()
-}
-
 /// The version: the release's (the release workflow sets REMINEDOG_VERSION), otherwise the
 /// crate's; as `build.rs` put it in the version resource.
 pub const VERSION: &str = env!("REMINEDOG_VERSION");
@@ -51,7 +39,7 @@ pub const VERSION: &str = env!("REMINEDOG_VERSION");
 pub const BUILD_ID: &str = env!("REMINEDOG_BUILD_ID");
 
 pub fn on_load(raw_options: &str, vm: *mut std::ffi::c_void) {
-    if GLOBALS.get().is_some() {
+    if globals::globals().is_some() {
         // The same DLL twice in the JVM's arguments: the JVM calls Agent_OnLoad again.
         log::warn!(
             "the agent was loaded again (given twice in the JVM arguments?); the options {raw_options:?} are ignored"
@@ -108,21 +96,21 @@ pub fn on_load(raw_options: &str, vm: *mut std::ffi::c_void) {
         log::warn!("option: {warning}");
     }
 
-    let _ = GLOBALS.set(Globals {
+    let overlay = options.overlay;
+    globals::init(Globals {
         options,
         game_dir,
         start,
+        version: VERSION,
+        build_id: BUILD_ID,
     });
+    os::set(&crate::windows::WINDOWS);
 
-    if globals().is_some_and(|globals| globals.options.overlay) {
+    if overlay {
         crate::fonts::preload();
     }
-    let platform = crate::jvmti::Platform {
-        hook: crate::library::hook,
-        native: crate::library::native,
-    };
     // SAFETY: the JavaVM the JVM passed Agent_OnLoad.
-    if let Err(e) = unsafe { crate::jvmti::start(vm, platform) } {
+    if let Err(e) = unsafe { jvmti::start(vm) } {
         log::error!("jvmti: not started, the overlay will not work: {e}");
     }
 }

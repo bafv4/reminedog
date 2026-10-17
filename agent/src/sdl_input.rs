@@ -21,10 +21,8 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 
 use reminedog_core::{InputId, Naming, SCANCODE_COUNT, sdl_keycode, sdl_keycode_of, sdl_scancode};
 use reminedog_render::{Delivery, Key, Modifiers, Output, Phase, PointerButton, Route};
-use windows_sys::Win32::Foundation::HMODULE;
 
 use crate::f3c::{self, Failure, Injected, Job, Purpose};
-use crate::ffi;
 use crate::hook::{Hook, Original, Slot as _};
 use crate::input::{self, FUNCTION_KEYS, router};
 use crate::library::export;
@@ -240,7 +238,7 @@ pub fn hooks() -> &'static [Hook] {
     &*HOOKS
 }
 
-pub fn install(module: HMODULE) {
+pub fn install(module: usize) {
     let api = (|| {
         let get = |name: &CStr| export(module, name);
         // SAFETY: SDL3 exports with these C signatures.
@@ -299,15 +297,15 @@ unsafe extern "C" fn poll_event_hook(event: *mut u8) -> bool {
     let Some(original) = POLL_EVENT.get() else {
         return false;
     };
-    ffi::catch("SDL resize for the zoom", queue_zoom_resize);
-    ffi::catch("SDL F3+C", start_f3c);
+    crate::catch("SDL resize for the zoom", queue_zoom_resize);
+    crate::catch("SDL F3+C", start_f3c);
     {
         let mut injected = INJECTED.lock().unwrap_or_else(|e| e.into_inner());
         if !injected.is_empty() {
             if !event.is_null() {
                 let (made_up, tag) = injected.pop_front().expect("checked");
                 if tag != Tag::Plain {
-                    ffi::catch("SDL F3+C", || on_injected(&mut injected, &made_up, tag));
+                    crate::catch("SDL F3+C", || on_injected(&mut injected, &made_up, tag));
                 }
                 // SAFETY: the caller's buffer holds a whole SDL_Event.
                 unsafe { std::ptr::copy_nonoverlapping(made_up.as_ptr(), event, EVENT_SIZE) };
@@ -322,7 +320,7 @@ unsafe extern "C" fn poll_event_hook(event: *mut u8) -> bool {
             return has_event;
         }
         // SAFETY: SDL just filled a whole SDL_Event.
-        let route = ffi::catch("SDL_PollEvent hook", || unsafe { route_event(event) });
+        let route = crate::catch("SDL_PollEvent hook", || unsafe { route_event(event) });
         if log::log_enabled!(log::Level::Trace) {
             // SAFETY: as above.
             let kind = unsafe { event.cast::<u32>().read_unaligned() };
@@ -334,11 +332,11 @@ unsafe extern "C" fn poll_event_hook(event: *mut u8) -> bool {
             unsafe { event.cast::<u32>().read_unaligned() },
             EVENT_KEY_DOWN | EVENT_KEY_UP
         ) {
-            ffi::catch("SDL text input", update_text_input);
+            crate::catch("SDL text input", update_text_input);
         }
         if route != Some(Route::Consume) {
             // SAFETY: as above.
-            ffi::catch("SDL F3+C", || unsafe { mark_passive(event) });
+            crate::catch("SDL F3+C", || unsafe { mark_passive(event) });
             return true;
         }
     }
@@ -597,7 +595,7 @@ unsafe extern "C" fn set_clipboard_text_hook(text: *const c_char) -> bool {
     // Other writes (the game's own copying) are passed on unread.
     let ours = !text.is_null()
         && f3c::watching()
-        && ffi::catch("SDL_SetClipboardText hook", || {
+        && crate::catch("SDL_SetClipboardText hook", || {
             // SAFETY: NUL-terminated UTF-8, valid only during this call (LWJGL passes a stack
             // buffer); it is read here, before returning.
             f3c::on_clipboard(&unsafe { CStr::from_ptr(text) }.to_string_lossy())

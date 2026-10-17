@@ -24,10 +24,8 @@ use reminedog_core::{
     input_from_glfw_key,
 };
 use reminedog_render::{Delivery, Key, Output, Phase, PointerButton, Route};
-use windows_sys::Win32::Foundation::HMODULE;
 
 use crate::f3c::{self, Failure, Injected, Purpose};
-use crate::ffi;
 use crate::hook::{Hook, Original, Slot as _};
 use crate::input::{self, FUNCTION_KEYS, router};
 use crate::library::export;
@@ -169,7 +167,7 @@ macro_rules! setter {
 
         unsafe extern "C" fn $hook(window: *mut c_void, callback: Option<$fn>) -> Option<$fn> {
             let original = $original.get()?;
-            let previous = ffi::catch(stringify!($hook), || {
+            let previous = crate::catch(stringify!($hook), || {
                 replace_game_callback(window, |c| &mut c.$field, callback)
             })
             .flatten();
@@ -278,7 +276,7 @@ pub fn hooks() -> &'static [Hook] {
 }
 
 /// Hooks the callback setters. Failures only cost the overlay its input.
-pub fn install(module: HMODULE) {
+pub fn install(module: usize) {
     if let Some(f) = export(module, c"glfwGetInputMode") {
         // SAFETY: glfwGetInputMode has this signature.
         let _ =
@@ -329,7 +327,7 @@ unsafe extern "C" fn key_wrapper(
     action: c_int,
     mods: c_int,
 ) {
-    let delivery = ffi::catch("GLFW key", || {
+    let delivery = crate::catch("GLFW key", || {
         let pressed = action == PRESS || action == REPEAT;
         let mut router = router();
         let delivery = router.key(
@@ -362,12 +360,12 @@ fn key_to_game(window: *mut c_void, key: c_int, scancode: c_int, action: c_int, 
     // text that reads as a location (a /tp command).
     let passive = action == PRESS && f3c::passive_key_glfw(key) && input::router().debug_held();
     if passive {
-        ffi::catch("GLFW F3+C", f3c::begin_passive);
+        crate::catch("GLFW F3+C", f3c::begin_passive);
     }
     // SAFETY: a window GLFW passed us, on the thread that handles its events.
     unsafe { game(window, key, scancode, action, mods) };
     if passive {
-        ffi::catch("GLFW F3+C", f3c::end_passive);
+        crate::catch("GLFW F3+C", f3c::end_passive);
     }
 }
 
@@ -451,7 +449,7 @@ pub fn release_lost_keys(window: *mut c_void) {
 }
 
 fn text_route(codepoint: c_uint) -> Option<Route> {
-    ffi::catch("GLFW char", || {
+    crate::catch("GLFW char", || {
         let text = char::from_u32(codepoint)
             .map(String::from)
             .unwrap_or_default();
@@ -483,7 +481,7 @@ unsafe extern "C" fn mouse_button_wrapper(
     action: c_int,
     mods: c_int,
 ) {
-    let delivery = ffi::catch("GLFW mouse button", || {
+    let delivery = crate::catch("GLFW mouse button", || {
         let raw = input_from_glfw_button(button);
         let pointer = match button {
             0 => PointerButton::Primary,
@@ -511,7 +509,7 @@ unsafe extern "C" fn mouse_button_wrapper(
 }
 
 unsafe extern "C" fn cursor_pos_wrapper(window: *mut c_void, x: f64, y: f64) {
-    let forward = ffi::catch("GLFW cursor", || {
+    let forward = crate::catch("GLFW cursor", || {
         router().cursor_position(x, y, captured(window))
     })
     .unwrap_or(Some((x, y)));
@@ -524,7 +522,7 @@ unsafe extern "C" fn cursor_pos_wrapper(window: *mut c_void, x: f64, y: f64) {
 }
 
 unsafe extern "C" fn scroll_wrapper(window: *mut c_void, dx: f64, dy: f64) {
-    let route = ffi::catch("GLFW scroll", || router().scroll(dx as f32, dy as f32));
+    let route = crate::catch("GLFW scroll", || router().scroll(dx as f32, dy as f32));
     if route != Some(Route::Consume)
         && let Some(game) = game_callbacks(window).scroll
     {
@@ -537,7 +535,7 @@ unsafe extern "C" fn focus_wrapper(window: *mut c_void, focused: c_int) {
     if focused == 0 {
         // GLFW sends the releases of held keys (but key -1) and buttons after this callback,
         // which the router drops for rebound sources: their outputs are released here, first.
-        let releases = ffi::catch("GLFW focus", || {
+        let releases = crate::catch("GLFW focus", || {
             let mut router = router();
             let releases = router.focus_lost(|id| !matches!(glfw_key_of(id), Some((-1, _))));
             rebind_state::apply(window as usize, &router.rebind_state());
@@ -558,7 +556,7 @@ unsafe extern "C" fn focus_wrapper(window: *mut c_void, focused: c_int) {
 /// While the game renders at the zoom's tall size, a real resize is held back until the
 /// zoom ends (the game is then told the new size).
 unsafe extern "C" fn framebuffer_size_wrapper(window: *mut c_void, width: c_int, height: c_int) {
-    let held = ffi::catch("GLFW framebuffer size", || crate::tall::real_resize(window));
+    let held = crate::catch("GLFW framebuffer size", || crate::tall::real_resize(window));
     if held != Some(true) {
         send_framebuffer_size(window, width, height);
     }
@@ -582,7 +580,7 @@ unsafe extern "C" fn set_clipboard_string_hook(window: *mut c_void, text: *const
     // Other writes (the game's own copying) are passed on unread.
     let ours = !text.is_null()
         && f3c::watching()
-        && ffi::catch("glfwSetClipboardString hook", || {
+        && crate::catch("glfwSetClipboardString hook", || {
             // SAFETY: NUL-terminated UTF-8, valid only during this call (LWJGL frees it right
             // after); it is read here, before returning.
             f3c::on_clipboard(&unsafe { CStr::from_ptr(text) }.to_string_lossy())

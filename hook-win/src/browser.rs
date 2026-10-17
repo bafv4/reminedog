@@ -49,6 +49,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
+use reminedog_agent::os::Browser;
 use reminedog_core::Settings;
 use reminedog_core::browser::{MediaCommand, PageInput};
 use reminedog_render::{
@@ -84,9 +85,6 @@ static FRAME: Mutex<FrameSlot> = Mutex::new(FrameSlot {
 /// Counts the changes of [`FRAME`] (made with it locked), so the game's thread locks it only
 /// for a new picture.
 static FRAME_VERSION: AtomicU64 = AtomicU64::new(0);
-
-/// A version no picture has: [`frame_if_new`] takes the next one.
-pub const NO_PICTURE: u64 = u64::MAX;
 
 /// Notes a change of [`FRAME`]; call with it locked.
 fn frame_changed() {
@@ -459,3 +457,30 @@ fn thread_ended(generation: u64, state: BrowserState) {
 
 #[cfg(all(test, target_env = "msvc"))]
 mod tests;
+
+/// The overlay's side of the browser ([`reminedog_agent::os::Browser`]).
+pub struct WebView2;
+
+pub static WEBVIEW2: WebView2 = WebView2;
+
+impl Browser for WebView2 {
+    fn before_frame(&self) -> (BrowserView, Vec<Notice>) {
+        before_frame()
+    }
+
+    fn with_new_picture(&self, version: &mut u64, upload: &mut dyn FnMut(BrowserPixels<'_>)) {
+        if let Some(frame) = frame_if_new(version) {
+            upload(pixels(&frame));
+        }
+    }
+
+    fn after_frame(
+        &self,
+        commands: Vec<BrowserCommand>,
+        actions: Vec<BrowserAction>,
+        settings: &Settings,
+        game_dir: &Path,
+    ) {
+        after_frame(commands, actions, settings, game_dir);
+    }
+}

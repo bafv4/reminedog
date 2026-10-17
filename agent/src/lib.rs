@@ -1,18 +1,34 @@
-//! The agent's parts that do not depend on the OS, used by the platform's agent library
-//! (`hook-win` builds `reminedog.dll`).
+//! The agent, apart from what depends on the operating system, which the platform's agent
+//! library supplies ([`os::Os`]; `hook-win` builds `reminedog.dll` for Windows) along with
+//! the JVMTI entry point.
 //!
 //! - [`jvmti`]: the JVM reports LWJGL's natives as it binds them; LWJGL's symbol lookups are
-//!   replaced so it is handed the platform's hooks ([`hook`])
+//!   replaced so it is handed the hooks ([`hook`]) of the game's window library ([`library`])
+//! - [`glfw`], [`glfw_input`] (Minecraft up to 1.21), [`sdl`], [`sdl_input`] (26.x): the hooks,
+//!   input and the key rebinding's view of the key state ([`rebind_state`])
+//! - [`frame`]: the overlay drawn at each buffer swap with the agent's own context ([`gl`]),
+//!   and the high-resolution zoom ([`tall`])
 //! - [`f3c`], [`waypoints`]: F3+C requests and their results, the waypoints of the current world
 //! - [`input`]: the input router shared by the window library's hooks and the overlay
-//! - [`saver`]: the thread that writes files
+//! - [`saver`]: the thread that writes files; [`globals`]: the options and the game folder
 
-pub mod f3c;
-pub mod hook;
-pub mod input;
+mod f3c;
+mod frame;
+mod gl;
+mod glfw;
+mod glfw_input;
+pub mod globals;
+mod hook;
+mod input;
 pub mod jvmti;
-pub mod saver;
-pub mod waypoints;
+mod library;
+pub mod os;
+mod rebind_state;
+mod saver;
+mod sdl;
+mod sdl_input;
+mod tall;
+mod waypoints;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

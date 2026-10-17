@@ -21,7 +21,7 @@
 //! size (it set the tall viewport once since the zoom started); if it does not, the zoom
 //! falls back to enlarging the pixels.
 
-use std::ffi::{CStr, c_void};
+use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use glow::HasContext as _;
 use reminedog_render::{ZoomView, middle_row, tall_size};
 
-use crate::wgl;
+use crate::gl;
 
 type BindFramebufferFn = unsafe extern "system" fn(target: u32, framebuffer: u32);
 /// LWJGL's JNI natives: `(JNIEnv*, jclass, ...)` before the GL function's arguments.
@@ -96,7 +96,7 @@ pub struct Swapping {
 impl Swapping {
     pub fn begin() -> Self {
         Swapping {
-            restore: crate::ffi::catch("zoom: the window's framebuffer for the swap", bind_window)
+            restore: crate::catch("zoom: the window's framebuffer for the swap", bind_window)
                 .flatten(),
         }
     }
@@ -121,22 +121,19 @@ fn bind_window() -> Option<(BindFramebufferFn, u32, u32)> {
     if ours == 0 {
         return None;
     }
-    let wgl = wgl::get().ok()?;
-    let current = wgl.current().1 as usize;
+    let current = gl::current_context();
     if current == 0 || current != GAME_CONTEXT.load(Ordering::Relaxed) {
         return None;
     }
-    let read = wgl.integer(GL_READ_FRAMEBUFFER_BINDING) as u32;
-    let draw = wgl.integer(GL_DRAW_FRAMEBUFFER_BINDING) as u32;
+    let read = gl::integer(GL_READ_FRAMEBUFFER_BINDING) as u32;
+    let draw = gl::integer(GL_DRAW_FRAMEBUFFER_BINDING) as u32;
     if read != ours && draw != ours {
         return None;
     }
     let bind = (*BIND_FRAMEBUFFER.get_or_init(|| {
-        let name: &CStr = c"glBindFramebuffer";
-        let p = wgl.load(name);
-        // SAFETY: glBindFramebuffer's address in this driver.
-        (!p.is_null())
-            .then(|| unsafe { std::mem::transmute::<*const c_void, BindFramebufferFn>(p) })
+        // SAFETY: glBindFramebuffer's type; the address is the same in every context of the
+        // driver.
+        unsafe { gl::function::<BindFramebufferFn>(c"glBindFramebuffer") }
     }))?;
     // SAFETY: the game's context is current; framebuffer 0 always exists.
     unsafe {
@@ -329,7 +326,7 @@ fn redirected(framebuffer: u32) -> u32 {
     if ours == 0 {
         return 0;
     }
-    let current = wgl::get().map_or(0, |wgl| wgl.current().1 as usize);
+    let current = gl::current_context();
     if current == 0 || current != GAME_CONTEXT.load(Ordering::Relaxed) {
         return 0;
     }
@@ -465,7 +462,7 @@ impl TallZoom {
     /// Ends the zoom and frees the tall framebuffer (with the game's context current, else
     /// only the zoom ends): before the overlay goes, or while the window is minimized.
     pub fn release(&mut self) {
-        let current = wgl::get().map_or(0, |wgl| wgl.current().1 as usize);
+        let current = gl::current_context();
         let in_game_context = current != 0
             && self
                 .game
@@ -502,10 +499,7 @@ impl TallZoom {
         } else {
             ZoomView::Off
         };
-        let Ok(wgl) = wgl::get() else {
-            return fallback;
-        };
-        let context = wgl.current().1 as usize;
+        let context = gl::current_context();
         if let Some(active) = &self.active {
             if context == 0 || context != GAME_CONTEXT.load(Ordering::Relaxed) {
                 // Some other context is swapping; leave the zoom as it is.
@@ -720,9 +714,8 @@ impl TallZoom {
             self.game = None;
         }
         if self.game.is_none() {
-            let wgl = wgl::get()?;
-            // SAFETY: the game's context is current; the loader returns its functions.
-            let gl = unsafe { glow::Context::from_loader_function_cstr(|name| wgl.load(name)) };
+            // SAFETY: the game's context is current, and the glow context only used in it.
+            let gl = unsafe { gl::glow_context() };
             let version = gl.version();
             if version.major < 3 {
                 return Err(format!(

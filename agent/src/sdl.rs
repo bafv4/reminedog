@@ -16,12 +16,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 
 use reminedog_core::{InputId, Naming, SCANCODE_COUNT};
-use windows_sys::Win32::Foundation::{HMODULE, HWND};
 
-use crate::ffi;
 use crate::frame::{self, WindowSystem};
 use crate::hook::{Hook, Original};
 use crate::library::export;
+use crate::os::SdlProperty;
 
 type CreateWindowFn =
     unsafe extern "C" fn(title: *const c_char, w: c_int, h: c_int, flags: u64) -> *mut c_void;
@@ -41,11 +40,14 @@ type GetWindowDisplayScaleFn = unsafe extern "C" fn(window: *mut c_void) -> f32;
 type GetWindowPropertiesFn = unsafe extern "C" fn(window: *mut c_void) -> u32;
 type GetPointerPropertyFn =
     unsafe extern "C" fn(props: u32, name: *const c_char, default: *mut c_void) -> *mut c_void;
+type GetNumberPropertyFn =
+    unsafe extern "C" fn(props: u32, name: *const c_char, default: i64) -> i64;
 type GetHintBooleanFn = unsafe extern "C" fn(name: *const c_char, default: bool) -> bool;
 type WarpMouseInWindowFn = unsafe extern "C" fn(window: *mut c_void, x: f32, y: f32);
 
 const WINDOW_OPENGL: u64 = 0x0000_0002;
 const WINDOW_HIDDEN: u64 = 0x0000_0008;
+const WINDOW_MINIMIZED: u64 = 0x0000_0040;
 const WINDOW_VULKAN: u64 = 0x1000_0000;
 
 static CREATE_WINDOW: Original<CreateWindowFn> = Original::new();
@@ -116,11 +118,12 @@ struct Sdl {
     get_window_display_scale: GetWindowDisplayScaleFn,
     get_window_properties: GetWindowPropertiesFn,
     get_pointer_property: GetPointerPropertyFn,
+    get_number_property: Option<GetNumberPropertyFn>,
     get_hint_boolean: Option<GetHintBooleanFn>,
 }
 
 impl Sdl {
-    fn resolve(module: HMODULE) -> Result<Sdl, String> {
+    fn resolve(module: usize) -> Result<Sdl, String> {
         let get = |name: &CStr| {
             export(module, name)
                 .ok_or_else(|| format!("SDL3 does not export {}", name.to_string_lossy()))
@@ -148,6 +151,8 @@ impl Sdl {
                 get_pointer_property: std::mem::transmute::<*const c_void, GetPointerPropertyFn>(
                     get(c"SDL_GetPointerProperty")?,
                 ),
+                get_number_property: export(module, c"SDL_GetNumberProperty")
+                    .map(|f| std::mem::transmute::<*const c_void, GetNumberPropertyFn>(f)),
                 get_hint_boolean: export(module, c"SDL_GetHintBoolean")
                     .map(|f| std::mem::transmute::<*const c_void, GetHintBooleanFn>(f)),
             })
@@ -235,25 +240,35 @@ impl WindowSystem for Sdl {
         }
     }
 
-    fn hwnd(&self, window: *mut c_void) -> Option<HWND> {
-        // SAFETY: see above; the property name is NUL-terminated.
-        let hwnd = unsafe {
+    /// The window property the OS names ([`crate::os::Os::sdl_native_window`]).
+    fn native_window(&self, window: *mut c_void) -> Option<usize> {
+        let property = crate::os::get().sdl_native_window()?;
+        // SAFETY: see above; the property names are NUL-terminated.
+        let native = unsafe {
             let props = (self.get_window_properties)(window);
             if props == 0 {
                 return None;
             }
-            (self.get_pointer_property)(
-                props,
-                c"SDL.window.win32.hwnd".as_ptr(),
-                std::ptr::null_mut(),
-            )
+            match property {
+                SdlProperty::Pointer(name) => {
+                    (self.get_pointer_property)(props, name.as_ptr(), std::ptr::null_mut()) as usize
+                }
+                SdlProperty::Number(name) => {
+                    (self.get_number_property?)(props, name.as_ptr(), 0) as usize
+                }
+            }
         };
-        (!hwnd.is_null()).then_some(hwnd)
+        (native != 0).then_some(native)
+    }
+
+    fn minimized(&self, window: *mut c_void) -> bool {
+        // SAFETY: see above.
+        unsafe { (self.get_window_flags)(window) & WINDOW_MINIMIZED != 0 }
     }
 }
 
 /// Identifies SDL3 by its exports, like GLFW: those SDL2 has too, and two only SDL3 has.
-pub fn is_sdl3(module: HMODULE) -> bool {
+pub fn is_sdl3(module: usize) -> bool {
     [
         c"SDL_Init",
         c"SDL_CreateWindow",
@@ -270,7 +285,7 @@ pub fn attached() -> bool {
     SDL.get().is_some()
 }
 
-pub fn attach(module: HMODULE, path: &str) {
+pub fn attach(module: usize, path: &str) {
     let mut attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner());
     if *attached {
         log::warn!("a second SDL3 library is ignored: {path}");
@@ -288,7 +303,7 @@ pub fn attach(module: HMODULE, path: &str) {
         }
     }
     log::info!("SDL3 loaded: {path}");
-    MODULE.store(module as usize, Ordering::Release);
+    MODULE.store(module, Ordering::Release);
     crate::sdl_input::install(module);
     log::info!("SDL3 hooks installed");
 }
@@ -312,7 +327,7 @@ unsafe extern "C" fn create_window_hook(
     };
     // SAFETY: same arguments the caller passed us.
     let window = unsafe { original(title, w, h, flags) };
-    ffi::catch("SDL_CreateWindow probe", || {
+    crate::catch("SDL_CreateWindow probe", || {
         let title = if title.is_null() {
             String::new()
         } else {
@@ -346,7 +361,7 @@ unsafe extern "C" fn gl_create_context_hook(window: *mut c_void) -> *mut c_void 
     };
     // SAFETY: same arguments the caller passed us.
     let context = unsafe { original(window) };
-    ffi::catch("SDL_GL_CreateContext probe", || {
+    crate::catch("SDL_GL_CreateContext probe", || {
         log_renderer("OpenGL", "SDL_GL_CreateContext");
         if context.is_null() {
             log::warn!("SDL_GL_CreateContext failed");
@@ -359,7 +374,7 @@ unsafe extern "C" fn gl_swap_window_hook(window: *mut c_void) -> bool {
     let Some(original) = GL_SWAP_WINDOW.get() else {
         return false;
     };
-    ffi::catch("SDL_GL_SwapWindow hook", || {
+    crate::catch("SDL_GL_SwapWindow hook", || {
         let n = SWAPS.fetch_add(1, Ordering::Relaxed) + 1;
         if n == 1 {
             log::info!("SDL_GL_SwapWindow: first frame");
@@ -372,9 +387,9 @@ unsafe extern "C" fn gl_swap_window_hook(window: *mut c_void) -> bool {
     // SAFETY: same arguments the caller passed us.
     let swapped = unsafe { original(window) };
     drop(swapping);
-    ffi::catch("rebinds", || crate::sdl_input::release_lost_keys(window));
-    ffi::catch("hotkeys", crate::rebind_state::forget_lost_presses);
-    ffi::catch("SDL input", || crate::sdl_input::after_swap(window));
+    crate::catch("rebinds", || crate::sdl_input::release_lost_keys(window));
+    crate::catch("hotkeys", crate::rebind_state::forget_lost_presses);
+    crate::catch("SDL input", || crate::sdl_input::after_swap(window));
     swapped
 }
 
@@ -411,7 +426,7 @@ unsafe extern "C" fn warp_mouse_in_window_hook(window: *mut c_void, x: f32, y: f
     let Some(original) = WARP_MOUSE_IN_WINDOW.get() else {
         return;
     };
-    let y = ffi::catch("SDL_WarpMouseInWindow hook", || real_warp_y(window, y)).unwrap_or(y);
+    let y = crate::catch("SDL_WarpMouseInWindow hook", || real_warp_y(window, y)).unwrap_or(y);
     // SAFETY: the caller's window; the coordinates are within it.
     unsafe { original(window, x, y) };
 }
@@ -447,7 +462,7 @@ unsafe extern "C" fn vulkan_create_surface_hook(
     };
     // SAFETY: same arguments the caller passed us.
     let ok = unsafe { original(window, instance, allocator, surface) };
-    ffi::catch("SDL_Vulkan_CreateSurface probe", || {
+    crate::catch("SDL_Vulkan_CreateSurface probe", || {
         log_renderer("Vulkan", "SDL_Vulkan_CreateSurface");
         if !ok {
             log::warn!("SDL_Vulkan_CreateSurface failed");

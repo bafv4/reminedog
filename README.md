@@ -348,8 +348,8 @@ Windows に入っている Microsoft Edge WebView2 ランタイムを使いま�
 core/      OS に依存しない処理（テストあり）：F3+C のパース、options.txt のキー設定とキーの名前の表、ウェイポイントの保存、ワールドの判定、方角と距離、
            設定、ブラウザへの入力（CDP）・アドレス欄・動画のスクリプト、ログ
 render/    glow + egui_glow によるオーバーレイの描画（OS に依存しない、テストあり）：メニュー、入力の振り分け、キーの置き換えの状態、ズームの計算、ブラウザの窓
-agent/     エージェントの OS に依存しない部分（テストあり）：JVMTI、フックの表、F3+C、ウェイポイント、ファイルの書き込み
-hook-win/  Windows 用のエージェント（reminedog.dll）：GLFW・SDL3 のフック、WGL、高精細のズーム、ブラウザ（WebView2）
+agent/     エージェント本体（OS に依存しない、テストあり）：JVMTI、GLFW・SDL3 のフック、キーの置き換え、毎フレームの処理、高精細のズーム、F3+C、ウェイポイント
+hook-win/  Windows 用のエージェント（reminedog.dll）：エージェントに渡す Windows の機能（WGL、キーの状態、クリップボード、フォント、ブラウザ（WebView2））
 installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）：DLL を置き、ランチャーのインスタンスの JVM 引数に -agentpath を足す
 ci/        DLL の確認のスクリプト（check-dll.ps1）と、LWJGL で Minecraft と同じようにウィンドウを作るテスト用のプログラム（ci/smoke/。GLFW 版と SDL3 版）
 scripts/   Linux 上で Wine を使ってエージェントを動かすスクリプト

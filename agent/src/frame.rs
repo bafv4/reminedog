@@ -13,19 +13,13 @@ use reminedog_render::{
     ZoomView, gl_summary, hotkeys, hotkeys_quiet, resolve,
 };
 
-use crate::agent::{self, Globals};
-use crate::browser;
-use crate::clipboard;
-use crate::fonts;
+use crate::gl::{self, OwnContext};
+use crate::globals::{self, Globals};
 use crate::input;
-use crate::pointer;
+use crate::os;
 use crate::saver;
 use crate::tall::TallZoom;
 use crate::waypoints;
-use crate::wgl::{self, OwnContext, Wgl};
-use windows_sys::Win32::Foundation::HWND;
-use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
-use windows_sys::Win32::UI::WindowsAndMessaging::IsIconic;
 
 /// Settings are saved after this long without further changes (or, changed in the menu, when
 /// it closes), so dragging a slider does not write the file each time.
@@ -66,7 +60,10 @@ pub trait WindowSystem: Sync {
     fn framebuffer_size(&self, window: *mut c_void) -> (i32, i32);
     /// DPI scale of the window.
     fn content_scale(&self, window: *mut c_void) -> f32;
-    fn hwnd(&self, window: *mut c_void) -> Option<HWND>;
+    /// The OS's window behind `window` ([`crate::os`]).
+    fn native_window(&self, window: *mut c_void) -> Option<usize>;
+    /// Whether the window is minimized.
+    fn minimized(&self, window: *mut c_void) -> bool;
     /// Whether the game gets raw mouse counts while it captures the cursor, untouched by
     /// the system's pointer speed and acceleration (the overlay then applies them to its
     /// own cursor), rather than the motion of the system's pointer.
@@ -86,20 +83,16 @@ pub trait WindowSystem: Sync {
 
 /// Draws the overlay into the back buffer right before the window system presents it.
 pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
-    let Some(agent) = agent::globals() else {
+    let Some(agent) = globals::globals() else {
         return;
     };
     if !agent.options.overlay || window.is_null() {
         return;
     }
-    // A minimized window has nothing to draw on, and GetDC hands out a new temporary DC on
-    // every call instead of the window's own one; skip the frame and keep the overlay. A zoom
-    // ends: the game would go on drawing its tall frames unseen.
-    // SAFETY: a valid window handle.
-    if ws
-        .hwnd(window)
-        .is_some_and(|hwnd| unsafe { IsIconic(hwnd) } != 0)
-    {
+    // A minimized window has nothing to draw on (on Windows, GetDC hands out a new temporary
+    // DC on every call instead of the window's own one); skip the frame and keep the overlay.
+    // A zoom ends: the game would go on drawing its tall frames unseen.
+    if ws.minimized(window) {
         if let Ok(mut state) = STATE.try_lock()
             && let State::Ready(runtime) = &mut *state
             && runtime.window == window as usize
@@ -144,25 +137,16 @@ pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
 /// How relative motion should move the overlay's cursor while the game captures the mouse.
 fn pointer_speed(ws: &dyn WindowSystem, window: *mut c_void) -> PointerSpeed {
     if ws.raw_motion(window) {
-        pointer::system_speed()
+        os::get().pointer_speed()
     } else {
         log::debug!("the game reads the system pointer's motion; no pointer speed applied");
         PointerSpeed::RAW
     }
 }
 
-/// The window's device context. GLFW's and SDL's window classes have CS_OWNDC, so this is
-/// the very DC the game's context renders to and the swap presents, whichever context is
-/// current right now (neither swap function requires the window's own context to be).
-fn window_dc(ws: &dyn WindowSystem, wgl: &Wgl, window: *mut c_void) -> HDC {
-    if let Some(hwnd) = ws.hwnd(window) {
-        // SAFETY: a valid window handle; the DC of a CS_OWNDC window needs no release.
-        let dc = unsafe { GetDC(hwnd) };
-        if !dc.is_null() {
-            return dc;
-        }
-    }
-    wgl.current().0
+/// The surface the game's context draws the window on ([`os::Os::window_surface`]).
+fn window_surface(ws: &dyn WindowSystem, window: *mut c_void) -> usize {
+    os::get().window_surface(ws.native_window(window))
 }
 
 fn run_frame(
@@ -229,7 +213,7 @@ struct Runtime {
     save_problem: Option<String>,
     /// For the next frame.
     notices: Vec<Notice>,
-    /// The browser's picture last taken ([`browser::frame_if_new`]).
+    /// The browser's picture last taken ([`os::Browser::with_new_picture`]).
     page_version: u64,
     tall: TallZoom,
     /// The router's hotkeys, from `settings`.
@@ -242,7 +226,7 @@ struct Runtime {
 
 // SAFETY: the GL handles and objects are only used inside the swap hook while STATE is
 // locked, with our context made current on the calling thread and released before the
-// lock is; a WGL context may be made current on any thread.
+// lock is; a context may be made current on any thread (one at a time).
 unsafe impl Send for Runtime {}
 
 impl Runtime {
@@ -251,16 +235,16 @@ impl Runtime {
         window: *mut c_void,
         agent: &Globals,
     ) -> Result<Box<Self>, String> {
-        let wgl = wgl::get()?;
-        let hdc = window_dc(ws, wgl, window);
-        if hdc.is_null() {
-            return Err("cannot get the window's device context".into());
+        let os = os::get();
+        let surface = window_surface(ws, window);
+        if surface == 0 {
+            return Err("cannot get the window's surface".into());
         }
-        let (current_dc, game_context) = wgl.current();
+        let (current_surface, game_context) = os.current_gl();
         let (width, height) = ws.framebuffer_size(window);
         // Describe the game's context only if it is the one current on this window.
-        let game_gl = if current_dc == hdc && !game_context.is_null() {
-            wgl.describe_current()
+        let game_gl = if current_surface == surface && game_context != 0 {
+            gl::describe_current()
         } else {
             "? (the window's context was not current)".to_owned()
         };
@@ -270,7 +254,7 @@ impl Runtime {
             ws.content_scale(window)
         );
         log::info!("game GL: {game_gl}");
-        log::info!("pixel format {}", wgl::describe_pixel_format(hdc));
+        log::info!("pixel format {}", os.describe_surface(surface));
 
         let settings_path = settings_path(&agent.game_dir);
         let settings = Settings::load(&settings_path);
@@ -285,23 +269,21 @@ impl Runtime {
             rebinds_summary(&settings)
         );
 
-        let context = OwnContext::create(wgl, hdc)?;
+        let context = OwnContext::create(surface)?;
         let created = (|| {
-            let _current = context.make_current(wgl)?;
-            // SAFETY: our context is current; the loader resolves functions for it.
-            let gl = Arc::new(unsafe {
-                glow::Context::from_loader_function_cstr(|name| wgl.load(name))
-            });
+            let _current = context.make_current()?;
+            // SAFETY: our context is current, and the glow context only used while it is.
+            let gl = Arc::new(unsafe { gl::glow_context() });
             let overlay_gl = gl_summary(&gl);
             log::info!("overlay GL: {overlay_gl}");
-            let overlay = Overlay::new(gl.clone(), fonts::load_japanese(), settings.clone())
+            let overlay = Overlay::new(gl.clone(), os.japanese_fonts(), settings.clone())
                 .map_err(|e| e.to_string())?;
             Ok::<_, String>((gl, overlay, overlay_gl))
         })();
         let (gl, overlay, overlay_gl) = match created {
             Ok(created) => created,
             Err(e) => {
-                context.delete(wgl);
+                context.delete();
                 return Err(e);
             }
         };
@@ -322,10 +304,7 @@ impl Runtime {
         log_active_rebinds(&active);
 
         let status = vec![
-            StatusLine::new(
-                "ビルド",
-                format!("{} ({})", agent::VERSION, agent::BUILD_ID),
-            ),
+            StatusLine::new("ビルド", format!("{} ({})", agent.version, agent.build_id)),
             StatusLine::new("ウィンドウ", ws.describe()),
             StatusLine::new("ゲームのGL", game_gl),
             StatusLine::new("オーバーレイのGL", overlay_gl),
@@ -349,7 +328,7 @@ impl Runtime {
             load_problem,
             save_problem: None,
             notices: Vec::new(),
-            page_version: browser::NO_PICTURE,
+            page_version: os::NO_PICTURE,
             tall: TallZoom::default(),
             hotkeys: keys,
             key_rebinds,
@@ -366,19 +345,17 @@ impl Runtime {
         if window as usize != self.window {
             return Ok(());
         }
-        let wgl = wgl::get().map_err(FrameError::Failed)?;
-        let hdc = window_dc(ws, wgl, window);
-        if hdc.is_null() {
-            return Err(FrameError::Failed(
-                "cannot get the window's device context".into(),
-            ));
+        let os = os::get();
+        let surface = window_surface(ws, window);
+        if surface == 0 {
+            return Err(FrameError::Failed("cannot get the window's surface".into()));
         }
-        if hdc != self.context.hdc() {
+        if surface != self.context.surface() {
             log::debug!(
-                "device context {:?} -> {hdc:?} (hwnd {:?}, current {:?})",
-                self.context.hdc(),
-                ws.hwnd(window),
-                wgl.current()
+                "surface 0x{:x} -> 0x{surface:x} (native window {:?}, current {:x?})",
+                self.context.surface(),
+                ws.native_window(window),
+                os.current_gl()
             );
             return Err(FrameError::DrawableChanged);
         }
@@ -400,7 +377,7 @@ impl Runtime {
         // Ctrl+V in a text field: the clipboard is read with the router unlocked, and its
         // text goes in with this frame's events.
         if input::router().take_paste_request()
-            && let Some(text) = ws.hwnd(window).and_then(clipboard::read_text)
+            && let Some(text) = os.read_clipboard(ws.native_window(window))
         {
             input::router().paste(&text);
         }
@@ -425,10 +402,13 @@ impl Runtime {
             .failure()
             .map(|reason| format!("高精細は使えない：{reason}"));
         let (waypoint_commands, browser_commands, browser_actions) = {
-            let _current = self.context.make_current(wgl).map_err(FrameError::Failed)?;
+            let _current = self.context.make_current().map_err(FrameError::Failed)?;
             // Takes the router's hotkey actions, so before the router is locked below.
             let marks = waypoints::before_frame(&agent.game_dir, self.window, playing, ws.naming());
-            let (browser, browser_notices) = browser::before_frame();
+            let (browser, browser_notices) = os
+                .browser()
+                .map(|browser| browser.before_frame())
+                .unwrap_or_default();
             let browser_shown = browser.shown;
             // The browser's keys only while there is a page to act on.
             let browser_keys = browser_shown && browser.state == BrowserState::Ready;
@@ -472,13 +452,12 @@ impl Runtime {
             };
             // The browser thread waits only while a new picture is uploaded; a picture it is
             // writing right now waits for the next frame. Hidden, the last one stays.
-            if browser_shown {
-                let frame = browser::frame_if_new(&mut self.page_version);
-                // SAFETY: our context is current.
-                unsafe {
-                    self.overlay
-                        .upload_page(frame.as_deref().map(browser::pixels))
-                };
+            if browser_shown && let Some(browser) = os.browser() {
+                let overlay = &mut self.overlay;
+                browser.with_new_picture(&mut self.page_version, &mut |pixels| {
+                    // SAFETY: our context is current.
+                    unsafe { overlay.upload_page(Some(pixels)) }
+                });
             }
             let output = self.overlay.render(FrameParams {
                 framebuffer_size: [width as u32, height as u32],
@@ -540,9 +519,7 @@ impl Runtime {
                 self.unsaved = Some((Instant::now() + SAVE_DELAY, ui_open));
             }
             if let Some(text) = &output.copied_text
-                && !ws
-                    .hwnd(window)
-                    .is_some_and(|hwnd| clipboard::write_text(hwnd, text))
+                && !os.write_clipboard(ws.native_window(window), text)
             {
                 log::debug!("cannot put the menu's copied text on the clipboard");
             }
@@ -554,12 +531,14 @@ impl Runtime {
             )
         };
         waypoints::after_frame(waypoint_commands, self.window);
-        browser::after_frame(
-            browser_commands,
-            browser_actions,
-            &self.settings,
-            &agent.game_dir,
-        );
+        if let Some(browser) = os.browser() {
+            browser.after_frame(
+                browser_commands,
+                browser_actions,
+                &self.settings,
+                &agent.game_dir,
+            );
+        }
         self.save_settings_when_due();
         let cost_ms = started.elapsed().as_secs_f64() * 1000.0;
         self.cost_ms = if self.overlay.frames() <= 1 {
@@ -700,19 +679,16 @@ impl Runtime {
     fn teardown(mut self: Box<Self>) {
         self.flush_settings();
         self.tall.release();
-        let Ok(wgl) = wgl::get() else {
-            return;
-        };
         let Runtime {
             context,
             mut overlay,
             ..
         } = *self;
-        match context.make_current(wgl) {
+        match context.make_current() {
             Ok(_current) => overlay.destroy(),
             Err(e) => log::warn!("cannot free overlay resources: {e}"),
         }
-        context.delete(wgl);
+        context.delete();
     }
 }
 

@@ -3,20 +3,19 @@
 //! The JVM reports each native method as it binds it (NativeMethodBind) and lets the agent
 //! bind another function in its place. LWJGL looks up every GLFW and SDL function with a JNI
 //! native in every version (`WinBase.nGetProcAddress` on Windows, `DynamicLinkLoader.ndlsym`
-//! on Linux and macOS): in its place, the agent hands LWJGL the platform's hook for the
-//! function ([`Platform::hook`], [`crate::hook::Hook`]), which calls the real one. LWJGL then
+//! on Linux and macOS): in its place, the agent hands LWJGL the hook for the function
+//! ([`crate::library::hook`], [`crate::hook::Hook`]), which calls the real one. LWJGL then
 //! calls the hook whichever way it calls: JNI natives up to LWJGL 3.3 (`JavaCritical_`
 //! entries on Java 8 with 3.2), FFM downcalls in LWJGL 3.4 on Java 25. Other natives of
-//! LWJGL (its GL functions) may be replaced by the platform as they are bound
-//! ([`Platform::native`]).
+//! LWJGL (the zoom's GL functions) are replaced as they are bound
+//! ([`crate::library::native`]).
 //!
 //! Only natives bound after `Agent_OnLoad` are seen, which are all of LWJGL's.
 
 use std::ffi::{CStr, c_char, c_void};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::hook::Hook;
+use crate::library;
 
 const JNI_OK: i32 = 0;
 const JVMTI_VERSION_1_0: i32 = 0x3001_0000;
@@ -64,23 +63,6 @@ struct EventCallbacks {
     native_method_bind: NativeMethodBindFn,
 }
 
-/// What the platform does with LWJGL's lookups and natives.
-pub struct Platform {
-    /// The hook LWJGL is handed for the function `name` it looked up in `library` (a module
-    /// handle), if any: the hooked window library's.
-    pub hook: fn(library: usize, name: &CStr) -> Option<&'static Hook>,
-    /// The platform's native in place of LWJGL's `name` of `class` (signatures as JNI writes
-    /// them), the JVM's own `address` kept to call; `None` leaves it.
-    pub native: fn(
-        class: &str,
-        name: &str,
-        signature: &str,
-        address: *const c_void,
-    ) -> Option<*const c_void>,
-}
-
-static PLATFORM: OnceLock<Platform> = OnceLock::new();
-
 /// The JVM's own natives that LWJGL looks functions up with, by signature.
 static GET_PROC_ADDRESS: AtomicUsize = AtomicUsize::new(0);
 static GET_PROC_ADDRESS_LAST_ERROR: AtomicUsize = AtomicUsize::new(0);
@@ -94,14 +76,11 @@ pub fn handing_out() -> bool {
         .any(|native| native.load(Ordering::Acquire) != 0)
 }
 
-/// Has the JVM report native methods as it binds them, for `platform`.
+/// Has the JVM report native methods as it binds them.
 ///
 /// # Safety
 /// `vm` is the `JavaVM*` the JVM passed `Agent_OnLoad`.
-pub unsafe fn start(vm: *mut c_void, platform: Platform) -> Result<(), String> {
-    if PLATFORM.set(platform).is_err() {
-        return Err("started twice".into());
-    }
+pub unsafe fn start(vm: *mut c_void) -> Result<(), String> {
     if vm.is_null() {
         return Err("no JavaVM".into());
     }
@@ -263,10 +242,7 @@ unsafe extern "system" fn native_method_bind(
                 "(JJ)J",
             ) => (&DLSYM, dlsym as GetProcAddressFn as Ptr),
             _ => {
-                let Some(platform) = PLATFORM.get() else {
-                    return;
-                };
-                if let Some(ours) = (platform.native)(&class, &name, &signature, address) {
+                if let Some(ours) = library::native(&class, &name, &signature, address) {
                     // SAFETY: the JVM binds what the event leaves here.
                     unsafe { *new_address = ours.cast_mut() };
                 }
@@ -336,8 +312,7 @@ unsafe fn handed(module: i64, name: i64, address: i64) -> i64 {
     crate::catch("LWJGL's lookup", || {
         // SAFETY: guaranteed by the caller.
         let name = unsafe { CStr::from_ptr(name as *const c_char) };
-        let platform = PLATFORM.get()?;
-        let Some(hook) = (platform.hook)(module as usize, name) else {
+        let Some(hook) = library::hook(module as usize, name) else {
             return Some(address);
         };
         // SAFETY: the function of the hook's name, of the slot's type.

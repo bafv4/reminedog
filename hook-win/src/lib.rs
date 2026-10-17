@@ -1,11 +1,13 @@
 //! Windows agent loaded with `-agentpath:<path>\reminedog.dll[=<options>]`.
 //!
+//! The agent itself is OS-independent ([`reminedog_agent`]); this library adds what it needs
+//! from Windows ([`windows`]: WGL contexts, the physical key state, the clipboard, the
+//! pointer's speed, Japanese fonts, the WebView2 browser) and the JVMTI entry point.
+//!
 //! Flow: `Agent_OnLoad` sets up logging and has the JVM report LWJGL's natives as it binds
-//! them ([`jvmti`]). When LWJGL looks up a function of GLFW (or SDL3, [`library`]), it is
-//! handed the agent's hook ([`hook`], [`glfw`]). From then on every frame goes through
-//! [`frame::before_swap`], which draws the overlay with the agent's own GL context ([`wgl`])
-//! and hands the swap back to GLFW. Waypoints
-//! ([`waypoints`]) get the player's position by sending the game F3+C ([`f3c`]).
+//! them ([`reminedog_agent::jvmti`]). When LWJGL looks up a function of GLFW (or SDL3), it is
+//! handed the agent's hook. From then on every frame goes through the agent's swap hook,
+//! which draws the overlay with the agent's own GL context and hands the swap back to GLFW.
 //!
 //! Everything is Windows-only; on other platforms this crate builds as an empty library
 //! so the workspace still builds.
@@ -16,21 +18,12 @@ mod browser;
 mod clipboard;
 mod ffi;
 mod fonts;
-mod frame;
-mod glfw;
-mod glfw_input;
-mod library;
+mod keys;
 mod pointer;
-mod rebind_state;
-mod sdl;
-mod sdl_input;
-mod tall;
 mod wgl;
+mod windows;
 
 use std::ffi::{CStr, c_char, c_void};
-
-// The OS-independent parts, at the paths the modules here use.
-use reminedog_agent::{f3c, hook, input, jvmti, saver, waypoints};
 
 const JNI_OK: i32 = 0;
 

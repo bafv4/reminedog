@@ -979,3 +979,23 @@ Docker（`scripts/linux/`。Java 25、Rust 1.99.0、Xvfb、Mesa の llvmpipe）�
 
 Windows と同じ「LWJGL にフックを渡す」作りが Linux でも使える。次は、OS ごとに違う部分（関数の引き当て、ネイティブのウィンドウ、自前の GL のコンテキスト、物理のキーの状態、クリップボード、ポインターの速度、フォント、ブラウザ）を差し替え口にまとめ、GLFW・SDL3 のフック・キーの置き換え・ズーム・毎フレームの処理を `agent/` に移す
 
+## 追記：エージェント本体を agent/ に移し、OS に頼ることを分ける（2026-10-18）
+
+Linux 版の準備。「追記：OS に依存しない部分を agent/ に分ける」の表で `hook-win` に残したモジュール（`frame`・`tall`・`glfw`・`glfw_input`・`sdl`・`sdl_input`・`rebind_state`・`library`）を `agent/` に移し（`git mv`）、
+OS に頼ることを `agent/src/os.rs` の `Os`（とブラウザの `Browser`）にまとめた。`hook-win` は Windows の `Os`（`windows.rs`）と `Agent_OnLoad` だけになった。
+
+- `Os`：ライブラリの関数の引き当てとパス、GLFW のネイティブのウィンドウの関数の名前（`glfwGetWin32Window`）と SDL3 のプロパティ（`SDL.window.win32.hwnd`。Linux の X11 は数のプロパティ `SDL.window.x11.window`）、
+  ウィンドウの描画先（Windows は `GetDC`）とその説明、今のコンテキスト、GL の関数の引き当て、コンテキストの作成・切り替え・削除、物理のキーの状態（`keys.rs`）、ポインターの速度、クリップボード、日本語フォント、ブラウザ。
+  ハンドルはどれも `usize`（OS が解釈する）
+- `WindowSystem::hwnd` は `native_window`（`usize`）になり、最小化の判定は Win32 の `IsIconic` から `WindowSystem::minimized`（GLFW の `GLFW_ICONIFIED`、SDL3 の `SDL_WINDOW_MINIMIZED`）に変えた
+- 自前のコンテキストの扱い（`OwnContext`、切り替えのガード）と、今のコンテキストへの問い合わせ（GL の説明、`glGetIntegerv`、glow のコンテキスト）は `agent/src/gl.rs`。`wgl.rs` は WGL の関数の呼び出しだけになった
+- `rebind_state` の物理のキーの状態（`GetAsyncKeyState`、仮想キーへの変換、ボタンの左右の入れ替え）とそのテストは `hook-win/src/keys.rs`（`Os::input_up`）
+- `Globals`（オプション、ゲームフォルダ、版）は `agent/src/globals.rs`。版と BUILD_ID は `hook-win` が入れる
+- `jvmti::Platform` はやめ、`jvmti` が `library::hook`・`library::native` を直接呼ぶ
+- `agent` の公開は `os`・`globals`・`jvmti`・`catch` だけ（ほかは公開すると clippy の `not_unsafe_ptr_arg_deref` に当たる。生のポインタを受ける関数が多い）
+
+確かめたこと：fmt、clippy（Windows と Linux の Docker で警告 0）、テスト（agent 46、hook-win 8。移す前と同じ合計 54。Linux でも agent 46）、
+手元のスモーク（GLFW 3.3.3＋Java 25、SDL3 3.4.3＋Java 25、GLFW 3.2.2＋Java 8 で、オーバーレイ、GL の説明・ピクセルフォーマット、F3+C、J でウェイポイント、Z で縦長、スワップの間の結び付け直し。警告・エラーなし）、
+GLFW のスモークで B でブラウザが開いて絵が取り込まれた。
+確かめていないこと：実機（動きは変えていないつもり）。次は Linux の `Os`（`hook-linux`）
+

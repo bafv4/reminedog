@@ -46,31 +46,37 @@ render/    glow + egui_glow の描画（OS に依存しない、テストあり�
   font_metrics.rs  日本語フォントの縦位置の補正
   browser.rs   ゲーム内ブラウザ：メニューを開いている間の窓（移動、右下の角で大きさ、アドレス欄、ページへの入力の変換）、閉じている間のページの絵、メニューの欄、
                ページの絵のテクスチャ（PageTexture）。BrowserView/BrowserCommand/BrowserPixels でフックとやり取り
-agent/     エージェントの OS に依存しない部分（テストあり。Linux の CI でもビルド・テストする）
-  lib.rs       catch（パニックをログにして止める。JVM・LWJGL・ライブラリから呼ばれる関数は全部これで包む）
+agent/     エージェント本体（OS に依存しない。テストあり。Linux の CI でもビルド・テストする）。OS に頼ることは os.rs の Os を通す
+  lib.rs       catch（パニックをログにして止める。JVM・LWJGL・ライブラリから呼ばれる関数は全部これで包む）。公開するのは os・globals・jvmti・catch だけ
+  os.rs        Os：OS に頼ること（ライブラリの関数の引き当てとパス、GLFW・SDL3 のネイティブのウィンドウの取り方、ウィンドウの描画先、GL のコンテキストの作成・切り替え・削除と関数の引き当て、
+               物理のキーの状態、ポインターの速度、クリップボード、日本語フォント、ブラウザ）。Browser：ゲーム内ブラウザの毎フレームの受け渡し。set（Agent_OnLoad で 1 回）
+  globals.rs   Globals：オプション、ゲームフォルダ、版。init（Agent_OnLoad で 1 回）
   jvmti.rs     JVMTI の NativeMethodBind：LWJGL の関数の引き当て（WinBase.nGetProcAddress、Linux・macOS は DynamicLinkLoader.ndlsym）を差し替え、
-               引いた関数のフックを Platform::hook に聞いて渡す（本物は Original に覚える）。ほかの LWJGL のネイティブは Platform::native に渡す
+               引いた関数のフックを library::hook に聞いて渡す（本物は Original に覚える）。ほかの LWJGL のネイティブは library::native へ
+  library.rs   ウィンドウのライブラリの判定（LWJGL が関数を引いた最初の GLFW か SDL3 をフックする。Mod の SDL などは外す）とフックの表の検索
+               （glfw.rs・glfw_input.rs・sdl.rs・sdl_input.rs の hooks()）、LWJGL の GL のネイティブは tall::wrap_native へ
   hook.rs      フックの表（Hook：名前・フック・元の関数の置き場所 Original）。フックは LWJGL が引いた本物を Original から呼ぶ。何も書き換えない
-  input.rs     InputRouter（render）をプロセスに 1 つ持つ（router()）
-  saver.rs     ファイルの書き込みのスレッド（設定・地点・ラベル。渡した順に書き、結果は Pending で受け取る）
-  f3c.rs       F3+C の要求と結果（ウィンドウのライブラリに依存しない）。送った F3+C の書き込みは握りつぶし、利用者の F3+C は通す
-  waypoints.rs ワールドの追跡、options.txt（デバッグのキーと、メニューに出す各キーの割り当て）、F3+C の要求と結果、通知（frame.rs から毎フレーム）
-hook-win/  Windows のエージェント（reminedog.dll）。agent の各モジュールを crate::f3c などの名前で使う
-  lib.rs/agent.rs  Agent_OnLoad。オプション、ログ、パニックフック、jvmti::start（Platform に library.rs の hook・native を渡す）
-  library.rs   jvmti の Platform：ウィンドウのライブラリの判定（LWJGL が関数を引いた最初の GLFW か SDL3 をフックする。Mod の SDL などは外す）と
-               フックの表の検索（glfw.rs・glfw_input.rs・sdl.rs・sdl_input.rs の hooks()）、LWJGL の GL のネイティブは tall::wrap_native へ。export（PE を読む）
   glfw.rs, glfw_input.rs  GLFW（Minecraft 1.21 まで）：glfwSwapBuffers、コールバックの差し替え。F3+C（glfwSetClipboardString・glfwGetKey のフック、キーコールバックへの送信）。
                           キーの置き換え（出力をコールバックで送る、mods の補正、glfwGetKey の偽装）
   sdl.rs, sdl_input.rs    SDL3（Minecraft 26.x）：SDL_GL_SwapWindow、SDL_PollEvent のフィルタ。F3+C（SDL_SetClipboardText のフック、キーのイベントの注入）。
                           キーの置き換え（イベントをその場で書き換える、mod の補正、SDL_GetKeyboardState の偽装）
-  rebind_state.rs  ゲームから見えるキーの状態の表（ロックなし、512 項目）と、元のキーの解放を取り逃したときの安全網
-  frame.rs     スワップのたびの処理：自前の WGL コンテキストに切り替えてオーバーレイを描く。設定の読み込みと保存（saver へ）、メニューのクリップボード
-  clipboard.rs メニューの貼り付け・コピー用の Win32 のクリップボード（GLFW・SDL の関数は F3+C でフックしているので使わない）
+  rebind_state.rs  ゲームから見えるキーの状態の表（ロックなし、512 項目）と、元のキーの解放を取り逃したときの安全網（物理のキーの状態は Os::input_up）
+  frame.rs     スワップのたびの処理：自前のコンテキストに切り替えてオーバーレイを描く。設定の読み込みと保存（saver へ）、メニューのクリップボード、ブラウザの受け渡し
+  gl.rs        自前の GL のコンテキスト（OwnContext、切り替えのガード）と、今のコンテキストへの問い合わせ（GL の説明、glGetIntegerv、glow のコンテキスト）
   tall.rs      高精細のズーム（下で説明）
-  wgl.rs       opengl32 の関数表、自前のコンテキスト
+  input.rs     InputRouter（render）をプロセスに 1 つ持つ（router()）
+  saver.rs     ファイルの書き込みのスレッド（設定・地点・ラベル。渡した順に書き、結果は Pending で受け取る）
+  f3c.rs       F3+C の要求と結果（ウィンドウのライブラリに依存しない）。送った F3+C の書き込みは握りつぶし、利用者の F3+C は通す
+  waypoints.rs ワールドの追跡、options.txt（デバッグのキーと、メニューに出す各キーの割り当て）、F3+C の要求と結果、通知（frame.rs から毎フレーム）
+hook-win/  Windows のエージェント（reminedog.dll）：agent に Windows の Os を渡す
+  lib.rs/agent.rs  Agent_OnLoad。オプション、ログ、パニックフック、globals::init、os::set、jvmti::start
+  windows.rs   Windows の Os（PE を読む関数の引き当て、glfwGetWin32Window・SDL.window.win32.hwnd、GetDC、WGL、keys・pointer・clipboard・fonts・browser）
+  wgl.rs       opengl32 の関数表（コンテキストの作成・切り替え・削除、wglGetProcAddress）、ピクセルフォーマットの説明
+  keys.rs      物理のキーとボタンの状態（GetAsyncKeyState。InputId から仮想キーへ、ボタンの左右の入れ替え）
+  clipboard.rs メニューの貼り付け・コピー用の Win32 のクリップボード（GLFW・SDL の関数は F3+C でフックしているので使わない）
   pointer.rs   Windows のマウスの設定の読み取り
   fonts.rs     日本語フォント（游ゴシック → メイリオ → MS ゴシック）。読み込みの直後に別スレッドで読み、プロセスの間持つ
-  browser.rs   ゲーム内ブラウザ（WebView2）のゲームのスレッド側：表示・非表示・終了、コマンドのメールボックス、状態、最新の絵（FRAME）。frame.rs から毎フレーム
+  browser.rs   ゲーム内ブラウザ（WebView2）のゲームのスレッド側：表示・非表示・終了、コマンドのメールボックス、状態、最新の絵（FRAME）。Os::browser の WebView2
   browser/     ブラウザのスレッド（thread.rs）、WebView2 の作成・設定・イベント（webview.rs）、画面の取り込み（capture.rs）。MSVC のビルドだけ（GNU では外す）
 installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）。Java 8 以降で動く 1 つの jar（reminedog-installer.jar）
   Main.kt            FlatLaf（Windows のダークモードに合わせる）と画面の起動
@@ -160,7 +166,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 | キーの置き換え（キーとマウスのボタン、ゲーム中だけ。メニューの「キーの置き換え」） | 手元のスモーク（GLFW・SDL3）で確認済み。実機では未確認 |
 | ゲーム内ブラウザ（WebView2。メニューで表示・移動・大きさの変更・ページの操作、ゲーム中の PageUp／PageDown と ↓←→ の動画の操作） | WebView2 を動かすテストと手元のスモーク（GLFW）で確認済み。実機では未確認 |
 | インストーラー（公式ランチャー、MultiMC、Prism Launcher、MCSR Launcher） | 設定ファイルの写しに対して画面から操作して確認済み、Java 8・17・21・25 で表示を確認。本物のランチャーでは未確認。ダウンロードと「最新版に更新」はリリースがないので失敗する（置き換えは単体テストで確認） |
-| フックを JVMTI の差し替えだけで渡す（`agent/` の `jvmti.rs`・`hook.rs`、`hook-win/` の `library.rs`・`tall.rs`。Linux・macOS への準備の段階 1〜4） | MinHook をやめた版（ズーム中の OBS の録画の修正を含む）は実機の 1.21.11・26.3 で確認済み。OS に依存しない部分を `agent/` に分けた版は手元のスモークで確認済み |
+| フックを JVMTI の差し替えだけで渡す（`agent/` の `jvmti.rs`・`library.rs`・`hook.rs`・`tall.rs`。Linux・macOS への準備の段階 1〜4） | MinHook をやめた版（ズーム中の OBS の録画の修正を含む）は実機の 1.21.11・26.3 で確認済み。エージェント本体を `agent/` に移し、OS に頼ることを `Os` に分けた版は手元のスモーク（Windows）と、Linux のビルド・テストで確認済み |
 | 監査（`docs/AUDIT-2026-10-09.md`）の全件の修正 | テスト・clippy・インストーラーのビルドで確認。実機では未確認（`docs/TESTING.md` の「監査の修正で確認すること」）。設計は HANDOFF.md の「追記：監査の修正」 |
 
 ### 高精細のズームの仕組み（`hook-win/src/tall.rs`）

@@ -1,9 +1,5 @@
-//! The agent's own OpenGL context on the game's device context.
-//!
-//! The context is created on the same HDC as the game's, so both render to the same
-//! default framebuffer, but each keeps its own GL state: switching to ours inside the swap
-//! hook and back afterwards leaves Minecraft's state untouched, whether the game uses a
-//! core or a compatibility profile.
+//! WGL: OpenGL contexts on Windows, for [`crate::windows`] (the agent keeps its own context on
+//! the game's device context with them).
 //!
 //! opengl32.dll is resolved at runtime (GLFW loads it) instead of being imported, so
 //! loading the agent does not change when or from where it gets loaded.
@@ -29,8 +25,6 @@ type MakeCurrentFn = unsafe extern "system" fn(HDC, HGLRC) -> Bool;
 type GetCurrentContextFn = unsafe extern "system" fn() -> HGLRC;
 type GetCurrentDcFn = unsafe extern "system" fn() -> HDC;
 type GetProcAddressFn = unsafe extern "system" fn(*const c_char) -> *const c_void;
-type GlGetStringFn = unsafe extern "system" fn(u32) -> *const u8;
-type GlGetIntegervFn = unsafe extern "system" fn(u32, *mut i32);
 
 pub struct Wgl {
     module: HMODULE,
@@ -40,8 +34,6 @@ pub struct Wgl {
     get_current_context: GetCurrentContextFn,
     get_current_dc: GetCurrentDcFn,
     get_proc_address: GetProcAddressFn,
-    gl_get_string: GlGetStringFn,
-    gl_get_integerv: GlGetIntegervFn,
 }
 
 // SAFETY: plain function pointers and a module handle.
@@ -55,11 +47,6 @@ static WGL: OnceLock<Result<Wgl, String>> = OnceLock::new();
 pub fn get() -> Result<&'static Wgl, String> {
     WGL.get_or_init(Wgl::resolve).as_ref().map_err(Clone::clone)
 }
-
-const GL_VENDOR: u32 = 0x1F00;
-const GL_RENDERER: u32 = 0x1F01;
-const GL_VERSION: u32 = 0x1F02;
-const GL_CONTEXT_PROFILE_MASK: u32 = 0x9126;
 
 impl Wgl {
     fn resolve() -> Result<Wgl, String> {
@@ -95,12 +82,6 @@ impl Wgl {
                 get_proc_address: std::mem::transmute::<*const c_void, GetProcAddressFn>(proc(
                     c"wglGetProcAddress",
                 )?),
-                gl_get_string: std::mem::transmute::<*const c_void, GlGetStringFn>(proc(
-                    c"glGetString",
-                )?),
-                gl_get_integerv: std::mem::transmute::<*const c_void, GlGetIntegervFn>(proc(
-                    c"glGetIntegerv",
-                )?),
             })
         }
     }
@@ -109,14 +90,6 @@ impl Wgl {
     pub fn current(&self) -> (HDC, HGLRC) {
         // SAFETY: no preconditions.
         unsafe { ((self.get_current_dc)(), (self.get_current_context)()) }
-    }
-
-    /// `glGetIntegerv(name)` on the current context.
-    pub fn integer(&self, name: u32) -> i32 {
-        let mut value = 0;
-        // SAFETY: a single-value query; writes one integer.
-        unsafe { (self.gl_get_integerv)(name, &mut value) };
-        value
     }
 
     /// Looks up a GL function for the current context: extensions and GL > 1.1 come from
@@ -132,50 +105,37 @@ impl Wgl {
         }
     }
 
-    /// "version | renderer | vendor | profile" of the current context, using only GL 1.1
-    /// entry points so it works on the game's context without loading anything.
-    pub fn describe_current(&self) -> String {
-        let string = |name| {
-            // SAFETY: glGetString on the current context; null means an error.
-            let s = unsafe { (self.gl_get_string)(name) };
-            if s.is_null() {
-                "?".to_owned()
-            } else {
-                // SAFETY: GL returns a static NUL-terminated string.
-                unsafe { CStr::from_ptr(s.cast()) }
-                    .to_string_lossy()
-                    .into_owned()
-            }
-        };
-        let version = string(GL_VERSION);
-        // The profile query only exists since GL 3.2; on older contexts it would leave a
-        // GL error behind in the game's context.
-        let profile = if parse_gl_version(&version) >= Some((3, 2)) {
-            let mut mask = 0;
-            // SAFETY: valid query on a 3.2+ context.
-            unsafe { (self.gl_get_integerv)(GL_CONTEXT_PROFILE_MASK, &mut mask) };
-            match mask {
-                m if m & 1 != 0 => "core",
-                m if m & 2 != 0 => "compatibility",
-                _ => "unknown profile",
-            }
-        } else {
-            "legacy"
-        };
-        format!(
-            "{version} | {} | {} | {profile}",
-            string(GL_RENDERER),
-            string(GL_VENDOR)
-        )
+    /// A context with the pixel format already set on `hdc` by the window library.
+    pub fn create_context(&self, hdc: HDC) -> Result<HGLRC, String> {
+        // SAFETY: `hdc` is the DC of the game's current context.
+        let hglrc = unsafe { (self.create_context)(hdc) };
+        if hglrc.is_null() {
+            // SAFETY: no preconditions.
+            let error = unsafe { GetLastError() };
+            return Err(format!("wglCreateContext failed (error {error})"));
+        }
+        Ok(hglrc)
     }
-}
 
-/// (major, minor) from a desktop GL_VERSION string such as "4.6.0 NVIDIA 555.85".
-fn parse_gl_version(version: &str) -> Option<(u32, u32)> {
-    let mut parts = version.split(|c: char| !c.is_ascii_digit());
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    Some((major, minor))
+    /// Makes `hglrc` current on `hdc` (null and null: none).
+    pub fn make_current(&self, hdc: HDC, hglrc: HGLRC) -> Result<(), String> {
+        // SAFETY: a context made for this DC, or none.
+        if unsafe { (self.make_current)(hdc, hglrc) } == 0 {
+            // SAFETY: no preconditions.
+            let error = unsafe { GetLastError() };
+            return Err(format!("wglMakeCurrent failed (error {error})"));
+        }
+        Ok(())
+    }
+
+    /// Deletes a context that is not current.
+    pub fn delete_context(&self, hglrc: HGLRC) -> Result<(), String> {
+        // SAFETY: the caller's context, not current.
+        if unsafe { (self.delete_context)(hglrc) } == 0 {
+            return Err("wglDeleteContext failed".into());
+        }
+        Ok(())
+    }
 }
 
 /// Pixel format of the window's DC, for diagnosing driver/context problems.
@@ -211,96 +171,5 @@ pub fn describe_pixel_format(hdc: HDC) -> String {
             pfd.cStencilBits,
             pfd.dwFlags & PFD_DOUBLEBUFFER != 0
         )
-    }
-}
-
-/// The agent's context. Deleted explicitly with [`OwnContext::delete`]; never in `Drop`,
-/// which could run during thread teardown.
-pub struct OwnContext {
-    hdc: HDC,
-    hglrc: HGLRC,
-}
-
-impl OwnContext {
-    /// Creates a context with the pixel format already set on `hdc` by GLFW.
-    pub fn create(wgl: &Wgl, hdc: HDC) -> Result<Self, String> {
-        // SAFETY: `hdc` is the DC of the game's current context.
-        let hglrc = unsafe { (wgl.create_context)(hdc) };
-        if hglrc.is_null() {
-            // SAFETY: no preconditions.
-            let error = unsafe { GetLastError() };
-            return Err(format!("wglCreateContext failed (error {error})"));
-        }
-        Ok(Self { hdc, hglrc })
-    }
-
-    pub fn hdc(&self) -> HDC {
-        self.hdc
-    }
-
-    /// Makes this context current; the previous one comes back when the guard drops.
-    pub fn make_current<'a>(&self, wgl: &'a Wgl) -> Result<CurrentGuard<'a>, String> {
-        let (prev_dc, prev_ctx) = wgl.current();
-        // SAFETY: our context was created for this DC.
-        if unsafe { (wgl.make_current)(self.hdc, self.hglrc) } == 0 {
-            // SAFETY: no preconditions.
-            let error = unsafe { GetLastError() };
-            // A failed wglMakeCurrent may leave no context current: restore the game's.
-            // SAFETY: restoring what was current a moment ago.
-            unsafe { (wgl.make_current)(prev_dc, prev_ctx) };
-            return Err(format!("wglMakeCurrent failed (error {error})"));
-        }
-        Ok(CurrentGuard {
-            wgl,
-            prev_dc,
-            prev_ctx,
-        })
-    }
-
-    /// Deletes the context. It must not be current.
-    pub fn delete(self, wgl: &Wgl) {
-        // SAFETY: we own the context and it is not current (guards restore on drop).
-        if unsafe { (wgl.delete_context)(self.hglrc) } == 0 {
-            log::warn!("wglDeleteContext failed");
-        }
-    }
-}
-
-/// Restores the previously current context (the game's) when dropped, also on panic.
-pub struct CurrentGuard<'a> {
-    wgl: &'a Wgl,
-    prev_dc: HDC,
-    prev_ctx: HGLRC,
-}
-
-impl Drop for CurrentGuard<'_> {
-    fn drop(&mut self) {
-        // SAFETY: restoring the context that was current before the switch.
-        if unsafe { (self.wgl.make_current)(self.prev_dc, self.prev_ctx) } == 0 {
-            // SAFETY: no preconditions.
-            let error = unsafe { GetLastError() };
-            log::error!("cannot restore the game's GL context (error {error})");
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_gl_version;
-
-    #[test]
-    fn gl_version_strings() {
-        assert_eq!(parse_gl_version("4.6.0 NVIDIA 555.85"), Some((4, 6)));
-        assert_eq!(
-            parse_gl_version("3.2.0 Core Profile Context 24.10.1"),
-            Some((3, 2))
-        );
-        assert_eq!(
-            parse_gl_version("4.5 (Compatibility Profile) Mesa 25.2.8"),
-            Some((4, 5))
-        );
-        assert_eq!(parse_gl_version("1.1.0"), Some((1, 1)));
-        assert_eq!(parse_gl_version("garbage"), None);
-        assert!(parse_gl_version("3.1.0") < Some((3, 2)));
     }
 }

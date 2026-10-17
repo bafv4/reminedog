@@ -1,6 +1,6 @@
 //! The GLFW library LWJGL loads, and the hooks on it.
 //!
-//! LWJGL resolves GLFW's exports once with `GetProcAddress` and calls through the saved
+//! LWJGL resolves GLFW's exports once and calls through the saved
 //! pointers, so it is handed the hooks when it looks them up ([`crate::jvmti`]).
 
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -10,9 +10,7 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 use reminedog_core::{
     InputId, Naming, glfw_button_of, glfw_key_of, input_from_glfw_button, input_from_glfw_key,
 };
-use windows_sys::Win32::Foundation::{HMODULE, HWND};
 
-use crate::ffi;
 use crate::frame::{self, WindowSystem};
 use crate::hook::{Hook, Original};
 use crate::library::export;
@@ -24,8 +22,10 @@ type GetWindowContentScaleFn =
     unsafe extern "C" fn(window: *mut c_void, xscale: *mut f32, yscale: *mut f32);
 type GetVersionStringFn = unsafe extern "C" fn() -> *const c_char;
 type GetWindowAttribFn = unsafe extern "C" fn(window: *mut c_void, attrib: c_int) -> c_int;
-type GetWin32WindowFn = unsafe extern "C" fn(window: *mut c_void) -> HWND;
+/// `glfwGetWin32Window`, `glfwGetX11Window` (an `HWND`, an X11 `Window`).
+type NativeWindowFn = unsafe extern "C" fn(window: *mut c_void) -> usize;
 
+const GLFW_ICONIFIED: c_int = 0x0002_0002;
 const GLFW_VISIBLE: c_int = 0x0002_0004;
 
 /// GLFW functions the agent calls itself.
@@ -37,8 +37,8 @@ pub struct Glfw {
     get_window_content_scale: Option<GetWindowContentScaleFn>,
     get_version_string: Option<GetVersionStringFn>,
     get_window_attrib: GetWindowAttribFn,
-    /// Native access export; LWJGL's builds have it.
-    get_win32_window: Option<GetWin32WindowFn>,
+    /// Native access export ([`crate::os::Os::glfw_native_window`]); LWJGL's builds have it.
+    native_window: Option<NativeWindowFn>,
 }
 
 impl WindowSystem for Glfw {
@@ -64,11 +64,16 @@ impl WindowSystem for Glfw {
     }
 
     /// `None` if this GLFW does not export native access.
-    fn hwnd(&self, window: *mut c_void) -> Option<HWND> {
-        let f = self.get_win32_window?;
+    fn native_window(&self, window: *mut c_void) -> Option<usize> {
+        let f = self.native_window?;
         // SAFETY: as above.
-        let hwnd = unsafe { f(window) };
-        (!hwnd.is_null()).then_some(hwnd)
+        let native = unsafe { f(window) };
+        (native != 0).then_some(native)
+    }
+
+    fn minimized(&self, window: *mut c_void) -> bool {
+        // SAFETY: as above.
+        unsafe { (self.get_window_attrib)(window, GLFW_ICONIFIED) != 0 }
     }
 
     fn is_visible(&self, window: *mut c_void) -> bool {
@@ -153,7 +158,7 @@ pub fn is_hooked(module: usize) -> bool {
 
 /// Identifies GLFW by its exports rather than its file name, so a renamed or
 /// launcher-provided GLFW (Prism's "use system GLFW") is recognized as well.
-pub fn is_glfw(module: HMODULE) -> bool {
+pub fn is_glfw(module: usize) -> bool {
     export(module, c"glfwInit").is_some() && export(module, c"glfwSwapBuffers").is_some()
 }
 
@@ -162,7 +167,7 @@ pub fn attached() -> bool {
     GLFW.get().is_some()
 }
 
-pub fn attach(module: HMODULE, path: &str) {
+pub fn attach(module: usize, path: &str) {
     let _guard = ATTACH.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = GLFW.get() {
         log::warn!(
@@ -180,7 +185,7 @@ pub fn attach(module: HMODULE, path: &str) {
     }
 }
 
-fn install(module: HMODULE, path: &str) -> Result<Glfw, String> {
+fn install(module: usize, path: &str) -> Result<Glfw, String> {
     let resolve = |name: &CStr| {
         export(module, name).ok_or_else(|| format!("{} not exported", name.to_string_lossy()))
     };
@@ -198,18 +203,20 @@ fn install(module: HMODULE, path: &str) -> Result<Glfw, String> {
             get_window_attrib: std::mem::transmute::<*const c_void, GetWindowAttribFn>(resolve(
                 c"glfwGetWindowAttrib",
             )?),
-            get_win32_window: export(module, c"glfwGetWin32Window")
-                .map(|f| std::mem::transmute::<*const c_void, GetWin32WindowFn>(f)),
+            native_window: crate::os::get()
+                .glfw_native_window()
+                .and_then(|name| export(module, name))
+                .map(|f| std::mem::transmute::<*const c_void, NativeWindowFn>(f)),
         }
     };
 
-    MODULE.store(module as usize, Ordering::Release);
+    MODULE.store(module, Ordering::Release);
     crate::glfw_input::install(module);
     Ok(glfw)
 }
 
 unsafe extern "C" fn swap_buffers_hook(window: *mut c_void) {
-    ffi::catch("glfwSwapBuffers hook", || {
+    crate::catch("glfwSwapBuffers hook", || {
         if let Some(glfw) = GLFW.get() {
             frame::before_swap(glfw, window);
         }
@@ -224,9 +231,9 @@ unsafe extern "C" fn swap_buffers_hook(window: *mut c_void) {
         crate::glfw_input::send_framebuffer_size(window, w, h);
     }
     // A waypoint request: F3+C, now that the frame is out and no lock is held.
-    ffi::catch("F3+C", || crate::glfw_input::run_f3c(window));
-    ffi::catch("rebinds", || crate::glfw_input::release_lost_keys(window));
-    ffi::catch("hotkeys", crate::rebind_state::forget_lost_presses);
+    crate::catch("F3+C", || crate::glfw_input::run_f3c(window));
+    crate::catch("rebinds", || crate::glfw_input::release_lost_keys(window));
+    crate::catch("hotkeys", crate::rebind_state::forget_lost_presses);
 }
 
 /// Reports the tall size to the game while zooming.

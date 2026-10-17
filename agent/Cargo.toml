@@ -1,6 +1,6 @@
 [package]
 name = "reminedog-agent"
-description = "OS-independent agent parts: JVMTI, hook tables, F3+C, waypoints, input routing, file saving"
+description = "The agent apart from the OS: JVMTI, the GLFW and SDL3 hooks, the overlay's frame, the zoom, F3+C, waypoints"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 reminedog-core.workspace = true
 reminedog-render.workspace = true
+glow.workspace = true
 log.workspace = true
 
 [dev-dependencies]
