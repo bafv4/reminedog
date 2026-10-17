@@ -111,6 +111,14 @@ impl Wgl {
         unsafe { ((self.get_current_dc)(), (self.get_current_context)()) }
     }
 
+    /// `glGetIntegerv(name)` on the current context.
+    pub fn integer(&self, name: u32) -> i32 {
+        let mut value = 0;
+        // SAFETY: a single-value query; writes one integer.
+        unsafe { (self.gl_get_integerv)(name, &mut value) };
+        value
+    }
+
     /// Looks up a GL function for the current context: extensions and GL > 1.1 come from
     /// the driver via wglGetProcAddress, GL 1.1 only from opengl32's exports.
     pub fn load(&self, name: &CStr) -> *const c_void {

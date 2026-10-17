@@ -922,10 +922,20 @@ LWJGL 3.2.2 の `lwjgl.dll` には `WinBase.nGetProcAddress` の `JavaCritical_`
   LWJGL はライブラリを読み込んでから関数を引くので、DLL の読み込みを監視しなくても間に合う。ローダーロックの中で動くこともなくなった
 - `hook.rs`：`Original` は LWJGL が引いた本物だけを持つ。フックの関数の名前は `*_detour` から `*_hook` に改めた
 - `tall.rs`：`wglGetProcAddress` のフックと GL の関数のラッパーを外し、LWJGL の GL のネイティブの差し替えだけにした。
-  `Swapping`（スワップの間はフレームバッファ 0 を替えない）も外した。録画（OBS）は自分で引いた GL の関数を呼ぶので、LWJGL のネイティブの差し替えには当たらない（前は `wglGetProcAddress` のフックで、録画にもラッパーを渡していた）
+  `Swapping` は作り直した（下の「ズーム中の OBS の録画」）
 - オプションの `jvmti`・`detours`（切り分け用）を外した。依存から `minhook` を外し、`windows-sys` の `Win32_System_ProcessStatus` も外した
 - CI のスモークは、`detours=off` の実行をやめ（既定がそれと同じになった）、確認の行に `F3+C: clipboard hooks ready` と、`--mc` の実行では `LWJGL's glBindFramebuffer native goes through the agent` を足した
 
 確かめたこと：テスト、clippy（警告 0）、`ci/check-dll.ps1`。手元のスモーク：GLFW 3.3.3＋Java 25、SDL3 3.4.3＋Java 25、GLFW 3.2.2＋Java 8 のそれぞれで、オーバーレイ、F3+C のフック、J（`PostMessage`）でウェイポイントの記録、Z でゲームが縦長で描いた。警告・エラーなし。GLFW 3.2.2 の `--legacy`（CI と同じ形）で CI の確認の行が全部出た。
-確かめていないこと：実機（`docs/TESTING.md` の「MinHook をやめた版で確認すること」）、OBS の録画（ズーム中）。
+実機（2026-10-18、利用者）：メニュー・ズーム・ウェイポイントは動いた。ズーム中の OBS の録画がうまくいかなかった（下）。
+
+### ズーム中の OBS の録画
+
+- 原因：OBS のゲームキャプチャ（`graphics-hook` の `gl-capture.c`。ソースで確認）は `SwapBuffers`・`wglSwapBuffers` をフックし、本物のスワップの前に、そのとき**読み取り用に結び付いているフレームバッファ**から、ウィンドウのクライアント領域の大きさ（左下から）を写す。自分ではフレームバッファ 0 を結び付けない。
+  ズーム中、ゲームはフレームバッファ 0 のつもりで自前の縦長のフレームバッファを結び付けたままスワップするので、OBS は縦長の絵の下の部分を写していた（スモークの debug のログで、スワップの時点で読み取り・描き込みとも自前のものだったことを確認）
+- 前の修正（2026-10-09 の `Swapping`）は「OBS が `glBindFramebuffer` で 0 を結び付け直す」という誤った前提で、ラッパーの差し替えを止めるだけだったので効いていなかった（実機では確かめていなかった）
+- 修正：`tall::Swapping` が、ズーム中に本物のスワップを呼ぶ間だけ、ゲームのコンテキストで読み取り・描き込みのフレームバッファを 0 に結び付け（自前の縦長のものが結び付いていたときだけ）、スワップの後で元に戻す。
+  ウィンドウにはその前にズームの中央を写してある。戻すのは、Minecraft が結び付けたつもりのフレームバッファを覚えていて、結び付け直しを省くため。`glBindFramebuffer` は `wglGetProcAddress` から本物を引く（LWJGL を通らないので、ズームの差し替えには当たらない）
+- 確かめたこと：スモーク（GLFW 3.3.3 の `--mc`・`--mc --sodium`、SDL3 3.4.3）でズームが縦長で描かれ、`=log=debug` に `zoom: the window's framebuffer is bound for the swap` が出ること。OBS での録画は実機で確かめる
+
 段階 4 の後半（OS に依存しない部分をクレートに分ける）はまだ

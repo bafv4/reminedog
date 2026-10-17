@@ -13,14 +13,15 @@
 //!    that size instead: LWJGL's natives of `glBindFramebuffer(EXT)` and
 //!    `glBlitNamedFramebuffer` are replaced as the JVM binds them ([`wrap_native`], called
 //!    from [`crate::jvmti`]) and substitute ours for 0. Only the game's calls through LWJGL
-//!    are changed: a screen recorder that hooks the swap reads the window's framebuffer 0.
-//! 3. At the buffer swap, the middle rows of our framebuffer are copied into the window.
+//!    are changed.
+//! 3. At the buffer swap, the middle rows of our framebuffer are copied into the window, and
+//!    the window's framebuffer is bound while the real swap runs ([`Swapping`]).
 //!
 //! `glViewport` is wrapped too, only to confirm that the game really renders at the tall
 //! size (it set the tall viewport once since the zoom started); if it does not, the zoom
 //! falls back to enlarging the pixels.
 
-use std::ffi::c_void;
+use std::ffi::{CStr, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -30,6 +31,7 @@ use reminedog_render::{ZoomView, middle_row, tall_size};
 
 use crate::wgl;
 
+type BindFramebufferFn = unsafe extern "system" fn(target: u32, framebuffer: u32);
 /// LWJGL's JNI natives: `(JNIEnv*, jclass, ...)` before the GL function's arguments.
 type JniBindFramebufferFn =
     unsafe extern "system" fn(env: *mut c_void, class: *mut c_void, target: u32, framebuffer: u32);
@@ -61,6 +63,8 @@ type JniViewportFn = unsafe extern "system" fn(
 const GL_FRAMEBUFFER: u32 = 0x8D40;
 const GL_READ_FRAMEBUFFER: u32 = 0x8CA8;
 const GL_DRAW_FRAMEBUFFER: u32 = 0x8CA9;
+const GL_DRAW_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
+const GL_READ_FRAMEBUFFER_BINDING: u32 = 0x8CAA;
 
 /// The JVM's own natives of LWJGL's GL functions, once replaced by ours.
 static JNI_BIND_FRAMEBUFFER: OnceLock<JniBindFramebufferFn> = OnceLock::new();
@@ -75,6 +79,77 @@ static REDIRECT: AtomicU32 = AtomicU32::new(0);
 static GAME_CONTEXT: AtomicUsize = AtomicUsize::new(0);
 /// The game bound (or blitted to) framebuffer 0 since the last frame, getting ours.
 static REDIRECTED: AtomicBool = AtomicBool::new(false);
+/// The real `glBindFramebuffer`, for binding the window's framebuffer in the game's context.
+static BIND_FRAMEBUFFER: OnceLock<Option<BindFramebufferFn>> = OnceLock::new();
+static WINDOW_BOUND_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// While zooming, binds the window's framebuffer (0) in the game's context for the window
+/// system's real swap, and puts the game's bindings (our tall framebuffer) back when dropped.
+/// Screen recorders that hook the swap (OBS's game capture) copy from whatever framebuffer is
+/// bound for reading: with ours they would record the tall frame's bottom rows, not the
+/// window. The game remembers its bindings (Minecraft skips binding what it believes bound),
+/// so they are restored.
+pub struct Swapping {
+    restore: Option<(BindFramebufferFn, u32, u32)>,
+}
+
+impl Swapping {
+    pub fn begin() -> Self {
+        Swapping {
+            restore: crate::ffi::catch("zoom: the window's framebuffer for the swap", bind_window)
+                .flatten(),
+        }
+    }
+}
+
+impl Drop for Swapping {
+    fn drop(&mut self) {
+        if let Some((bind, read, draw)) = self.restore {
+            // SAFETY: the game's context is still current on this thread; the bindings it had.
+            unsafe {
+                bind(GL_READ_FRAMEBUFFER, read);
+                bind(GL_DRAW_FRAMEBUFFER, draw);
+            }
+        }
+    }
+}
+
+/// Binds the window's framebuffer if ours is bound in the game's context; returns what to
+/// restore.
+fn bind_window() -> Option<(BindFramebufferFn, u32, u32)> {
+    let ours = REDIRECT.load(Ordering::Relaxed);
+    if ours == 0 {
+        return None;
+    }
+    let wgl = wgl::get().ok()?;
+    let current = wgl.current().1 as usize;
+    if current == 0 || current != GAME_CONTEXT.load(Ordering::Relaxed) {
+        return None;
+    }
+    let read = wgl.integer(GL_READ_FRAMEBUFFER_BINDING) as u32;
+    let draw = wgl.integer(GL_DRAW_FRAMEBUFFER_BINDING) as u32;
+    if read != ours && draw != ours {
+        return None;
+    }
+    let bind = (*BIND_FRAMEBUFFER.get_or_init(|| {
+        let name: &CStr = c"glBindFramebuffer";
+        let p = wgl.load(name);
+        // SAFETY: glBindFramebuffer's address in this driver.
+        (!p.is_null())
+            .then(|| unsafe { std::mem::transmute::<*const c_void, BindFramebufferFn>(p) })
+    }))?;
+    // SAFETY: the game's context is current; framebuffer 0 always exists.
+    unsafe {
+        bind(GL_READ_FRAMEBUFFER, 0);
+        bind(GL_DRAW_FRAMEBUFFER, 0);
+    }
+    if !WINDOW_BOUND_LOGGED.swap(true, Ordering::Relaxed) {
+        log::debug!(
+            "zoom: the window's framebuffer is bound for the swap (the game had read {read}, draw {draw}; ours is {ours})"
+        );
+    }
+    Some((bind, read, draw))
+}
 /// The tall size (width << 32 | height) the game should set as its viewport, and whether
 /// it did since the zoom started. Only the height is compared: the game may keep a width of
 /// its own (26.3 renders 2560 wide in a window SDL reports as 2561 pixels wide). Once set,
