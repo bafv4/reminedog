@@ -966,3 +966,16 @@ LWJGL 3.2.2 の `lwjgl.dll` には `WinBase.nGetProcAddress` の `JavaCritical_`
 確かめたこと：fmt、clippy（警告 0）、テスト（agent 25、hook-win 29。分ける前の hook-win の 54 と同じ）、手元のスモーク（GLFW 3.3.3＋Java 25、SDL3 3.4.3＋Java 25、GLFW 3.2.2＋Java 8 で、オーバーレイ、F3+C、J でウェイポイント、Z で縦長、スワップの間の結び付け直し。警告・エラーなし）。
 確かめていないこと：Linux・mingw でのビルド（手元にターゲットがない。CI で確かめる）、実機（動きは変えていない）
 
+## 追記：Linux での試作（2026-10-18）
+
+Docker（`scripts/linux/`。Java 25、Rust 1.99.0、Xvfb、Mesa の llvmpipe）で、OS に依存しないクレート（`agent`・`core`・`render`）のテストと clippy が通った（`core` は Windows だけのテストが 1 つ少ない 183）。
+試作（`spike/nmb`）を Linux 用にビルドし（`libreminedog_nmb.so`）、LWJGL のスモークを Xvfb の上で動かした。`DynamicLinkLoader.ndlsym(JJ)J` が JNI のネイティブとして結び付き、差し替えでスワップが受けられた：
+
+| 組み合わせ | フレーム | 横取りしたスワップ | ほか |
+|---|---|---|---|
+| GLFW（LWJGL 3.3.3。GLFW 3.4.0、X11 で GLX） | 233 | 233 | `GL30C.glBindFramebuffer` も差し替え |
+| SDL3（LWJGL 3.4.3、Java 25 の FFM） | 233 | 233 | `SDL_PollEvent` 247 回 |
+| GLFW（LWJGL 3.2.2、Java 25） | 234 | 234 | |
+
+Windows と同じ「LWJGL にフックを渡す」作りが Linux でも使える。次は、OS ごとに違う部分（関数の引き当て、ネイティブのウィンドウ、自前の GL のコンテキスト、物理のキーの状態、クリップボード、ポインターの速度、フォント、ブラウザ）を差し替え口にまとめ、GLFW・SDL3 のフック・キーの置き換え・ズーム・毎フレームの処理を `agent/` に移す
+

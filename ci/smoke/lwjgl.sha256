@@ -20,3 +20,13 @@ de2826d6bc8e73127b42250a282cbfcf91b3c3435edf7f9fd16afcabc25e88ec  lwjgl-glfw-3.4
 a92cf30f25b6fb6066f3508511f83c5c4fe2a0cff14fc2e7373bc1f6c726374f  lwjgl-opengl-3.4.3.jar
 0c76c67fb12c8ab1c88bc89bf9f87fabb313d2b4d735b274f1267f71df3613ad  lwjgl-sdl-3.4.3-natives-windows.jar
 dcb33abcbd946553176bb668be80d7adc60cb9d919ab5c71fb01fc51cacc4c8f  lwjgl-sdl-3.4.3.jar
+5a88eaff245a397adb1d3790cd9da993c5a669e60bcf9cd7c0f30383c37b28fc  lwjgl-3.2.2-natives-linux.jar
+2199957c7ac23710406e3a6411a9ebf2ff0b5c042bb3e01727e38589d8413dfa  lwjgl-glfw-3.2.2-natives-linux.jar
+dd3ff0ab000b5200cae34e2fdfad29569402866d64c19cbd12152193c8eccaed  lwjgl-opengl-3.2.2-natives-linux.jar
+e663738c519a06f6d659882fa8e4e09af7f10e921929ee5cc54a7587f62ed4c9  lwjgl-3.3.3-natives-linux.jar
+b8306062b17741f34269088751421f1ac21a597bfbbd0c6c61226301cde744b8  lwjgl-glfw-3.3.3-natives-linux.jar
+d823a92c6a2810b5112da304dcc6abcd4cb102706f74f7e934a223cea2051250  lwjgl-opengl-3.3.3-natives-linux.jar
+d719e545a6db4ea87eb64d55630ba628755572bb5b56d51a1548347b5354cadb  lwjgl-3.4.3-natives-linux.jar
+aa25296d8fc96355acf0b69eb39083e98c881a204950a708a0c47ab1be34a5d4  lwjgl-glfw-3.4.3-natives-linux.jar
+4056e81c1174201f63e980f76b9955746c0f13d712e4d30ee02c38ae6bccd4ce  lwjgl-opengl-3.4.3-natives-linux.jar
+e1880683a4af33299e9a1b8d7ec1799bed8fb709064ea08dcc2a15cd1101c0b3  lwjgl-sdl-3.4.3-natives-linux.jar

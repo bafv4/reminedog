@@ -104,6 +104,10 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 
 - Rust 1.95 以降（egui 0.36 の要件。今は 1.99。CI とリリースはワークフローの `RUST_TOOLCHAIN` で固定）、edition 2024
 - MSVC では CRT を静的にリンクする（`.cargo/config.toml` の `+crt-static`。Java 8 に vcruntime140 がないため）
+- Linux（Docker。手元は Docker Desktop と WSL2）：`scripts/linux/run.sh <コマンド>` で、`scripts/linux/Dockerfile` のコンテナ（Java 25、CI と同じ Rust、Xvfb、Mesa の llvmpipe）の中で動かす。
+  リポジトリは `/src`、ビルドの出力は `/target`（Docker のボリューム）。`scripts/linux/run.sh cargo test -p reminedog-agent`、
+  `scripts/linux/run.sh scripts/linux/smoke.sh --agent /target/release/<.so> [--sdl --lwjgl 3.4.3] -- --seconds=5 --mc`（LWJGL の natives-linux の jar は `ci/smoke/fetch-lwjgl.sh` が `LWJGL_NATIVES=natives-linux` で取る）。
+  Docker Desktop が止まっていると動かない（利用者に起動してもらう）。シェルスクリプトと Dockerfile は `.gitattributes` で LF
 - Linux からは `--target x86_64-pc-windows-gnu` で DLL をビルドし、`scripts/wine-smoke.sh` で試せる（README の「開発」）。Windows では DLL を置いてゲームで確かめるのが早い
 - テスト用プログラムを Windows で直接動かすなら、`ci/smoke/*.java` を LWJGL の jar と一緒にコンパイルし、`java -agentpath:...\reminedog.dll -cp ... Smoke --seconds=20 --capture --mc` のように動かす（`.github/workflows/ci.yml` の `smoke-windows` ジョブが手順の見本）。
   Prism の libraries に LWJGL のネイティブの jar がないときは、ゲームが展開したもの（`-Dorg.lwjgl.librarypath=%TEMP%\lwjgl_yuanq\3.3.3+5\x64` など）を使う

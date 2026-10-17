@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Download the LWJGL 3 jars the smoke harness needs (core, GLFW, OpenGL and their
-# natives-windows jars) from Maven Central into DEST_DIR, verifying each against the SHA-256
-# in ci/smoke/lwjgl.sha256 (a jar without one there is refused). Already-present jars are
+# Download the LWJGL 3 jars the smoke harness needs (core, GLFW, OpenGL and their natives
+# jars: natives-windows, or LWJGL_NATIVES=natives-linux) from Maven Central into DEST_DIR,
+# verifying each against the SHA-256 in ci/smoke/lwjgl.sha256 (a jar without one there is
+# refused). Already-present jars are
 # checked again and kept, so re-running is cheap.
 # Prints the path of every jar on stdout (progress goes to stderr).
 # Needs only bash, curl and sha256sum, so it also runs in Git Bash on Windows runners.
@@ -46,7 +47,7 @@ hashes=$(dirname "${BASH_SOURCE[0]}")/lwjgl.sha256
 
 mkdir -p "$dest"
 for module in lwjgl lwjgl-glfw lwjgl-opengl ${LWJGL_EXTRA_MODULES:-}; do
-  for classifier in "" "-natives-windows"; do
+  for classifier in "" "-${LWJGL_NATIVES:-natives-windows}"; do
     name="$module-$version$classifier.jar"
     out="$dest/$name"
     want=$(tr -d '\r' <"$hashes" | awk -v name="$name" '$2 == name { print $1 }')

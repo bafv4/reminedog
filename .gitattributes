@@ -1,0 +1,4 @@
+# Shell scripts and the Dockerfile run in Linux (CI, the container of scripts/linux): keep LF
+# in the working tree too, whatever core.autocrlf says.
+*.sh text eol=lf
+Dockerfile text eol=lf
