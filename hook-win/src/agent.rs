@@ -117,14 +117,9 @@ pub fn on_load(raw_options: &str, vm: *mut std::ffi::c_void) {
     if globals().is_some_and(|globals| globals.options.overlay) {
         crate::fonts::preload();
     }
-    if globals().is_some_and(|globals| globals.options.jvmti) {
-        // SAFETY: the JavaVM the JVM passed Agent_OnLoad.
-        if let Err(e) = unsafe { crate::jvmti::start(vm) } {
-            log::warn!("jvmti: not started, only the detours see the game's calls: {e}");
-        }
-    }
-    if let Err(e) = crate::loader::watch() {
-        log::error!("cannot watch DLL loads, the overlay will not work: {e}");
+    // SAFETY: the JavaVM the JVM passed Agent_OnLoad.
+    if let Err(e) = unsafe { crate::jvmti::start(vm) } {
+        log::error!("jvmti: not started, the overlay will not work: {e}");
     }
 }
 

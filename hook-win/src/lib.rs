@@ -1,11 +1,10 @@
 //! Windows agent loaded with `-agentpath:<path>\reminedog.dll[=<options>]`.
 //!
-//! Flow: `Agent_OnLoad` sets up logging and asks the loader to report DLL loads
-//! ([`loader`]). When a GLFW library shows up, [`glfw`] detours `glfwSwapBuffers`;
-//! from then on every frame goes through [`frame::before_swap`], which draws the overlay
-//! with the agent's own GL context ([`wgl`]) and hands the swap back to GLFW. LWJGL is also
-//! handed the agent's own swap function when it looks GLFW's or SDL3's up ([`jvmti`]), which
-//! needs no patching; whichever way a swap comes first handles it. Waypoints
+//! Flow: `Agent_OnLoad` sets up logging and has the JVM report LWJGL's natives as it binds
+//! them ([`jvmti`]). When LWJGL looks up a function of GLFW (or SDL3, [`library`]), it is
+//! handed the agent's hook ([`hook`], [`glfw`]). From then on every frame goes through
+//! [`frame::before_swap`], which draws the overlay with the agent's own GL context ([`wgl`])
+//! and hands the swap back to GLFW. Waypoints
 //! ([`waypoints`]) get the player's position by sending the game F3+C ([`f3c`]).
 //!
 //! Everything is Windows-only; on other platforms this crate builds as an empty library
@@ -24,7 +23,7 @@ mod glfw_input;
 mod hook;
 mod input;
 mod jvmti;
-mod loader;
+mod library;
 mod pointer;
 mod rebind_state;
 mod saver;

@@ -881,4 +881,51 @@ GLFW 版・SDL3 版とも、`PrintWindow` で撮ったウィンドウに四角�
 - 今のところ、ほかのフック（入力、大きさの偽装、ズームの GL のラッパー）は MinHook のまま。ゲームのウィンドウのライブラリの検出（`Glfw`・`Sdl` の関数の表）も `loader.rs` のまま
 
 確かめたこと：テスト、clippy（警告 0）、手元のスモーク（GLFW 3.3.3＋Java 25、SDL3 3.4.3＋Java 25、GLFW 3.2.2＋Java 8＋`-Xcomp`）で LWJGL の経路から来てオーバーレイが描かれること、`jvmti=off` でフックの経路になること、GLFW 版でズームが縦長で描かれること。
-確かめていないこと：実機（`docs/TESTING.md` の「スワップを JVMTI で受ける変更で確認すること」）
+確かめたこと（実機、2026-10-17）：1.21.11（Fabric＋Sodium・Iris）と 26.3 で、スワップが LWJGL の経路から来て、オーバーレイ・ズームが今までどおり動いた（利用者）。
+
+## 追記：入力のフックも JVMTI で渡す（2026-10-17）
+
+段階 2。段階 1 の作り（自前の関数が本物を呼び、本物の MinHook のフックに 2 回目が来るのを `SwapEntry` で捨てる）をやめ、GLFW・SDL3 の全部のフックを同じ作りにした。
+
+- `hook::Hook`（関数の名前・フック・`Original`）の表を、`glfw::hooks()`（スワップ、`glfwGetFramebufferSize`）・`glfw_input::hooks()`（コールバックの登録 8 つ、`glfwSetClipboardString`、`glfwGetKey`）・
+  `sdl::hooks()`（スワップ、大きさ、`SDL_WarpMouseInWindow`、診断の 3 つ）・`sdl_input::hooks()`（`SDL_PollEvent`、クリップボード、文字入力の開始と終了、`SDL_GetKeyboardState`、診断の 8 つ）が持つ
+- `Original<F>`：フックが呼ぶ元の関数。MinHook で書き換えてあればトランポリン、なければ LWJGL が引いた本物。LWJGL にはフック自体を渡すので、LWJGL からの呼び出しはトランポリンに行き、書き換えたところを通らない（2 回来ない）
+- MinHook（`hook::patch`）と JVMTI（`jvmti::hook_for`）が同じ表を使う。JVMTI は、引いたライブラリ（`nGetProcAddress` の module）がフックしたウィンドウのライブラリのときだけ渡す（GLFW のゲームで Mod が使う SDL などには渡さない）
+- オプション `detours=off`：GLFW・SDL3 を書き換えない（opengl32 の `wglGetProcAddress` は段階 3 まで書き換える）。JVMTI だけで動くかを確かめるため。CI のスモークに、これを付けた実行を足した
+- 「フックが揃ったか」は、起動時ではなく使うときに確かめる（`Slot::ready`：書き換えたか、引かれたか、これから引かれるなら `jvmti::handing_out`）。SDL の関数は、ゲームがそのクラスを初めて使うときに引かれる（クリップボードは最初のコピーのとき）ため。
+  F3+C は `f3c::set_hooks_check` で確かめ方を受け取り、最初のフレームでログに出す。キーの状態の偽装（`key_state_spoofed`）も同じ
+
+確かめたこと：テスト、clippy（警告 0）、手元のスモーク：既定・`detours=off`・`jvmti=off` のそれぞれで GLFW 3.3.3＋Java 25・SDL3 3.4.3＋Java 25・GLFW 3.2.2＋Java 8 のオーバーレイと「F3+C: clipboard hooks ready」。
+`detours=off` で、GLFW 版・SDL3 版とも、J（`PostMessage`）でウェイポイントを記録できた（ホットキーの横取り、F3+C の送信、クリップボードの横取り）、Z でゲームが縦長で描いた。
+確かめていないこと：実機（`docs/TESTING.md` の「フックを JVMTI でも渡す変更で確認すること」）。キーの置き換え（物理のキーを押したままにする必要があり、`PostMessage` では試せない）。
+LWJGL 3.2.2 の `lwjgl.dll` には `WinBase.nGetProcAddress` の `JavaCritical_` の入口もあり、Java 8 は `CriticalJNINatives` がオン。JIT がこのネイティブを翻訳した後の引き当ては差し替えを通らないかもしれない（GLFW の関数は起動時の数百回で引き終わるので、翻訳の前のはず。`-Xcomp` でも差し替えが効いた）
+
+確かめたこと（実機、2026-10-17）：1.21.11 と 26.3 の既定の設定で、フックが渡り（1.21.11 は 12 個、26.3 は 19 個）、メニュー・ズーム・ウェイポイントが今までどおり動いた（利用者）。`detours=off` の実機は未確認。
+
+## 追記：ズームの GL のフックも JVMTI で（2026-10-17）
+
+段階 3。高精細のズームが包む GL の関数（`glBindFramebuffer`・`glBindFramebufferEXT`・`glBlitNamedFramebuffer`・`glViewport`）を、LWJGL の JNI のネイティブで差し替える。
+
+- LWJGL 3.2〜3.4 では、どれも 1 つのクラスだけがネイティブを持つ（`GL30C`・`EXTFramebufferObject`・`GL45C`・`GL11C`。jar で確認）。`jvmti.rs` は `Lorg/lwjgl/opengl/` のクラスのネイティブを `tall::wrap_native` に渡し、名前と JNI のシグネチャで見分ける（3.1 の `GL30` などクラスが違っても当たる）
+- `wglGetProcAddress` のフック（GL の関数のラッパー）も残す。LWJGL のネイティブはそのラッパーを呼ぶので、ネイティブを差し替えた関数では、ラッパーは何もせずに通す（差し替え・viewport の数え上げが 2 回にならない）。ゲームの外の呼び出し（画面の録画）もそのまま通る
+- `detours=off` は opengl32 も書き換えない（MinHook を一切使わない）。自前のコンテキストは、トランポリンがなければ opengl32 の本物の `wglGetProcAddress` を使う（`wgl::Wgl::load`）
+- ズームを始める前の確かめ（`glBindFramebuffer` を包めたか）は、ネイティブの差し替えも数える
+
+確かめたこと：clippy（警告 0）、手元のスモークで Z（`PostMessage`）を押して、GLFW 3.3.3（`--mc`、`--mc --sodium`）・SDL3 3.4.3・GLFW 3.2.2＋Java 8 のそれぞれで、既定・`detours=off`・`jvmti=off` のどれでもゲームが縦長で描いた（`zoom: game renders at 854x1920`）。
+実機（2026-10-18、利用者）：1.21.11 と 26.3 で、既定と `detours=off`（MinHook を一切使わない）の 4 通りとも、メニュー・ズーム・ウェイポイントが動いた。
+
+## 追記：MinHook をやめる（2026-10-18）
+
+段階 4 の前半。実機で `detours=off` が動いたので、MinHook のデトアと DLL の読み込みの監視（`loader.rs`）を外した。フックは JVMTI の差し替えだけで渡す。
+
+- `library.rs`：ウィンドウのライブラリは、LWJGL が関数を引いたモジュール（`nGetProcAddress` の引数）で見分ける。最初に引かれた GLFW か SDL3 をフックし（`glfw::attach`・`sdl::attach`）、ほかのモジュールは 1 回ずつ調べて覚える。
+  LWJGL はライブラリを読み込んでから関数を引くので、DLL の読み込みを監視しなくても間に合う。ローダーロックの中で動くこともなくなった
+- `hook.rs`：`Original` は LWJGL が引いた本物だけを持つ。フックの関数の名前は `*_detour` から `*_hook` に改めた
+- `tall.rs`：`wglGetProcAddress` のフックと GL の関数のラッパーを外し、LWJGL の GL のネイティブの差し替えだけにした。
+  `Swapping`（スワップの間はフレームバッファ 0 を替えない）も外した。録画（OBS）は自分で引いた GL の関数を呼ぶので、LWJGL のネイティブの差し替えには当たらない（前は `wglGetProcAddress` のフックで、録画にもラッパーを渡していた）
+- オプションの `jvmti`・`detours`（切り分け用）を外した。依存から `minhook` を外し、`windows-sys` の `Win32_System_ProcessStatus` も外した
+- CI のスモークは、`detours=off` の実行をやめ（既定がそれと同じになった）、確認の行に `F3+C: clipboard hooks ready` と、`--mc` の実行では `LWJGL's glBindFramebuffer native goes through the agent` を足した
+
+確かめたこと：テスト、clippy（警告 0）、`ci/check-dll.ps1`。手元のスモーク：GLFW 3.3.3＋Java 25、SDL3 3.4.3＋Java 25、GLFW 3.2.2＋Java 8 のそれぞれで、オーバーレイ、F3+C のフック、J（`PostMessage`）でウェイポイントの記録、Z でゲームが縦長で描いた。警告・エラーなし。GLFW 3.2.2 の `--legacy`（CI と同じ形）で CI の確認の行が全部出た。
+確かめていないこと：実機（`docs/TESTING.md` の「MinHook をやめた版で確認すること」）、OBS の録画（ズーム中）。
+段階 4 の後半（OS に依存しない部分をクレートに分ける）はまだ

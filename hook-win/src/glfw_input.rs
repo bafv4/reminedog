@@ -1,7 +1,7 @@
 //! GLFW input: the game's callbacks are wrapped so the overlay sees every event first.
 //!
-//! The `glfwSet*Callback` functions are detoured. GLFW gets our wrapper instead of the
-//! game's callback, and the game's pointer is kept here. Each setter hands back the
+//! The `glfwSet*Callback` functions are hooked ([`crate::hook`]). GLFW gets our wrapper instead
+//! of the game's callback, and the game's pointer is kept here. Each setter hands back the
 //! game's previous pointer, never the wrapper: LWJGL frees whatever the setters return
 //! (`Callbacks.glfwFreeCallbacks` at shutdown), so returning a wrapper would crash on exit.
 //! Wrappers never call game code while holding a lock.
@@ -11,13 +11,13 @@
 //! game got ([`rebind_state`]).
 //!
 //! F3+C for waypoints ([`f3c`]) goes straight to the game's key callback after a swap
-//! ([`run_f3c`]); `glfwSetClipboardString` is detoured to catch the location, and
+//! ([`run_f3c`]); `glfwSetClipboardString` is hooked to catch the location, and
 //! `glfwGetKey` to report the modifier as held meanwhile (Minecraft 1.16 reads F3 that way).
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use reminedog_core::{
     DebugKeys, InputId, Naming, glfw_button_of, glfw_key, glfw_key_of, input_from_glfw_button,
@@ -28,7 +28,7 @@ use windows_sys::Win32::Foundation::HMODULE;
 
 use crate::f3c::{self, Failure, Injected, Purpose};
 use crate::ffi;
-use crate::hook::{self, export};
+use crate::hook::{Hook, Original, Slot as _, export};
 use crate::input::{self, FUNCTION_KEYS, router};
 use crate::rebind_state;
 
@@ -107,18 +107,16 @@ static GET_INPUT_MODE: OnceLock<GetInputModeFn> = OnceLock::new();
 /// GLFW 3.3 and later: raw input is the GLFW_RAW_MOUSE_MOTION input mode, which Minecraft's
 /// "Raw Input" setting switches.
 static RAW_MOTION_OPTIONAL: AtomicBool = AtomicBool::new(false);
-static SET_CLIPBOARD_STRING: OnceLock<SetClipboardStringFn> = OnceLock::new();
-/// Trampoline to the original glfwGetKey: the real key state, never spoofed.
-static GET_KEY: OnceLock<GetKeyFn> = OnceLock::new();
-/// glfwGetKey itself, for the real key state if it could not be detoured.
+static SET_CLIPBOARD_STRING: Original<SetClipboardStringFn> = Original::new();
+/// The real glfwGetKey: the real key state, never spoofed.
+static GET_KEY: Original<GetKeyFn> = Original::new();
+/// glfwGetKey itself, for the real key state if it is not hooked.
 static GET_KEY_EXPORT: OnceLock<GetKeyFn> = OnceLock::new();
 static GET_KEY_SCANCODE: OnceLock<GetKeyScancodeFn> = OnceLock::new();
 /// While F3+C is being sent, glfwGetKey reports `SPOOF_KEY` of this window as pressed
 /// (0 = off).
 static SPOOF_WINDOW: AtomicUsize = AtomicUsize::new(0);
 static SPOOF_KEY: AtomicI32 = AtomicI32::new(0);
-/// glfwGetKey is detoured: the game reads the key state the rebinding gives it.
-static KEY_STATE_SPOOFED: AtomicBool = AtomicBool::new(false);
 
 fn game_callbacks(window: *mut c_void) -> GameCallbacks {
     let game = GAME.lock().unwrap_or_else(|e| e.into_inner());
@@ -162,15 +160,15 @@ pub fn raw_motion(window: *mut c_void) -> bool {
     })
 }
 
-/// Defines the detour of one `glfwSet*Callback` function.
+/// Defines the hook of one `glfwSet*Callback` function.
 macro_rules! setter {
-    ($detour:ident, $original:ident, $field:ident, $fn:ty, $wrapper:ident) => {
-        static $original: OnceLock<unsafe extern "C" fn(*mut c_void, Option<$fn>) -> Option<$fn>> =
-            OnceLock::new();
+    ($hook:ident, $original:ident, $field:ident, $fn:ty, $wrapper:ident) => {
+        static $original: Original<unsafe extern "C" fn(*mut c_void, Option<$fn>) -> Option<$fn>> =
+            Original::new();
 
-        unsafe extern "C" fn $detour(window: *mut c_void, callback: Option<$fn>) -> Option<$fn> {
+        unsafe extern "C" fn $hook(window: *mut c_void, callback: Option<$fn>) -> Option<$fn> {
             let original = $original.get()?;
-            let previous = ffi::catch(stringify!($detour), || {
+            let previous = ffi::catch(stringify!($hook), || {
                 replace_game_callback(window, |c| &mut c.$field, callback)
             })
             .flatten();
@@ -182,46 +180,103 @@ macro_rules! setter {
     };
 }
 
-setter!(set_key_detour, SET_KEY, key, KeyFn, key_wrapper);
-setter!(set_char_detour, SET_CHAR, char, CharFn, char_wrapper);
+setter!(set_key_hook, SET_KEY, key, KeyFn, key_wrapper);
+setter!(set_char_hook, SET_CHAR, char, CharFn, char_wrapper);
 setter!(
-    set_char_mods_detour,
+    set_char_mods_hook,
     SET_CHAR_MODS,
     char_mods,
     CharModsFn,
     char_mods_wrapper
 );
 setter!(
-    set_mouse_button_detour,
+    set_mouse_button_hook,
     SET_MOUSE_BUTTON,
     mouse_button,
     MouseButtonFn,
     mouse_button_wrapper
 );
 setter!(
-    set_cursor_pos_detour,
+    set_cursor_pos_hook,
     SET_CURSOR_POS,
     cursor_pos,
     CursorPosFn,
     cursor_pos_wrapper
 );
 setter!(
-    set_scroll_detour,
+    set_scroll_hook,
     SET_SCROLL,
     scroll,
     ScrollFn,
     scroll_wrapper
 );
-setter!(set_focus_detour, SET_FOCUS, focus, FocusFn, focus_wrapper);
+setter!(set_focus_hook, SET_FOCUS, focus, FocusFn, focus_wrapper);
 setter!(
-    set_framebuffer_size_detour,
+    set_framebuffer_size_hook,
     SET_FRAMEBUFFER_SIZE,
     framebuffer_size,
     FramebufferSizeFn,
     framebuffer_size_wrapper
 );
 
-/// Detours the callback setters. Failures only cost the overlay its input.
+static HOOKS: LazyLock<[Hook; 10]> = LazyLock::new(|| {
+    [
+        Hook::new(
+            c"glfwSetKeyCallback",
+            set_key_hook as *const c_void,
+            &SET_KEY,
+        ),
+        Hook::new(
+            c"glfwSetCharCallback",
+            set_char_hook as *const c_void,
+            &SET_CHAR,
+        ),
+        Hook::new(
+            c"glfwSetCharModsCallback",
+            set_char_mods_hook as *const c_void,
+            &SET_CHAR_MODS,
+        ),
+        Hook::new(
+            c"glfwSetMouseButtonCallback",
+            set_mouse_button_hook as *const c_void,
+            &SET_MOUSE_BUTTON,
+        ),
+        Hook::new(
+            c"glfwSetCursorPosCallback",
+            set_cursor_pos_hook as *const c_void,
+            &SET_CURSOR_POS,
+        ),
+        Hook::new(
+            c"glfwSetScrollCallback",
+            set_scroll_hook as *const c_void,
+            &SET_SCROLL,
+        ),
+        Hook::new(
+            c"glfwSetWindowFocusCallback",
+            set_focus_hook as *const c_void,
+            &SET_FOCUS,
+        ),
+        Hook::new(
+            c"glfwSetFramebufferSizeCallback",
+            set_framebuffer_size_hook as *const c_void,
+            &SET_FRAMEBUFFER_SIZE,
+        ),
+        // F3+C: the game's clipboard writes, the real key state, and F3 as 1.16 reads it.
+        Hook::new(
+            c"glfwSetClipboardString",
+            set_clipboard_string_hook as *const c_void,
+            &SET_CLIPBOARD_STRING,
+        ),
+        Hook::new(c"glfwGetKey", get_key_hook as *const c_void, &GET_KEY),
+    ]
+});
+
+/// The hooks of GLFW's input functions.
+pub fn hooks() -> &'static [Hook] {
+    &*HOOKS
+}
+
+/// Hooks the callback setters. Failures only cost the overlay its input.
 pub fn install(module: HMODULE) {
     if let Some(f) = export(module, c"glfwGetInputMode") {
         // SAFETY: glfwGetInputMode has this signature.
@@ -232,83 +287,18 @@ pub fn install(module: HMODULE) {
         export(module, c"glfwRawMouseMotionSupported").is_some(),
         Ordering::Relaxed,
     );
-    // True when the detour is in.
-    macro_rules! hook {
-        ($name:literal, $detour:ident, $original:ident) => {
-            hook!($name, $detour, $original, "no overlay input")
-        };
-        ($name:literal, $detour:ident, $original:ident, $lost:literal) => {
-            match export(module, $name) {
-                // SAFETY: the function and its detour share the slot's signature; nothing
-                // runs GLFW while it is being loaded.
-                Some(target) => {
-                    let name = $name.to_string_lossy();
-                    match unsafe {
-                        hook::install(&name, target, $detour as *const c_void, &$original)
-                    } {
-                        Ok(()) => true,
-                        Err(e) => {
-                            log::warn!("{}: {e}", $lost);
-                            false
-                        }
-                    }
-                }
-                None => {
-                    log::warn!("GLFW does not export {}", $name.to_string_lossy());
-                    false
-                }
-            }
-        };
-    }
-    let key_hooked = hook!(c"glfwSetKeyCallback", set_key_detour, SET_KEY);
-    hook!(c"glfwSetCharCallback", set_char_detour, SET_CHAR);
-    hook!(
-        c"glfwSetCharModsCallback",
-        set_char_mods_detour,
-        SET_CHAR_MODS
-    );
-    hook!(
-        c"glfwSetMouseButtonCallback",
-        set_mouse_button_detour,
-        SET_MOUSE_BUTTON
-    );
-    hook!(
-        c"glfwSetCursorPosCallback",
-        set_cursor_pos_detour,
-        SET_CURSOR_POS
-    );
-    hook!(c"glfwSetScrollCallback", set_scroll_detour, SET_SCROLL);
-    hook!(c"glfwSetWindowFocusCallback", set_focus_detour, SET_FOCUS);
-    hook!(
-        c"glfwSetFramebufferSizeCallback",
-        set_framebuffer_size_detour,
-        SET_FRAMEBUFFER_SIZE
-    );
-
-    // F3+C: the game's clipboard writes, the real key state, and F3 as 1.16 reads it.
-    let clipboard_hooked = hook!(
-        c"glfwSetClipboardString",
-        set_clipboard_string_detour,
-        SET_CLIPBOARD_STRING,
-        "no waypoints"
-    );
     if let Some(f) = export(module, c"glfwGetKey") {
         // SAFETY: glfwGetKey has this signature.
         let _ = GET_KEY_EXPORT.set(unsafe { std::mem::transmute::<*const c_void, GetKeyFn>(f) });
     }
-    let get_key_hooked = hook!(
-        c"glfwGetKey",
-        get_key_detour,
-        GET_KEY,
-        "older Minecraft versions may refuse F3+C, and keys cannot be rebound"
-    );
-    KEY_STATE_SPOOFED.store(get_key_hooked, Ordering::Relaxed);
     if let Some(f) = export(module, c"glfwGetKeyScancode") {
         // SAFETY: glfwGetKeyScancode has this signature (GLFW 3.3+; optional).
         let _ = GET_KEY_SCANCODE
             .set(unsafe { std::mem::transmute::<*const c_void, GetKeyScancodeFn>(f) });
     }
-    f3c::set_hooks_ready(key_hooked && clipboard_hooked && real_get_key().is_some());
+    f3c::set_hooks_check(|| {
+        SET_KEY.ready() && SET_CLIPBOARD_STRING.ready() && real_get_key().is_some()
+    });
 }
 
 fn modifiers(mods: c_int) -> reminedog_render::Modifiers {
@@ -322,7 +312,7 @@ fn modifiers(mods: c_int) -> reminedog_render::Modifiers {
 /// Whether the game reads the key state the rebinding gives it (without that, keys cannot be
 /// rebound: a held source would read as held).
 pub fn key_state_spoofed() -> bool {
-    KEY_STATE_SPOOFED.load(Ordering::Relaxed)
+    GET_KEY.ready()
 }
 
 /// The rebinding's key id of a GLFW key code (key -1 has none: GLFW keeps no state for it).
@@ -584,14 +574,14 @@ pub fn send_framebuffer_size(window: *mut c_void, width: c_int, height: c_int) {
 
 /// Keeps the location Minecraft copies for our F3+C off the clipboard, and sees the user's
 /// own F3+C.
-unsafe extern "C" fn set_clipboard_string_detour(window: *mut c_void, text: *const c_char) {
+unsafe extern "C" fn set_clipboard_string_hook(window: *mut c_void, text: *const c_char) {
     let Some(original) = SET_CLIPBOARD_STRING.get() else {
         return;
     };
     // Other writes (the game's own copying) are passed on unread.
     let ours = !text.is_null()
         && f3c::watching()
-        && ffi::catch("glfwSetClipboardString detour", || {
+        && ffi::catch("glfwSetClipboardString hook", || {
             // SAFETY: NUL-terminated UTF-8, valid only during this call (LWJGL frees it right
             // after); it is read here, before returning.
             f3c::on_clipboard(&unsafe { CStr::from_ptr(text) }.to_string_lossy())
@@ -606,7 +596,7 @@ unsafe extern "C" fn set_clipboard_string_detour(window: *mut c_void, text: *con
 /// The key state the game should see: the modifier while F3+C is being sent (Minecraft 1.16
 /// asks glfwGetKey whether F3 is held when C's key event arrives), else the rebinding's say
 /// ([`rebind_state`]), else the real state. Lock-free: the game calls it often.
-unsafe extern "C" fn get_key_detour(window: *mut c_void, key: c_int) -> c_int {
+unsafe extern "C" fn get_key_hook(window: *mut c_void, key: c_int) -> c_int {
     let state = match GET_KEY.get() {
         // SAFETY: the caller's arguments; GLFW reports its own errors.
         Some(original) => unsafe { original(window, key) },
@@ -625,7 +615,7 @@ unsafe extern "C" fn get_key_detour(window: *mut c_void, key: c_int) -> c_int {
 
 /// glfwGetKey without the spoof.
 fn real_get_key() -> Option<GetKeyFn> {
-    GET_KEY.get().or(GET_KEY_EXPORT.get()).copied()
+    GET_KEY.get().or(GET_KEY_EXPORT.get().copied())
 }
 
 /// The scancode GLFW would report with `key`; 0 if it cannot tell (Minecraft only looks at

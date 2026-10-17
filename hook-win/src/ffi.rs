@@ -16,8 +16,8 @@ use windows_sys::Win32::System::SystemServices::{
     IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE, IMAGE_EXPORT_DIRECTORY, IMAGE_NT_SIGNATURE,
 };
 
-/// Runs `f`, turning a panic into a log entry. Every function the JVM, the loader or a
-/// detour calls into must go through this: a panic unwinding into foreign frames aborts
+/// Runs `f`, turning a panic into a log entry. Every function the JVM, LWJGL or a library
+/// calls into must go through this: a panic unwinding into foreign frames aborts
 /// the process, which here means crashing the game.
 pub fn catch<R>(what: &str, f: impl FnOnce() -> R) -> Option<R> {
     match catch_unwind(AssertUnwindSafe(f)) {
@@ -194,32 +194,6 @@ pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Lossy conversion of a (pointer, length in u16 units) UTF-16 buffer.
-///
-/// # Safety
-/// `ptr` must be null or valid for `len` reads.
-pub unsafe fn from_wide(ptr: *const u16, len: usize) -> String {
-    if ptr.is_null() || len == 0 {
-        return String::new();
-    }
-    // SAFETY: guaranteed by the caller.
-    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(ptr, len) })
-}
-
-/// First bytes of a function, hex-encoded, for diagnosing detours.
-///
-/// # Safety
-/// `addr` must point to at least `len` readable bytes (a function's code is).
-pub unsafe fn hex_bytes(addr: *const c_void, len: usize) -> String {
-    // SAFETY: guaranteed by the caller.
-    let bytes = unsafe { std::slice::from_raw_parts(addr.cast::<u8>(), len) };
-    bytes
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,12 +262,9 @@ mod tests {
     }
 
     #[test]
-    fn wide_round_trip() {
+    fn wide_is_nul_terminated() {
         let w = wide("日本語 path");
         assert_eq!(w.last(), Some(&0));
-        // SAFETY: `w` holds len - 1 code units before the terminator.
-        assert_eq!(unsafe { from_wide(w.as_ptr(), w.len() - 1) }, "日本語 path");
-        // SAFETY: null is handled.
-        assert_eq!(unsafe { from_wide(std::ptr::null(), 3) }, "");
+        assert_eq!(String::from_utf16_lossy(&w[..w.len() - 1]), "日本語 path");
     }
 }

@@ -1,27 +1,26 @@
 //! SDL3, which Minecraft 26.x opens its window with instead of GLFW (LWJGL 3.4).
 //!
 //! 26.x renders with OpenGL through SDL3 (its "RenderPearl OpenGL" backend), so the overlay
-//! works as with GLFW: `SDL_GL_SwapWindow` is detoured, and handed to LWJGL as the agent's own
-//! function when it looks it up ([`crate::jvmti`]); each frame goes to [`frame::before_swap`].
+//! works as with GLFW: `SDL_GL_SwapWindow` is hooked ([`crate::hook`]) and hands each frame to
+//! [`frame::before_swap`].
 //! `SDL_GetWindowSizeInPixels` reports the tall size during the high-resolution zoom
 //! ([`crate::tall`]), and `SDL_WarpMouseInWindow` maps the game's warps from that size back
-//! into the real window. The other detours only log how the game uses SDL3 (window flags,
+//! into the real window. The other hooks only log how the game uses SDL3 (window flags,
 //! OpenGL context or Vulkan surface), for diagnosing future versions.
 //!
 //! Only one window library is hooked, the first loaded: a mod's SDL (controller support) in
 //! a GLFW game is left alone.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use reminedog_core::{InputId, Naming, SCANCODE_COUNT};
 use windows_sys::Win32::Foundation::{HMODULE, HWND};
 
 use crate::ffi;
 use crate::frame::{self, WindowSystem};
-use crate::hook::{self, export};
-use crate::jvmti::Substitute;
+use crate::hook::{Hook, Original, export};
 
 type CreateWindowFn =
     unsafe extern "C" fn(title: *const c_char, w: c_int, h: c_int, flags: u64) -> *mut c_void;
@@ -48,16 +47,61 @@ const WINDOW_OPENGL: u64 = 0x0000_0002;
 const WINDOW_HIDDEN: u64 = 0x0000_0008;
 const WINDOW_VULKAN: u64 = 0x1000_0000;
 
-static CREATE_WINDOW: OnceLock<CreateWindowFn> = OnceLock::new();
-static GL_CREATE_CONTEXT: OnceLock<GlCreateContextFn> = OnceLock::new();
-static GL_SWAP_WINDOW: OnceLock<GlSwapWindowFn> = OnceLock::new();
-/// Trampoline to the original SDL_GetWindowSizeInPixels (the overlay needs the real size).
-static GET_WINDOW_SIZE_IN_PIXELS: OnceLock<GetWindowSizeInPixelsFn> = OnceLock::new();
-static VULKAN_CREATE_SURFACE: OnceLock<VulkanCreateSurfaceFn> = OnceLock::new();
-static WARP_MOUSE_IN_WINDOW: OnceLock<WarpMouseInWindowFn> = OnceLock::new();
+static CREATE_WINDOW: Original<CreateWindowFn> = Original::new();
+static GL_CREATE_CONTEXT: Original<GlCreateContextFn> = Original::new();
+static GL_SWAP_WINDOW: Original<GlSwapWindowFn> = Original::new();
+/// The real SDL_GetWindowSizeInPixels (the overlay needs the real size).
+static GET_WINDOW_SIZE_IN_PIXELS: Original<GetWindowSizeInPixelsFn> = Original::new();
+static VULKAN_CREATE_SURFACE: Original<VulkanCreateSurfaceFn> = Original::new();
+static WARP_MOUSE_IN_WINDOW: Original<WarpMouseInWindowFn> = Original::new();
 static SDL: OnceLock<Sdl> = OnceLock::new();
-/// The real SDL_GL_SwapWindow, behind the function LWJGL was handed.
-pub static LWJGL_GL_SWAP_WINDOW: Substitute = Substitute::new();
+/// The hooked SDL3 library (0 before).
+static MODULE: AtomicUsize = AtomicUsize::new(0);
+
+static HOOKS: LazyLock<[Hook; 6]> = LazyLock::new(|| {
+    [
+        Hook::new(
+            c"SDL_CreateWindow",
+            create_window_hook as *const c_void,
+            &CREATE_WINDOW,
+        ),
+        Hook::new(
+            c"SDL_GL_CreateContext",
+            gl_create_context_hook as *const c_void,
+            &GL_CREATE_CONTEXT,
+        ),
+        Hook::new(
+            c"SDL_GL_SwapWindow",
+            gl_swap_window_hook as *const c_void,
+            &GL_SWAP_WINDOW,
+        ),
+        Hook::new(
+            c"SDL_GetWindowSizeInPixels",
+            get_window_size_in_pixels_hook as *const c_void,
+            &GET_WINDOW_SIZE_IN_PIXELS,
+        ),
+        Hook::new(
+            c"SDL_WarpMouseInWindow",
+            warp_mouse_in_window_hook as *const c_void,
+            &WARP_MOUSE_IN_WINDOW,
+        ),
+        Hook::new(
+            c"SDL_Vulkan_CreateSurface",
+            vulkan_create_surface_hook as *const c_void,
+            &VULKAN_CREATE_SURFACE,
+        ),
+    ]
+});
+
+/// The hooks of the window's SDL3 functions ([`crate::sdl_input`] has the input's).
+pub fn hooks() -> &'static [Hook] {
+    &*HOOKS
+}
+
+/// Whether `module` is the hooked SDL3 library.
+pub fn is_hooked(module: usize) -> bool {
+    module != 0 && MODULE.load(Ordering::Acquire) == module
+}
 
 static ATTACHED: Mutex<bool> = Mutex::new(false);
 static RENDERER_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -171,7 +215,6 @@ impl WindowSystem for Sdl {
         let (mut w, mut h) = (0, 0);
         let get = GET_WINDOW_SIZE_IN_PIXELS
             .get()
-            .copied()
             .unwrap_or(self.get_window_size_in_pixels);
         // SAFETY: see above.
         if unsafe { get(window, &mut w, &mut h) } {
@@ -229,7 +272,7 @@ pub fn attached() -> bool {
 pub fn attach(module: HMODULE, path: &str) {
     let mut attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner());
     if *attached {
-        log::warn!("a second SDL3 library was loaded and is ignored: {path}");
+        log::warn!("a second SDL3 library is ignored: {path}");
         return;
     }
     *attached = true;
@@ -238,76 +281,15 @@ pub fn attach(module: HMODULE, path: &str) {
             let _ = SDL.set(sdl);
         }
         Err(e) => {
-            // Not the SDL3 the game opens its window with: no detours at all.
+            // Not the SDL3 the game opens its window with: no hooks at all.
             log::error!("SDL3 loaded ({path}), but the overlay cannot use it: {e}");
             return;
         }
     }
     log::info!("SDL3 loaded: {path}");
-    // SAFETY (each call): the SDL3 export, its detour and the slot's fn type share one
-    // signature, and nothing runs the functions while SDL3 is still being loaded.
-    unsafe {
-        probe(
-            module,
-            c"SDL_CreateWindow",
-            create_window_detour as *const c_void,
-            &CREATE_WINDOW,
-        );
-        probe(
-            module,
-            c"SDL_GL_CreateContext",
-            gl_create_context_detour as *const c_void,
-            &GL_CREATE_CONTEXT,
-        );
-        probe(
-            module,
-            c"SDL_GL_SwapWindow",
-            gl_swap_window_detour as *const c_void,
-            &GL_SWAP_WINDOW,
-        );
-        probe(
-            module,
-            c"SDL_GetWindowSizeInPixels",
-            get_window_size_in_pixels_detour as *const c_void,
-            &GET_WINDOW_SIZE_IN_PIXELS,
-        );
-        probe(
-            module,
-            c"SDL_WarpMouseInWindow",
-            warp_mouse_in_window_detour as *const c_void,
-            &WARP_MOUSE_IN_WINDOW,
-        );
-        probe(
-            module,
-            c"SDL_Vulkan_CreateSurface",
-            vulkan_create_surface_detour as *const c_void,
-            &VULKAN_CREATE_SURFACE,
-        );
-    }
+    MODULE.store(module as usize, Ordering::Release);
     crate::sdl_input::install(module);
     log::info!("SDL3 hooks installed");
-}
-
-/// Detours one SDL3 export; failures are logged, the other probes still go in.
-///
-/// # Safety
-/// As for [`hook::install`].
-unsafe fn probe<F: Copy>(
-    module: HMODULE,
-    name: &CStr,
-    detour: *const c_void,
-    original: &OnceLock<F>,
-) {
-    let target = export(module, name);
-    let name = name.to_string_lossy();
-    let Some(target) = target else {
-        log::warn!("SDL3 does not export {name}");
-        return;
-    };
-    // SAFETY: guaranteed by the caller.
-    if let Err(e) = unsafe { hook::install(&name, target, detour, original) } {
-        log::warn!("cannot probe {name}: {e}");
-    }
 }
 
 fn log_renderer(api: &str, how: &str) {
@@ -318,7 +300,7 @@ fn log_renderer(api: &str, how: &str) {
     }
 }
 
-unsafe extern "C" fn create_window_detour(
+unsafe extern "C" fn create_window_hook(
     title: *const c_char,
     w: c_int,
     h: c_int,
@@ -357,7 +339,7 @@ unsafe extern "C" fn create_window_detour(
     window
 }
 
-unsafe extern "C" fn gl_create_context_detour(window: *mut c_void) -> *mut c_void {
+unsafe extern "C" fn gl_create_context_hook(window: *mut c_void) -> *mut c_void {
     let Some(original) = GL_CREATE_CONTEXT.get() else {
         return std::ptr::null_mut();
     };
@@ -372,30 +354,11 @@ unsafe extern "C" fn gl_create_context_detour(window: *mut c_void) -> *mut c_voi
     context
 }
 
-unsafe extern "C" fn gl_swap_window_detour(window: *mut c_void) -> bool {
-    let Some(&original) = GL_SWAP_WINDOW.get() else {
+unsafe extern "C" fn gl_swap_window_hook(window: *mut c_void) -> bool {
+    let Some(original) = GL_SWAP_WINDOW.get() else {
         return false;
     };
-    // SAFETY: same arguments the caller passed us.
-    gl_swap_window(window, "the detour", || unsafe { original(window) })
-}
-
-/// What LWJGL calls as SDL_GL_SwapWindow.
-pub unsafe extern "C" fn lwjgl_gl_swap_window(window: *mut c_void) -> bool {
-    let Some(real) = LWJGL_GL_SWAP_WINDOW.real::<GlSwapWindowFn>() else {
-        return false;
-    };
-    // SAFETY: same arguments LWJGL passed us.
-    gl_swap_window(window, "the function LWJGL looked up", || unsafe {
-        real(window)
-    })
-}
-
-fn gl_swap_window(window: *mut c_void, path: &str, original: impl FnOnce() -> bool) -> bool {
-    let Some(_entry) = frame::SwapEntry::begin("SDL_GL_SwapWindow", path) else {
-        return original();
-    };
-    ffi::catch("SDL_GL_SwapWindow", || {
+    ffi::catch("SDL_GL_SwapWindow hook", || {
         let n = SWAPS.fetch_add(1, Ordering::Relaxed) + 1;
         if n == 1 {
             log::info!("SDL_GL_SwapWindow: first frame");
@@ -404,9 +367,8 @@ fn gl_swap_window(window: *mut c_void, path: &str, original: impl FnOnce() -> bo
             frame::before_swap(sdl, window);
         }
     });
-    let swapping = crate::tall::Swapping::begin();
-    let swapped = original();
-    drop(swapping);
+    // SAFETY: same arguments the caller passed us.
+    let swapped = unsafe { original(window) };
     ffi::catch("rebinds", || crate::sdl_input::release_lost_keys(window));
     ffi::catch("hotkeys", crate::rebind_state::forget_lost_presses);
     ffi::catch("SDL input", || crate::sdl_input::after_swap(window));
@@ -414,7 +376,7 @@ fn gl_swap_window(window: *mut c_void, path: &str, original: impl FnOnce() -> bo
 }
 
 /// Reports the zoom's tall size to the game while zooming.
-unsafe extern "C" fn get_window_size_in_pixels_detour(
+unsafe extern "C" fn get_window_size_in_pixels_hook(
     window: *mut c_void,
     w: *mut c_int,
     h: *mut c_int,
@@ -442,11 +404,11 @@ unsafe extern "C" fn get_window_size_in_pixels_detour(
 /// at the centre of the window it believes in whenever the window is resized) are scaled
 /// back into the real window. Else the system's cursor lands below the window, and a click
 /// there goes to another window: the game loses the focus and the mouse.
-unsafe extern "C" fn warp_mouse_in_window_detour(window: *mut c_void, x: f32, y: f32) {
+unsafe extern "C" fn warp_mouse_in_window_hook(window: *mut c_void, x: f32, y: f32) {
     let Some(original) = WARP_MOUSE_IN_WINDOW.get() else {
         return;
     };
-    let y = ffi::catch("SDL_WarpMouseInWindow detour", || real_warp_y(window, y)).unwrap_or(y);
+    let y = ffi::catch("SDL_WarpMouseInWindow hook", || real_warp_y(window, y)).unwrap_or(y);
     // SAFETY: the caller's window; the coordinates are within it.
     unsafe { original(window, x, y) };
 }
@@ -460,8 +422,8 @@ fn real_warp_y(window: *mut c_void, y: f32) -> f32 {
         return y;
     };
     let (mut w, mut h) = (0, 0);
-    // SAFETY: the window SDL passed the caller; valid out parameters. The trampoline gives the
-    // real size.
+    // SAFETY: the window SDL passed the caller; valid out parameters. The real function gives
+    // the real size.
     if !unsafe { real_size(window, &mut w, &mut h) } || h <= 0 || tall_h <= 0 {
         return y;
     }
@@ -471,7 +433,7 @@ fn real_warp_y(window: *mut c_void, y: f32) -> f32 {
     mapped
 }
 
-unsafe extern "C" fn vulkan_create_surface_detour(
+unsafe extern "C" fn vulkan_create_surface_hook(
     window: *mut c_void,
     instance: *mut c_void,
     allocator: *const c_void,

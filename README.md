@@ -280,7 +280,6 @@ Windows に入っている Microsoft Edge WebView2 ランタイムを使いま�
 | `log`     | `off` / `error` / `warn` / `info` / `debug` / `trace`    | `info`                                   |
 | `overlay` | `on` / `off`（`off` ならフックだけ入れて何も描きません） | `on`                                     |
 | `scale`   | UI の拡大率（0.5〜4）                                    | `1`                                      |
-| `jvmti`   | `on` / `off`（`off` ならスワップを MinHook のフックだけで受けます。うまく動かないときの切り分け用） | `on` |
 
 ### ログとうまく動かないとき
 
@@ -295,10 +294,9 @@ Windows に入っている Microsoft Edge WebView2 ランタイムを使いま�
 
 ### 読み込み
 
-- `reminedog.dll` は JVM のエージェント（JVMTI の `Agent_OnLoad` を持つ DLL）として、ゲームのコードより先に読み込まれます。そこでオプションとログを準備し、DLL の読み込みの監視（`LdrRegisterDllNotification`）を始めます
-- ゲームが LWJGL のウィンドウのライブラリ（1.21 までは GLFW、26.x は SDL3）と `opengl32.dll` を読み込んだら、必要な関数に MinHook でフック（デトア）を入れます。フックの中で問題が起きても、ゲームは止めません（失敗したら何もしません）
-- あわせて JVMTI の NativeMethodBind で、LWJGL が関数のアドレスを引くネイティブ（`WinBase.nGetProcAddress`）を差し替えます。LWJGL がスワップの関数（`glfwSwapBuffers`・`SDL_GL_SwapWindow`）を引いたら、reminedog の関数を渡します。
-  コードを書き換えずに済むので、ほかの OS でも同じ仕組みを使えます。今は MinHook のフックも残していて、先に呼ばれた方がそのフレームを処理します
+- `reminedog.dll` は JVM のエージェント（JVMTI の `Agent_OnLoad` を持つ DLL）として、ゲームのコードより先に読み込まれます。そこでオプションとログを準備し、JVMTI の NativeMethodBind（JVM が Java のネイティブのメソッドを結び付けるたびに知らせ、結び付ける関数を差し替えられる）を有効にします
+- LWJGL が関数のアドレスを引くネイティブ（`WinBase.nGetProcAddress`）を差し替えます。LWJGL が LWJGL のウィンドウのライブラリ（1.21 までは GLFW、26.x は SDL3）の関数（スワップ、入力のコールバックの登録やイベントの読み出し、クリップボード、キーの状態など）を引いたら、本物の代わりに reminedog のフックを渡します。
+  ゲームやライブラリのコードは書き換えないので、ほかの OS でも同じ仕組みを使えます。フックの中で問題が起きても、ゲームは止めません（失敗したら何もしません）
 
 ### オーバーレイの描画
 
@@ -322,7 +320,7 @@ Windows に入っている Microsoft Edge WebView2 ランタイムを使いま�
 ### 高精細のズーム
 
 - ズームキーを押している間、ゲームにはウィンドウが縦に倍率ぶん長いと伝えます（ウィンドウの大きさを問い合わせる関数の答えと、大きさの変更の知らせを変えます）
-- ゲームが画面（フレームバッファ 0）に描こうとしたら、reminedog の縦長のフレームバッファに描かせ（`wglGetProcAddress` のフックで、ゲームに渡す `glBindFramebuffer` などを差し替えます）、表示のときにその中央をウィンドウに写します
+- ゲームが画面（フレームバッファ 0）に描こうとしたら、reminedog の縦長のフレームバッファに描かせ（JVMTI で LWJGL の `glBindFramebuffer` などのネイティブを差し替えます）、表示のときにその中央をウィンドウに写します
 - ゲームが縦長で描いていないと分かったときは、描かれた画面の中央を引き伸ばす方式に切り替えます
 
 ### キーの置き換え
@@ -350,7 +348,7 @@ Windows に入っている Microsoft Edge WebView2 ランタイムを使いま�
 core/      OS に依存しない処理（テストあり）：F3+C のパース、options.txt のキー設定とキーの名前の表、ウェイポイントの保存、ワールドの判定、方角と距離、
            設定、ブラウザへの入力（CDP）・アドレス欄・動画のスクリプト、ログ
 render/    glow + egui_glow によるオーバーレイの描画（OS に依存しない、テストあり）：メニュー、入力の振り分け、キーの置き換えの状態、ズームの計算、ブラウザの窓
-hook-win/  Windows 用のエージェント（reminedog.dll）：DLL の読み込みの監視、デトア、GLFW・SDL3 のフック、WGL、高精細のズーム、ブラウザ（WebView2）
+hook-win/  Windows 用のエージェント（reminedog.dll）：JVMTI、GLFW・SDL3 のフック、WGL、高精細のズーム、ブラウザ（WebView2）
 installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）：DLL を置き、ランチャーのインスタンスの JVM 引数に -agentpath を足す
 ci/        DLL の確認のスクリプト（check-dll.ps1）と、LWJGL で Minecraft と同じようにウィンドウを作るテスト用のプログラム（ci/smoke/。GLFW 版と SDL3 版）
 scripts/   Linux 上で Wine を使ってエージェントを動かすスクリプト

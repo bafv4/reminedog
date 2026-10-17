@@ -10,30 +10,32 @@
 //!    callback and `glfwGetFramebufferSize`; SDL3: a pixel-size event and
 //!    `SDL_GetWindowSizeInPixels`). It resizes its render targets as for any resize.
 //! 2. The game's own output to the window (framebuffer 0) goes to a framebuffer of ours of
-//!    that size instead: `wglGetProcAddress` is detoured to hand the game wrappers of
-//!    `glBindFramebuffer(EXT)` and `glBlitNamedFramebuffer` that substitute ours for 0.
+//!    that size instead: LWJGL's natives of `glBindFramebuffer(EXT)` and
+//!    `glBlitNamedFramebuffer` are replaced as the JVM binds them ([`wrap_native`], called
+//!    from [`crate::jvmti`]) and substitute ours for 0. Only the game's calls through LWJGL
+//!    are changed: a screen recorder that hooks the swap reads the window's framebuffer 0.
 //! 3. At the buffer swap, the middle rows of our framebuffer are copied into the window.
 //!
 //! `glViewport` is wrapped too, only to confirm that the game really renders at the tall
 //! size (it set the tall viewport once since the zoom started); if it does not, the zoom
 //! falls back to enlarging the pixels.
 
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use glow::HasContext as _;
 use reminedog_render::{ZoomView, middle_row, tall_size};
-use windows_sys::Win32::Foundation::HMODULE;
 
-use crate::ffi;
-use crate::hook::{self, export};
 use crate::wgl;
 
-type GetProcAddressFn = unsafe extern "system" fn(*const c_char) -> *const c_void;
-type BindFramebufferFn = unsafe extern "system" fn(target: u32, framebuffer: u32);
-type BlitNamedFramebufferFn = unsafe extern "system" fn(
+/// LWJGL's JNI natives: `(JNIEnv*, jclass, ...)` before the GL function's arguments.
+type JniBindFramebufferFn =
+    unsafe extern "system" fn(env: *mut c_void, class: *mut c_void, target: u32, framebuffer: u32);
+type JniBlitNamedFramebufferFn = unsafe extern "system" fn(
+    env: *mut c_void,
+    class: *mut c_void,
     read: u32,
     draw: u32,
     src_x0: i32,
@@ -47,47 +49,32 @@ type BlitNamedFramebufferFn = unsafe extern "system" fn(
     mask: u32,
     filter: u32,
 );
-type ViewportFn = unsafe extern "system" fn(x: i32, y: i32, width: i32, height: i32);
+type JniViewportFn = unsafe extern "system" fn(
+    env: *mut c_void,
+    class: *mut c_void,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+);
 
 const GL_FRAMEBUFFER: u32 = 0x8D40;
 const GL_READ_FRAMEBUFFER: u32 = 0x8CA8;
 const GL_DRAW_FRAMEBUFFER: u32 = 0x8CA9;
 
-/// Trampoline to the real `wglGetProcAddress`.
-static GET_PROC_ADDRESS: OnceLock<GetProcAddressFn> = OnceLock::new();
-static BIND_FRAMEBUFFER: OnceLock<BindFramebufferFn> = OnceLock::new();
-static BIND_FRAMEBUFFER_EXT: OnceLock<BindFramebufferFn> = OnceLock::new();
-static BLIT_NAMED_FRAMEBUFFER: OnceLock<BlitNamedFramebufferFn> = OnceLock::new();
-static VIEWPORT: OnceLock<ViewportFn> = OnceLock::new();
+/// The JVM's own natives of LWJGL's GL functions, once replaced by ours.
+static JNI_BIND_FRAMEBUFFER: OnceLock<JniBindFramebufferFn> = OnceLock::new();
+static JNI_BIND_FRAMEBUFFER_EXT: OnceLock<JniBindFramebufferFn> = OnceLock::new();
+static JNI_BLIT_NAMED_FRAMEBUFFER: OnceLock<JniBlitNamedFramebufferFn> = OnceLock::new();
+static JNI_VIEWPORT: OnceLock<JniViewportFn> = OnceLock::new();
 /// The game got our `glViewport`, so the tall size can be confirmed.
 static VIEWPORT_WRAPPED: AtomicBool = AtomicBool::new(false);
-static ATTACHED: Mutex<bool> = Mutex::new(false);
 
 /// Our framebuffer standing in for 0 in the game's context, or 0 when not zooming.
 static REDIRECT: AtomicU32 = AtomicU32::new(0);
 static GAME_CONTEXT: AtomicUsize = AtomicUsize::new(0);
 /// The game bound (or blitted to) framebuffer 0 since the last frame, getting ours.
 static REDIRECTED: AtomicBool = AtomicBool::new(false);
-/// The window system's real swap is running (on the game's thread).
-static SWAPPING: AtomicBool = AtomicBool::new(false);
-
-/// Marks the window system's real swap until dropped: framebuffer 0 is the window's there.
-/// Screen recorders (OBS's game capture) hook the swap and read the window's back buffer
-/// through framebuffer 0, which would otherwise give them the tall frame's bottom rows.
-pub struct Swapping;
-
-impl Swapping {
-    pub fn begin() -> Self {
-        SWAPPING.store(true, Ordering::Relaxed);
-        Swapping
-    }
-}
-
-impl Drop for Swapping {
-    fn drop(&mut self) {
-        SWAPPING.store(false, Ordering::Relaxed);
-    }
-}
 /// The tall size (width << 32 | height) the game should set as its viewport, and whether
 /// it did since the zoom started. Only the height is compared: the game may keep a width of
 /// its own (26.3 renders 2560 wide in a window SDL reports as 2561 pixels wide). Once set,
@@ -109,163 +96,104 @@ static PENDING: Mutex<Option<(usize, [i32; 2])>> = Mutex::new(None);
 /// The real window was resized while the game believed the tall size.
 static REAL_RESIZED: AtomicBool = AtomicBool::new(false);
 
-pub fn is_opengl32(path: &str) -> bool {
-    path.rsplit(['\\', '/'])
-        .next()
-        .is_some_and(|name| name.eq_ignore_ascii_case("opengl32.dll"))
-}
-
-/// Detours `wglGetProcAddress` when opengl32.dll loads, before the game looks up any GL
-/// function.
-pub fn attach(module: HMODULE) {
-    let mut attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner());
-    if *attached {
-        return;
-    }
-    *attached = true;
-    let Some(target) = export(module, c"wglGetProcAddress") else {
-        log::warn!("opengl32.dll does not export wglGetProcAddress; no high-resolution zoom");
-        return;
-    };
-    // SAFETY: the export, the detour and the slot share wglGetProcAddress's signature;
-    // opengl32.dll is still being loaded, so nobody runs it yet.
-    match unsafe {
-        hook::install(
-            "wglGetProcAddress",
-            target,
-            get_proc_address_detour as *const c_void,
-            &GET_PROC_ADDRESS,
-        )
-    } {
-        Ok(()) => log::info!("OpenGL hooks installed"),
-        Err(e) => log::warn!("no high-resolution zoom: {e}"),
-    }
-}
-
-/// The real `wglGetProcAddress`, for the overlay's own context.
-pub fn original_get_proc_address() -> Option<GetProcAddressFn> {
-    GET_PROC_ADDRESS.get().copied()
-}
-
-fn valid(p: *const c_void) -> bool {
-    // Some drivers return small sentinel values instead of null.
-    !matches!(p as isize, -1..=3)
-}
-
-unsafe extern "system" fn get_proc_address_detour(name: *const c_char) -> *const c_void {
-    let Some(original) = GET_PROC_ADDRESS.get() else {
-        return std::ptr::null();
-    };
-    // SAFETY: the caller's argument.
-    let real = unsafe { original(name) };
-    if name.is_null() {
-        return real;
-    }
-    ffi::catch("wglGetProcAddress detour", || {
-        // SAFETY: GL function names are NUL-terminated.
-        let name = unsafe { CStr::from_ptr(name) };
-        wrap(name, real)
-    })
-    .unwrap_or(real)
-}
-
-/// Our wrapper for `name` if we have one, with `real` stored as the function it calls.
-fn wrap(name: &CStr, real: *const c_void) -> *const c_void {
-    /// Stores the first real address; the ICD returns the same one for every context.
-    fn keep<F: Copy>(slot: &OnceLock<F>, name: &CStr, real: *const c_void) -> bool {
-        // SAFETY: `F` is the fn type of `name`, and `real` its address.
-        let f = unsafe { std::mem::transmute_copy::<*const c_void, F>(&real) };
+/// Our native in place of LWJGL's `name` (with this JNI signature), the JVM's own `address`
+/// kept to call; `None` for the natives the zoom does not watch.
+pub fn wrap_native(name: &str, signature: &str, address: *const c_void) -> Option<*const c_void> {
+    /// Stores the JVM's native; one class has each of these natives (LWJGL 3.2 to 3.4).
+    fn keep<F: Copy>(slot: &OnceLock<F>, name: &str, address: *const c_void) -> bool {
+        // SAFETY: `F` is the JNI fn type of `name`, and `address` its native.
+        let f = unsafe { std::mem::transmute_copy::<*const c_void, F>(&address) };
         if slot.set(f).is_err() {
-            // SAFETY: as above, both are fn pointers of the same size.
-            let first =
-                unsafe { std::mem::transmute_copy::<F, *const c_void>(slot.get().unwrap()) };
-            if first != real {
-                log::warn!("{name:?} has another address in this context; still using the first");
-            }
+            log::warn!("zoom: another native of {name} is bound; it is left alone");
+            return false;
         }
         true
     }
-    match name.to_bytes() {
-        b"glBindFramebuffer" if valid(real) => {
-            keep(&BIND_FRAMEBUFFER, name, real);
-            bind_framebuffer_wrapper as *const c_void
+    let wrapper = match (name, signature) {
+        ("glBindFramebuffer", "(II)V") => keep(&JNI_BIND_FRAMEBUFFER, name, address)
+            .then_some(jni_bind_framebuffer as *const c_void),
+        ("glBindFramebufferEXT", "(II)V") => keep(&JNI_BIND_FRAMEBUFFER_EXT, name, address)
+            .then_some(jni_bind_framebuffer_ext as *const c_void),
+        ("glBlitNamedFramebuffer", "(IIIIIIIIIIII)V") => {
+            keep(&JNI_BLIT_NAMED_FRAMEBUFFER, name, address)
+                .then_some(jni_blit_named_framebuffer as *const c_void)
         }
-        b"glBindFramebufferEXT" if valid(real) => {
-            keep(&BIND_FRAMEBUFFER_EXT, name, real);
-            bind_framebuffer_ext_wrapper as *const c_void
-        }
-        b"glBlitNamedFramebuffer" if valid(real) => {
-            keep(&BLIT_NAMED_FRAMEBUFFER, name, real);
-            blit_named_framebuffer_wrapper as *const c_void
-        }
-        b"glViewport" => {
-            // A GL 1.1 function: most drivers return null here and the caller falls back
-            // to opengl32's export; hand out the wrapper either way.
-            let real = if valid(real) {
-                real
-            } else {
-                match wgl::get() {
-                    Ok(wgl) => wgl.export(name),
-                    Err(_) => std::ptr::null(),
-                }
-            };
-            if !valid(real) {
-                return real;
+        ("glViewport", "(IIII)V") => {
+            let kept = keep(&JNI_VIEWPORT, name, address);
+            if kept {
+                VIEWPORT_WRAPPED.store(true, Ordering::Relaxed);
             }
-            keep(&VIEWPORT, name, real);
-            VIEWPORT_WRAPPED.store(true, Ordering::Relaxed);
-            viewport_wrapper as *const c_void
+            kept.then_some(jni_viewport as *const c_void)
         }
-        _ => real,
-    }
+        _ => None,
+    }?;
+    log::info!("zoom: LWJGL's {name} native goes through the agent");
+    Some(wrapper)
 }
 
-/// Our framebuffer in place of 0, while zooming and in the game's context.
-fn redirected(framebuffer: u32) -> u32 {
-    if framebuffer != 0 {
-        return framebuffer;
-    }
-    let ours = REDIRECT.load(Ordering::Relaxed);
-    if ours == 0 || SWAPPING.load(Ordering::Relaxed) {
-        return 0;
-    }
-    let current = wgl::get().map_or(0, |wgl| wgl.current().1 as usize);
-    if current == 0 || current != GAME_CONTEXT.load(Ordering::Relaxed) {
-        return 0;
-    }
-    REDIRECTED.store(true, Ordering::Relaxed);
-    ours
-}
-
-unsafe extern "system" fn bind_framebuffer_wrapper(target: u32, framebuffer: u32) {
-    let framebuffer = if matches!(
+/// The framebuffer to bind for the game's `glBindFramebuffer(target, framebuffer)`.
+fn bind_target(target: u32, framebuffer: u32) -> u32 {
+    if matches!(
         target,
         GL_FRAMEBUFFER | GL_DRAW_FRAMEBUFFER | GL_READ_FRAMEBUFFER
     ) {
         redirected(framebuffer)
     } else {
         framebuffer
-    };
-    if let Some(real) = BIND_FRAMEBUFFER.get() {
-        // SAFETY: the caller's arguments, with our framebuffer for 0.
-        unsafe { real(target, framebuffer) }
     }
 }
 
-unsafe extern "system" fn bind_framebuffer_ext_wrapper(target: u32, framebuffer: u32) {
-    let framebuffer = if target == GL_FRAMEBUFFER {
+/// The same for `glBindFramebufferEXT`, which only knows GL_FRAMEBUFFER.
+fn bind_target_ext(target: u32, framebuffer: u32) -> u32 {
+    if target == GL_FRAMEBUFFER {
         redirected(framebuffer)
     } else {
         framebuffer
-    };
-    if let Some(real) = BIND_FRAMEBUFFER_EXT.get() {
+    }
+}
+
+/// Notes the game's `glViewport` while zooming.
+fn note_viewport(width: i32, height: i32) {
+    let tall = TALL_VIEWPORT.load(Ordering::Relaxed);
+    if tall != 0 {
+        if tall & 0xffff_ffff == pack([0, height]) {
+            TALL_VIEWPORT_SEEN.store(true, Ordering::Relaxed);
+        }
+        VIEWPORT_CALLS.fetch_add(1, Ordering::Relaxed);
+        VIEWPORT_TALLEST.fetch_max(pack([height, width]), Ordering::Relaxed);
+    }
+}
+
+unsafe extern "system" fn jni_bind_framebuffer(
+    env: *mut c_void,
+    class: *mut c_void,
+    target: u32,
+    framebuffer: u32,
+) {
+    let framebuffer = bind_target(target, framebuffer);
+    if let Some(native) = JNI_BIND_FRAMEBUFFER.get() {
+        // SAFETY: the JVM's arguments, with our framebuffer for 0.
+        unsafe { native(env, class, target, framebuffer) }
+    }
+}
+
+unsafe extern "system" fn jni_bind_framebuffer_ext(
+    env: *mut c_void,
+    class: *mut c_void,
+    target: u32,
+    framebuffer: u32,
+) {
+    let framebuffer = bind_target_ext(target, framebuffer);
+    if let Some(native) = JNI_BIND_FRAMEBUFFER_EXT.get() {
         // SAFETY: as above.
-        unsafe { real(target, framebuffer) }
+        unsafe { native(env, class, target, framebuffer) }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe extern "system" fn blit_named_framebuffer_wrapper(
+unsafe extern "system" fn jni_blit_named_framebuffer(
+    env: *mut c_void,
+    class: *mut c_void,
     read: u32,
     draw: u32,
     src_x0: i32,
@@ -279,10 +207,12 @@ unsafe extern "system" fn blit_named_framebuffer_wrapper(
     mask: u32,
     filter: u32,
 ) {
-    if let Some(real) = BLIT_NAMED_FRAMEBUFFER.get() {
+    if let Some(native) = JNI_BLIT_NAMED_FRAMEBUFFER.get() {
         // SAFETY: as above.
         unsafe {
-            real(
+            native(
+                env,
+                class,
                 redirected(read),
                 redirected(draw),
                 src_x0,
@@ -300,19 +230,36 @@ unsafe extern "system" fn blit_named_framebuffer_wrapper(
     }
 }
 
-unsafe extern "system" fn viewport_wrapper(x: i32, y: i32, width: i32, height: i32) {
-    let tall = TALL_VIEWPORT.load(Ordering::Relaxed);
-    if tall != 0 {
-        if tall & 0xffff_ffff == pack([0, height]) {
-            TALL_VIEWPORT_SEEN.store(true, Ordering::Relaxed);
-        }
-        VIEWPORT_CALLS.fetch_add(1, Ordering::Relaxed);
-        VIEWPORT_TALLEST.fetch_max(pack([height, width]), Ordering::Relaxed);
+unsafe extern "system" fn jni_viewport(
+    env: *mut c_void,
+    class: *mut c_void,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) {
+    note_viewport(width, height);
+    if let Some(native) = JNI_VIEWPORT.get() {
+        // SAFETY: the JVM's arguments.
+        unsafe { native(env, class, x, y, width, height) }
     }
-    if let Some(real) = VIEWPORT.get() {
-        // SAFETY: the caller's arguments.
-        unsafe { real(x, y, width, height) }
+}
+
+/// Our framebuffer in place of 0, while zooming and in the game's context.
+fn redirected(framebuffer: u32) -> u32 {
+    if framebuffer != 0 {
+        return framebuffer;
     }
+    let ours = REDIRECT.load(Ordering::Relaxed);
+    if ours == 0 {
+        return 0;
+    }
+    let current = wgl::get().map_or(0, |wgl| wgl.current().1 as usize);
+    if current == 0 || current != GAME_CONTEXT.load(Ordering::Relaxed) {
+        return 0;
+    }
+    REDIRECTED.store(true, Ordering::Relaxed);
+    ours
 }
 
 fn pack([w, h]: [i32; 2]) -> u64 {
@@ -377,7 +324,7 @@ const MAX_MISSES: u32 = 3;
 /// for several frames, so a frame count alone gives up too early on real hardware.
 const MISS_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Per-window state, used in the swap detour with the game's context current.
+/// Per-window state, used in the swap hook with the game's context current.
 #[derive(Default)]
 pub struct TallZoom {
     game: Option<GameGl>,
@@ -465,7 +412,7 @@ impl TallZoom {
         }
     }
 
-    /// Called in the swap detour before the overlay draws, with the game's context
+    /// Called in the swap hook before the overlay draws, with the game's context
     /// current. Shows the zoomed frame if the game rendered one, starts or ends the zoom,
     /// and says how the overlay should show the zoom this frame.
     pub fn frame(
@@ -569,14 +516,12 @@ impl TallZoom {
         if context == 0 {
             return fallback;
         }
-        if BIND_FRAMEBUFFER.get().is_none() && BIND_FRAMEBUFFER_EXT.get().is_none() {
+        if JNI_BIND_FRAMEBUFFER.get().is_none() && JNI_BIND_FRAMEBUFFER_EXT.get().is_none() {
             self.failure = Some((
                 "ゲームの OpenGL の関数をフックできなかった（ゲームを再起動すると試し直す）".into(),
                 false,
             ));
-            log::warn!(
-                "zoom: the game did not look up glBindFramebuffer through wglGetProcAddress"
-            );
+            log::warn!("zoom: the game has not called LWJGL's glBindFramebuffer");
             return fallback;
         }
         if let Err(e) = self.start(window, context, real, factor) {

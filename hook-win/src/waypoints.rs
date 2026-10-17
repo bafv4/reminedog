@@ -4,7 +4,7 @@
 //! the positions and failures that come back as waypoints and notices.
 //!
 //! The state is a static, so it outlives the overlay's `Runtime` (rebuilt when the game's
-//! device context changes). Only the frame code uses it, inside the swap detour. With it
+//! device context changes). Only the frame code uses it, inside the swap hook. With it
 //! locked the router and the f3c state may be locked, never the other way round, and no game
 //! code runs.
 

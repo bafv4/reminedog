@@ -1,12 +1,11 @@
-//! The GLFW library LWJGL loads, and the detours on it.
+//! The GLFW library LWJGL loads, and the hooks on it.
 //!
 //! LWJGL resolves GLFW's exports once with `GetProcAddress` and calls through the saved
-//! pointers, so patching the functions' first instructions (inline detour) sees those calls;
-//! import-table hooks would not. `glfwSwapBuffers` is also handed to LWJGL as the agent's
-//! own function when it looks it up ([`crate::jvmti`]).
+//! pointers, so it is handed the hooks when it looks them up ([`crate::jvmti`]).
 
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use reminedog_core::{
     InputId, Naming, glfw_button_of, glfw_key_of, input_from_glfw_button, input_from_glfw_key,
@@ -15,8 +14,7 @@ use windows_sys::Win32::Foundation::{HMODULE, HWND};
 
 use crate::ffi;
 use crate::frame::{self, WindowSystem};
-use crate::hook::{self, export};
-use crate::jvmti::Substitute;
+use crate::hook::{Hook, Original, export};
 
 type SwapBuffersFn = unsafe extern "C" fn(window: *mut c_void);
 type GetFramebufferSizeFn =
@@ -32,6 +30,7 @@ const GLFW_VISIBLE: c_int = 0x0002_0004;
 /// GLFW functions the agent calls itself.
 pub struct Glfw {
     pub path: String,
+    /// The export, while LWJGL has not looked the function up.
     get_framebuffer_size: GetFramebufferSizeFn,
     /// GLFW 3.3+.
     get_window_content_scale: Option<GetWindowContentScaleFn>,
@@ -44,8 +43,11 @@ pub struct Glfw {
 impl WindowSystem for Glfw {
     fn framebuffer_size(&self, window: *mut c_void) -> (i32, i32) {
         let (mut width, mut height) = (0, 0);
+        let get = GET_FRAMEBUFFER_SIZE
+            .get()
+            .unwrap_or(self.get_framebuffer_size);
         // SAFETY: `window` is the handle GLFW itself passed to glfwSwapBuffers.
-        unsafe { (self.get_framebuffer_size)(window, &mut width, &mut height) };
+        unsafe { get(window, &mut width, &mut height) };
         (width, height)
     }
 
@@ -115,14 +117,38 @@ impl WindowSystem for Glfw {
 }
 
 static GLFW: OnceLock<Glfw> = OnceLock::new();
-/// Trampoline to the original glfwSwapBuffers.
-static SWAP_BUFFERS: OnceLock<SwapBuffersFn> = OnceLock::new();
-/// Trampoline to the original glfwGetFramebufferSize (the overlay needs the real size).
-static GET_FRAMEBUFFER_SIZE: OnceLock<GetFramebufferSizeFn> = OnceLock::new();
-/// The real glfwSwapBuffers, behind the function LWJGL was handed.
-pub static LWJGL_SWAP_BUFFERS: Substitute = Substitute::new();
-/// Serializes `attach`; the loader lock already does, but don't rely on it.
+/// The hooked GLFW library (0 before).
+static MODULE: AtomicUsize = AtomicUsize::new(0);
+static SWAP_BUFFERS: Original<SwapBuffersFn> = Original::new();
+/// The real glfwGetFramebufferSize (the overlay needs the real size).
+static GET_FRAMEBUFFER_SIZE: Original<GetFramebufferSizeFn> = Original::new();
+/// Serializes `attach`.
 static ATTACH: Mutex<()> = Mutex::new(());
+
+static HOOKS: LazyLock<[Hook; 2]> = LazyLock::new(|| {
+    [
+        Hook::new(
+            c"glfwSwapBuffers",
+            swap_buffers_hook as *const c_void,
+            &SWAP_BUFFERS,
+        ),
+        Hook::new(
+            c"glfwGetFramebufferSize",
+            get_framebuffer_size_hook as *const c_void,
+            &GET_FRAMEBUFFER_SIZE,
+        ),
+    ]
+});
+
+/// The hooks of the window's GLFW functions ([`crate::glfw_input`] has the input's).
+pub fn hooks() -> &'static [Hook] {
+    &*HOOKS
+}
+
+/// Whether `module` is the hooked GLFW library.
+pub fn is_hooked(module: usize) -> bool {
+    module != 0 && MODULE.load(Ordering::Acquire) == module
+}
 
 /// Identifies GLFW by its exports rather than its file name, so a renamed or
 /// launcher-provided GLFW (Prism's "use system GLFW") is recognized as well.
@@ -139,7 +165,7 @@ pub fn attach(module: HMODULE, path: &str) {
     let _guard = ATTACH.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = GLFW.get() {
         log::warn!(
-            "a second GLFW library was loaded and is ignored: {path} (hooked: {})",
+            "a second GLFW library is ignored: {path} (hooked: {})",
             existing.path
         );
         return;
@@ -157,30 +183,13 @@ fn install(module: HMODULE, path: &str) -> Result<Glfw, String> {
     let resolve = |name: &CStr| {
         export(module, name).ok_or_else(|| format!("{} not exported", name.to_string_lossy()))
     };
-    let swap_buffers = resolve(c"glfwSwapBuffers")?;
-    let get_framebuffer_size = resolve(c"glfwGetFramebufferSize")?;
-    // SAFETY: the export and the detour share glfwGetFramebufferSize's signature. Without
-    // it the zoom can only enlarge pixels, so a failure is not fatal.
-    if let Err(e) = unsafe {
-        hook::install(
-            "glfwGetFramebufferSize",
-            get_framebuffer_size,
-            get_framebuffer_size_detour as *const c_void,
-            &GET_FRAMEBUFFER_SIZE,
-        )
-    } {
-        log::warn!("no high-resolution zoom: {e}");
-    }
     // SAFETY: exported GLFW functions with these C signatures.
     let glfw = unsafe {
         Glfw {
             path: path.to_owned(),
-            get_framebuffer_size: match GET_FRAMEBUFFER_SIZE.get() {
-                Some(&original) => original,
-                None => {
-                    std::mem::transmute::<*const c_void, GetFramebufferSizeFn>(get_framebuffer_size)
-                }
-            },
+            get_framebuffer_size: std::mem::transmute::<*const c_void, GetFramebufferSizeFn>(
+                resolve(c"glfwGetFramebufferSize")?,
+            ),
             get_window_content_scale: export(module, c"glfwGetWindowContentScale")
                 .map(|f| std::mem::transmute::<*const c_void, GetWindowContentScaleFn>(f)),
             get_version_string: export(module, c"glfwGetVersionString")
@@ -193,51 +202,21 @@ fn install(module: HMODULE, path: &str) -> Result<Glfw, String> {
         }
     };
 
-    // SAFETY: the address is glfwSwapBuffers and the detour has the same signature.
-    unsafe {
-        hook::install(
-            "glfwSwapBuffers",
-            swap_buffers,
-            swap_buffers_detour as *const c_void,
-            &SWAP_BUFFERS,
-        )?;
-    }
+    MODULE.store(module as usize, Ordering::Release);
     crate::glfw_input::install(module);
     Ok(glfw)
 }
 
-unsafe extern "C" fn swap_buffers_detour(window: *mut c_void) {
-    let Some(&original) = SWAP_BUFFERS.get() else {
-        return;
-    };
-    // SAFETY: same arguments GLFW's caller passed us.
-    swap_buffers(window, "the detour", || unsafe { original(window) });
-}
-
-/// What LWJGL calls as glfwSwapBuffers.
-pub unsafe extern "C" fn lwjgl_swap_buffers(window: *mut c_void) {
-    let Some(real) = LWJGL_SWAP_BUFFERS.real::<SwapBuffersFn>() else {
-        return;
-    };
-    // SAFETY: same arguments LWJGL passed us.
-    swap_buffers(window, "the function LWJGL looked up", || unsafe {
-        real(window)
-    });
-}
-
-fn swap_buffers(window: *mut c_void, path: &str, original: impl FnOnce()) {
-    let Some(_entry) = frame::SwapEntry::begin("glfwSwapBuffers", path) else {
-        original();
-        return;
-    };
-    ffi::catch("glfwSwapBuffers", || {
+unsafe extern "C" fn swap_buffers_hook(window: *mut c_void) {
+    ffi::catch("glfwSwapBuffers hook", || {
         if let Some(glfw) = GLFW.get() {
             frame::before_swap(glfw, window);
         }
     });
-    let swapping = crate::tall::Swapping::begin();
-    original();
-    drop(swapping);
+    if let Some(original) = SWAP_BUFFERS.get() {
+        // SAFETY: same arguments GLFW's caller passed us.
+        unsafe { original(window) };
+    }
     // Starting or ending the zoom: the game resizes right away, between two frames.
     if let Some((window, [w, h])) = crate::tall::take_pending() {
         crate::glfw_input::send_framebuffer_size(window, w, h);
@@ -249,7 +228,7 @@ fn swap_buffers(window: *mut c_void, path: &str, original: impl FnOnce()) {
 }
 
 /// Reports the tall size to the game while zooming.
-unsafe extern "C" fn get_framebuffer_size_detour(
+unsafe extern "C" fn get_framebuffer_size_hook(
     window: *mut c_void,
     width: *mut c_int,
     height: *mut c_int,

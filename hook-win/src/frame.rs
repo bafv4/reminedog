@@ -1,10 +1,8 @@
 //! Per-frame work inside the buffer swaps (`glfwSwapBuffers` for Minecraft up to 1.21,
 //! `SDL_GL_SwapWindow` for 26.x).
 
-use std::cell::Cell;
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
@@ -84,36 +82,6 @@ pub trait WindowSystem: Sync {
     fn can_send(&self, id: InputId) -> bool;
     /// Whether this library reports presses of `id` (a rule's source must be one).
     fn can_receive(&self, id: InputId) -> bool;
-}
-
-thread_local! {
-    static IN_SWAP: Cell<bool> = const { Cell::new(false) };
-}
-
-static SWAP_PATH_LOGGED: AtomicBool = AtomicBool::new(false);
-
-/// The game's swap, handled by the first of the two ways it reaches the agent: the function
-/// LWJGL was handed ([`crate::jvmti`]) calls the real one, which is detoured as well.
-pub struct SwapEntry(());
-
-impl SwapEntry {
-    /// `None` while this thread's swap is already being handled: the caller only runs the
-    /// original. `path` says which way the swaps come, for the log.
-    pub fn begin(function: &str, path: &str) -> Option<Self> {
-        if IN_SWAP.replace(true) {
-            return None;
-        }
-        if !SWAP_PATH_LOGGED.swap(true, Ordering::Relaxed) {
-            log::info!("{function}: the game's swaps come through {path}");
-        }
-        Some(Self(()))
-    }
-}
-
-impl Drop for SwapEntry {
-    fn drop(&mut self) {
-        IN_SWAP.set(false);
-    }
 }
 
 /// Draws the overlay into the back buffer right before the window system presents it.
@@ -272,7 +240,7 @@ struct Runtime {
     rebind_note: Option<String>,
 }
 
-// SAFETY: the GL handles and objects are only used inside the swap detour while STATE is
+// SAFETY: the GL handles and objects are only used inside the swap hook while STATE is
 // locked, with our context made current on the calling thread and released before the
 // lock is; a WGL context may be made current on any thread.
 unsafe impl Send for Runtime {}
@@ -604,7 +572,10 @@ impl Runtime {
         }
 
         match self.overlay.frames() {
-            1 => log::info!("overlay: first frame rendered ({width}x{height}, scale {scale:.2})"),
+            1 => {
+                log::info!("overlay: first frame rendered ({width}x{height}, scale {scale:.2})");
+                crate::f3c::log_hooks();
+            }
             n @ (100 | 1000 | 10_000) => log::info!(
                 "overlay: {n} frames rendered, {:.2} ms per frame",
                 self.cost_ms

@@ -29,7 +29,7 @@ core/      OS に依存しない処理（テストあり）
                InputId（キーは SDL のスキャンコード、マウスは SDL の番号）と、名前（Naming で 1.21 と 26.x を読み分ける）・ラベル・GLFW／SDL のコードの変換
   keytable.rs  26.3 と 1.21.11 のキーの名前の表（jar から抜き出した TSV から生成）
   nav.rs       方角・距離、ネザー座標の変換、guide（ウェイポイントへの案内）
-  options.rs   -agentpath:...=<オプション> の解析（gamedir, log, overlay, scale, jvmti）
+  options.rs   -agentpath:...=<オプション> の解析（gamedir, log, overlay, scale）
   gamedir.rs   ゲームフォルダの判定、reminedog/ 以下のパス
   settings.rs  settings.json（キー、ズームの倍率、キーの置き換えなど）
   logfile.rs   log クレートのファイル出力
@@ -48,10 +48,10 @@ render/    glow + egui_glow の描画（OS に依存しない、テストあり�
                ページの絵のテクスチャ（PageTexture）。BrowserView/BrowserCommand/BrowserPixels でフックとやり取り
 hook-win/  Windows のエージェント（reminedog.dll）
   lib.rs/agent.rs  Agent_OnLoad。オプション、ログ、パニックフック
-  loader.rs    LdrRegisterDllNotification で DLL の読み込みを監視（glfw / SDL3 / opengl32）
-  hook.rs      MinHook によるデトア
-  jvmti.rs     JVMTI の NativeMethodBind：LWJGL の WinBase.nGetProcAddress を差し替え、glfwSwapBuffers・SDL_GL_SwapWindow を引いたら自前の関数を渡す（Substitute）。
-               スワップは MinHook のフックからも来るので、frame::SwapEntry で先に来た方だけが処理する
+  jvmti.rs     JVMTI の NativeMethodBind：LWJGL の WinBase.nGetProcAddress を差し替え、ウィンドウのライブラリの関数を引いたら、本物を Original に覚えてフックを渡す
+               （glfw.rs・glfw_input.rs・sdl.rs・sdl_input.rs の hooks() の表）。LWJGL の GL のネイティブは tall::wrap_native に渡す
+  library.rs   ウィンドウのライブラリの判定：LWJGL が関数を引いた最初の GLFW か SDL3 をフックする（Mod の SDL などは外す）
+  hook.rs      フックの表（Hook：名前・フック・元の関数の置き場所 Original）。フックは LWJGL が引いた本物を Original から呼ぶ。何も書き換えない
   glfw.rs, glfw_input.rs  GLFW（Minecraft 1.21 まで）：glfwSwapBuffers、コールバックの差し替え。F3+C（glfwSetClipboardString・glfwGetKey のフック、キーコールバックへの送信）。
                           キーの置き換え（出力をコールバックで送る、mods の補正、glfwGetKey の偽装）
   sdl.rs, sdl_input.rs    SDL3（Minecraft 26.x）：SDL_GL_SwapWindow、SDL_PollEvent のフィルタ。F3+C（SDL_SetClipboardText のフック、キーのイベントの注入）。
@@ -130,7 +130,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 - フックの中でパニックさせない（`ffi::catch` で包む）。失敗しても `JNI_OK` を返し、ゲームは止めない
 - ゲームの GL の状態を変えたら必ず元に戻す（オーバーレイは自前のコンテキストで描く。`tall.rs` だけはゲームのコンテキストで blit し、`SavedState` で戻す）
 - ゲームのコードを呼ぶ間（コールバックの転送など）は、`input::router()` のロックを持たない
-- デトアには MinHook を使う。retour 0.3 は、直後に即値が続く RIP 相対の命令を正しく移せず、GLFW の関数の先頭で落ちる
+- ゲームやライブラリのコードは書き換えない。フックは JVMTI で LWJGL に渡す（`jvmti.rs`）。2026-10-18 に MinHook のデトアをやめた（経緯は HANDOFF.md の「追記：MinHook をやめる」）
 - export は `ffi::export_address`（PE を自分で読む）で引く。ローダーロックの中で GetProcAddress を呼ばないため
 - F3+C を送るときは、C（クラッシュのキー）が押されているとゲームに読ませない（修飾キーと同時だと、10 秒でゲームを落とすデバッグのクラッシュが動く）。GLFW の修飾キーの偽装は、ガードの Drop で必ず消す。ロックの順序は `hook-win/src/f3c.rs` の先頭に書いてある
 - インストーラーはランチャーの設定ファイルを書き換える。変えるのは JVM 引数の reminedog の部分と、それを効かせるためのキーだけで、ほかの行・キー・引数はそのまま残す。書き込みは一時ファイルからの置き換えで行い、試すときは設定ファイルの写しを使う
@@ -152,13 +152,14 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 | キーの置き換え（キーとマウスのボタン、ゲーム中だけ。メニューの「キーの置き換え」） | 手元のスモーク（GLFW・SDL3）で確認済み。実機では未確認 |
 | ゲーム内ブラウザ（WebView2。メニューで表示・移動・大きさの変更・ページの操作、ゲーム中の PageUp／PageDown と ↓←→ の動画の操作） | WebView2 を動かすテストと手元のスモーク（GLFW）で確認済み。実機では未確認 |
 | インストーラー（公式ランチャー、MultiMC、Prism Launcher、MCSR Launcher） | 設定ファイルの写しに対して画面から操作して確認済み、Java 8・17・21・25 で表示を確認。本物のランチャーでは未確認。ダウンロードと「最新版に更新」はリリースがないので失敗する（置き換えは単体テストで確認） |
-| スワップを JVMTI の差し替えで受ける（`jvmti.rs`。Linux・macOS への準備の段階 1） | 手元のスモーク（GLFW 3.3.3・SDL3 3.4.3・Java 8 の 3.2.2）で確認済み。実機では未確認。試作（`spike/nmb/`）は実機の 1.21.11・26.3 で確認済み |
+| フックを JVMTI の差し替えだけで渡す（`jvmti.rs`、`library.rs`、`hook.rs`、`tall.rs`。Linux・macOS への準備の段階 1〜4） | 段階 3 まで（MinHook と併用）は実機の 1.21.11・26.3 で確認済み（MinHook を使わない `detours=off` も）。段階 4（MinHook と DLL の読み込みの監視を外した版）は手元のスモークで確認済み。実機では未確認 |
 | 監査（`docs/AUDIT-2026-10-09.md`）の全件の修正 | テスト・clippy・インストーラーのビルドで確認。実機では未確認（`docs/TESTING.md` の「監査の修正で確認すること」）。設計は HANDOFF.md の「追記：監査の修正」 |
 
 ### 高精細のズームの仕組み（`hook-win/src/tall.rs`）
 
 1. ズームキーを押している間、ゲームにフレームバッファが縦に k 倍長いと伝える（GLFW：ゲームのフレームバッファの大きさのコールバックをスワップの後に呼び、`glfwGetFramebufferSize` を差し替え。SDL3：`SDL_PollEvent` から大きさの変更のイベントを渡し、`SDL_GetWindowSizeInPixels` を差し替え）
-2. opengl32.dll が読み込まれたときに `wglGetProcAddress` をフックし、ゲームに `glBindFramebuffer(EXT)`・`glBlitNamedFramebuffer` のラッパーを渡す。ズーム中はフレームバッファ 0 を自前の縦長のフレームバッファに差し替える
+2. LWJGL の `glBindFramebuffer(EXT)`・`glBlitNamedFramebuffer`・`glViewport` の JNI のネイティブを、JVM が結び付けるときに自前のものに差し替える（`wrap_native`、JVMTI）。ズーム中はフレームバッファ 0 を自前の縦長のフレームバッファに差し替える。
+   変わるのは LWJGL を通るゲームの呼び出しだけで、スワップをフックする画面の録画（OBS）はウィンドウのフレームバッファ 0 を読む
 3. スワップのときに、その中央をウィンドウに blit する
 4. `glViewport` のラッパーで、ゲームが本当に縦長で描いたかを確かめる（ズームを始めてから縦長の高さの viewport を一度でも設定したか。Sodium は直前と同じ値の `glViewport` を省くので、フレームごとには見ない）。
    3 フレーム以上かつ 1 秒以上続けて描かれなければ、引き伸ばすズームに切り替える（描画先の作り直しで数フレーム止まっても見切らないように）。
@@ -202,7 +203,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
    - インストーラーのダウンロードには、公開されたリポジトリの公開済みのリリース（`release.yml` で作った下書きを公開したもの）が要る（今は非公開でリリースもない）
 2. CI のスモークテストで F3+C とキーの置き換えを確かめる（`--world`・`--f3c-refuse`、settings.json のルールと `--screen-key`・`--watch-keys` を使い、マーカーに `F3+C: clipboard hooks ready`・`SETALL` などを足す。今の CI は新しいオプションを使っていない。`scripts/wine-smoke.sh` もまだ渡せない）
 3. IME の変換中の文字をメニューの入力欄に出す（今は確定した文字だけ）
-4. Linux（Fedora）対応。方針の案は HANDOFF.md の構成の `hook-linux/`（GLFW の関数をフックする、自前のコンテキストは GLX／EGL。MinHook は使えないのでデトアの方法を検討する）
+4. Linux（Fedora）・macOS 対応。フックは JVMTI で渡す（`DynamicLinkLoader.ndlsym` を差し替える）ので、デトアは要らない。OS に依存しない部分をクレートに分け、自前のコンテキスト（GLX／EGL、CGL）などを OS ごとに書く。方針は HANDOFF.md の「追記：試作：LWJGL の呼び出しを JVMTI で横取りする」以降
 
 ## 開発環境についての注意
 

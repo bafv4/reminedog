@@ -2,7 +2,7 @@
 //!
 //! The context is created on the same HDC as the game's, so both render to the same
 //! default framebuffer, but each keeps its own GL state: switching to ours inside the swap
-//! detour and back afterwards leaves Minecraft's state untouched, whether the game uses a
+//! hook and back afterwards leaves Minecraft's state untouched, whether the game uses a
 //! core or a compatibility profile.
 //!
 //! opengl32.dll is resolved at runtime (GLFW loads it) instead of being imported, so
@@ -112,24 +112,16 @@ impl Wgl {
     }
 
     /// Looks up a GL function for the current context: extensions and GL > 1.1 come from
-    /// the driver via wglGetProcAddress, GL 1.1 only from opengl32's exports. Always the
-    /// real functions, never the wrappers handed to the game (see `tall`).
+    /// the driver via wglGetProcAddress, GL 1.1 only from opengl32's exports.
     pub fn load(&self, name: &CStr) -> *const c_void {
-        let get_proc_address =
-            crate::tall::original_get_proc_address().unwrap_or(self.get_proc_address);
         // SAFETY: NUL-terminated name.
-        let p = unsafe { get_proc_address(name.as_ptr()) };
+        let p = unsafe { (self.get_proc_address)(name.as_ptr()) };
         // Some drivers return small sentinel values instead of null on failure.
         if matches!(p as isize, -1..=3) {
             ffi::proc_address(self.module, name).unwrap_or(std::ptr::null())
         } else {
             p
         }
-    }
-
-    /// An export of opengl32.dll (the GL 1.1 functions), or null.
-    pub fn export(&self, name: &CStr) -> *const c_void {
-        ffi::proc_address(self.module, name).unwrap_or(std::ptr::null())
     }
 
     /// "version | renderer | vendor | profile" of the current context, using only GL 1.1

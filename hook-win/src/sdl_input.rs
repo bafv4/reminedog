@@ -1,6 +1,6 @@
 //! SDL3 input (Minecraft 26.x): events are filtered in `SDL_PollEvent`.
 //!
-//! SDL3 queues input and the game drains the queue with `SDL_PollEvent`; the detour hands
+//! SDL3 queues input and the game drains the queue with `SDL_PollEvent`; the hook hands
 //! each event to the router and drops the ones the overlay takes, so the game never sees
 //! them. The game might read input some other way (event watchers, `SDL_PeepEvents`); those
 //! functions are only logged the first time they are used, so a log shows whether the filter
@@ -17,7 +17,7 @@
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use reminedog_core::{InputId, Naming, SCANCODE_COUNT, sdl_keycode, sdl_keycode_of, sdl_scancode};
 use reminedog_render::{Delivery, Key, Modifiers, Output, Phase, PointerButton, Route};
@@ -25,7 +25,7 @@ use windows_sys::Win32::Foundation::HMODULE;
 
 use crate::f3c::{self, Failure, Injected, Job, Purpose};
 use crate::ffi;
-use crate::hook::{self, export};
+use crate::hook::{Hook, Original, Slot as _, export};
 use crate::input::{self, FUNCTION_KEYS, router};
 use crate::rebind_state;
 
@@ -121,22 +121,22 @@ struct Api {
     stop_text_input: WindowBoolFn,
     text_input_active: WindowBoolFn,
     get_window_id: Option<GetWindowIdFn>,
-    /// The real modifier state, for mouse buttons rebound to keys (not detoured: Minecraft reads
+    /// The real modifier state, for mouse buttons rebound to keys (not hooked: Minecraft reads
     /// a click's modifiers with it, which stay physical).
     get_mod_state: Option<GetModStateFn>,
 }
 
 static API: OnceLock<Api> = OnceLock::new();
-static POLL_EVENT: OnceLock<PollEventFn> = OnceLock::new();
+static POLL_EVENT: Original<PollEventFn> = Original::new();
 /// The window of the last input event, for switching text input when the UI toggles.
 static LAST_WINDOW: AtomicUsize = AtomicUsize::new(0);
 /// We switched SDL text input on for the UI and must switch it off again (when the game's
 /// own switching is not followed).
 static TEXT_INPUT_OURS: AtomicBool = AtomicBool::new(false);
-/// Trampolines of SDL_StartTextInput and SDL_StopTextInput: the game's own switching is
-/// followed, so closing the UI leaves text input as the game last wanted it.
-static START_TEXT_INPUT: OnceLock<WindowBoolFn> = OnceLock::new();
-static STOP_TEXT_INPUT: OnceLock<WindowBoolFn> = OnceLock::new();
+/// The real SDL_StartTextInput and SDL_StopTextInput: the game's own switching is followed,
+/// so closing the UI leaves text input as the game last wanted it.
+static START_TEXT_INPUT: Original<WindowBoolFn> = Original::new();
+static STOP_TEXT_INPUT: Original<WindowBoolFn> = Original::new();
 /// Text input as the game (or SDL) last switched it.
 static GAME_TEXT_INPUT: AtomicBool = AtomicBool::new(false);
 /// The UI is open and keeps text input on.
@@ -145,26 +145,99 @@ static UI_TEXT_INPUT: AtomicBool = AtomicBool::new(false);
 static DENSITY: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 /// Events made up by the agent (the zoom's resizes, F3+C), handed out before SDL's own.
 static INJECTED: Mutex<VecDeque<(Event, Tag)>> = Mutex::new(VecDeque::new());
-static SET_CLIPBOARD_TEXT: OnceLock<SetClipboardTextFn> = OnceLock::new();
+static SET_CLIPBOARD_TEXT: Original<SetClipboardTextFn> = Original::new();
 
-static PEEP_EVENTS: OnceLock<PeepEventsFn> = OnceLock::new();
-static WAIT_EVENT: OnceLock<WaitEventFn> = OnceLock::new();
-static WAIT_EVENT_TIMEOUT: OnceLock<WaitEventTimeoutFn> = OnceLock::new();
-static SET_RELATIVE_MOUSE_MODE: OnceLock<SetRelativeMouseModeFn> = OnceLock::new();
-/// Trampoline of SDL_GetKeyboardState; also called directly for the real key state (F3+C, the
+static PEEP_EVENTS: Original<PeepEventsFn> = Original::new();
+static WAIT_EVENT: Original<WaitEventFn> = Original::new();
+static WAIT_EVENT_TIMEOUT: Original<WaitEventTimeoutFn> = Original::new();
+static SET_RELATIVE_MOUSE_MODE: Original<SetRelativeMouseModeFn> = Original::new();
+/// The real SDL_GetKeyboardState; also called directly for the real key state (F3+C, the
 /// rebinding), which made-up events never change.
-static GET_KEYBOARD_STATE: OnceLock<GetKeyboardStateFn> = OnceLock::new();
-/// SDL_GetKeyboardState itself, for the real key state if it could not be detoured.
+static GET_KEYBOARD_STATE: Original<GetKeyboardStateFn> = Original::new();
+/// SDL_GetKeyboardState itself, for the real key state before LWJGL looks it up.
 static GET_KEYBOARD_STATE_EXPORT: OnceLock<GetKeyboardStateFn> = OnceLock::new();
-/// SDL_GetKeyboardState is detoured: the game reads the key state the rebinding gives it.
-static KEY_STATE_SPOOFED: AtomicBool = AtomicBool::new(false);
 /// What SDL_GetKeyboardState returns while the rebinding has a say on some key: SDL's array with
 /// that applied (a C bool per scancode, as SDL's).
 static SPOOFED_KEYS: [AtomicU8; SCANCODE_COUNT] = [const { AtomicU8::new(0) }; SCANCODE_COUNT];
-static GET_MOUSE_STATE: OnceLock<GetMouseStateFn> = OnceLock::new();
-static GET_RELATIVE_MOUSE_STATE: OnceLock<GetMouseStateFn> = OnceLock::new();
-static ADD_EVENT_WATCH: OnceLock<AddEventWatchFn> = OnceLock::new();
-static SET_EVENT_FILTER: OnceLock<SetEventFilterFn> = OnceLock::new();
+static GET_MOUSE_STATE: Original<GetMouseStateFn> = Original::new();
+static GET_RELATIVE_MOUSE_STATE: Original<GetMouseStateFn> = Original::new();
+static ADD_EVENT_WATCH: Original<AddEventWatchFn> = Original::new();
+static SET_EVENT_FILTER: Original<SetEventFilterFn> = Original::new();
+
+static HOOKS: LazyLock<[Hook; 13]> = LazyLock::new(|| {
+    [
+        Hook::new(
+            c"SDL_PollEvent",
+            poll_event_hook as *const c_void,
+            &POLL_EVENT,
+        ),
+        Hook::new(
+            c"SDL_SetClipboardText",
+            set_clipboard_text_hook as *const c_void,
+            &SET_CLIPBOARD_TEXT,
+        ),
+        Hook::new(
+            c"SDL_StartTextInput",
+            start_text_input_hook as *const c_void,
+            &START_TEXT_INPUT,
+        ),
+        Hook::new(
+            c"SDL_StopTextInput",
+            stop_text_input_hook as *const c_void,
+            &STOP_TEXT_INPUT,
+        ),
+        Hook::new(
+            c"SDL_GetKeyboardState",
+            get_keyboard_state_hook as *const c_void,
+            &GET_KEYBOARD_STATE,
+        ),
+        Hook::new(
+            c"SDL_PeepEvents",
+            peep_events_probe as *const c_void,
+            &PEEP_EVENTS,
+        ),
+        Hook::new(
+            c"SDL_WaitEvent",
+            wait_event_probe as *const c_void,
+            &WAIT_EVENT,
+        ),
+        Hook::new(
+            c"SDL_WaitEventTimeout",
+            wait_event_timeout_probe as *const c_void,
+            &WAIT_EVENT_TIMEOUT,
+        ),
+        Hook::new(
+            c"SDL_SetWindowRelativeMouseMode",
+            set_relative_mouse_mode_probe as *const c_void,
+            &SET_RELATIVE_MOUSE_MODE,
+        ),
+        Hook::new(
+            c"SDL_GetMouseState",
+            get_mouse_state_probe as *const c_void,
+            &GET_MOUSE_STATE,
+        ),
+        Hook::new(
+            c"SDL_GetRelativeMouseState",
+            get_relative_mouse_state_probe as *const c_void,
+            &GET_RELATIVE_MOUSE_STATE,
+        ),
+        Hook::new(
+            c"SDL_AddEventWatch",
+            add_event_watch_probe as *const c_void,
+            &ADD_EVENT_WATCH,
+        ),
+        Hook::new(
+            c"SDL_SetEventFilter",
+            set_event_filter_probe as *const c_void,
+            &SET_EVENT_FILTER,
+        ),
+    ]
+});
+
+/// The hooks of SDL3's input functions.
+pub fn hooks() -> &'static [Hook] {
+    &*HOOKS
+}
 
 pub fn install(module: HMODULE) {
     let api = (|| {
@@ -199,101 +272,29 @@ pub fn install(module: HMODULE) {
     })();
     let Some(api) = api else {
         log::warn!("SDL3 lacks functions the overlay's input needs; no overlay input");
-        f3c::set_hooks_ready(false);
         return;
     };
     let has_window_id = api.get_window_id.is_some();
     let _ = API.set(api);
 
-    // True when the detour is in.
-    macro_rules! hook {
-        ($name:literal, $detour:ident, $original:ident) => {
-            match export(module, $name) {
-                // SAFETY: the export, its detour and the slot share one signature; nothing
-                // runs SDL3 while it is being loaded.
-                Some(target) => {
-                    let name = $name.to_string_lossy();
-                    match unsafe {
-                        hook::install(&name, target, $detour as *const c_void, &$original)
-                    } {
-                        Ok(()) => true,
-                        Err(e) => {
-                            log::warn!("SDL3 input: {e}");
-                            false
-                        }
-                    }
-                }
-                None => {
-                    log::warn!("SDL3 does not export {}", $name.to_string_lossy());
-                    false
-                }
-            }
-        };
-    }
-    let poll_hooked = hook!(c"SDL_PollEvent", poll_event_detour, POLL_EVENT);
-    let clipboard_hooked = hook!(
-        c"SDL_SetClipboardText",
-        set_clipboard_text_detour,
-        SET_CLIPBOARD_TEXT
-    );
     if let Some(f) = export(module, c"SDL_GetKeyboardState") {
         // SAFETY: SDL_GetKeyboardState has this signature.
         let _ = GET_KEYBOARD_STATE_EXPORT
             .set(unsafe { std::mem::transmute::<*const c_void, GetKeyboardStateFn>(f) });
     }
-    let starts = hook!(
-        c"SDL_StartTextInput",
-        start_text_input_detour,
-        START_TEXT_INPUT
-    );
-    let stops = hook!(
-        c"SDL_StopTextInput",
-        stop_text_input_detour,
-        STOP_TEXT_INPUT
-    );
-    if !(starts && stops) {
-        log::warn!("SDL3 input: the game's text input switching is not followed");
-    }
-    hook!(c"SDL_PeepEvents", peep_events_probe, PEEP_EVENTS);
-    hook!(c"SDL_WaitEvent", wait_event_probe, WAIT_EVENT);
-    hook!(
-        c"SDL_WaitEventTimeout",
-        wait_event_timeout_probe,
-        WAIT_EVENT_TIMEOUT
-    );
-    hook!(
-        c"SDL_SetWindowRelativeMouseMode",
-        set_relative_mouse_mode_probe,
-        SET_RELATIVE_MOUSE_MODE
-    );
-    let keyboard_state_hooked = hook!(
-        c"SDL_GetKeyboardState",
-        get_keyboard_state_detour,
-        GET_KEYBOARD_STATE
-    );
-    KEY_STATE_SPOOFED.store(keyboard_state_hooked, Ordering::Relaxed);
-    hook!(c"SDL_GetMouseState", get_mouse_state_probe, GET_MOUSE_STATE);
-    hook!(
-        c"SDL_GetRelativeMouseState",
-        get_relative_mouse_state_probe,
-        GET_RELATIVE_MOUSE_STATE
-    );
-    hook!(c"SDL_AddEventWatch", add_event_watch_probe, ADD_EVENT_WATCH);
-    hook!(
-        c"SDL_SetEventFilter",
-        set_event_filter_probe,
-        SET_EVENT_FILTER
-    );
     // F3+C needs the game window's id for its key events and the real key state.
     if !has_window_id {
         log::warn!("SDL3 does not export SDL_GetWindowID");
     }
-    f3c::set_hooks_ready(
-        poll_hooked && clipboard_hooked && has_window_id && real_keyboard_state().is_some(),
-    );
+    f3c::set_hooks_check(|| {
+        POLL_EVENT.ready()
+            && SET_CLIPBOARD_TEXT.ready()
+            && API.get().is_some_and(|api| api.get_window_id.is_some())
+            && real_keyboard_state().is_some()
+    });
 }
 
-unsafe extern "C" fn poll_event_detour(event: *mut u8) -> bool {
+unsafe extern "C" fn poll_event_hook(event: *mut u8) -> bool {
     let Some(original) = POLL_EVENT.get() else {
         return false;
     };
@@ -320,7 +321,7 @@ unsafe extern "C" fn poll_event_detour(event: *mut u8) -> bool {
             return has_event;
         }
         // SAFETY: SDL just filled a whole SDL_Event.
-        let route = ffi::catch("SDL_PollEvent detour", || unsafe { route_event(event) });
+        let route = ffi::catch("SDL_PollEvent hook", || unsafe { route_event(event) });
         if log::log_enabled!(log::Level::Trace) {
             // SAFETY: as above.
             let kind = unsafe { event.cast::<u32>().read_unaligned() };
@@ -441,8 +442,7 @@ fn f3c_events(job: &Job) -> Result<[(Event, Tag); 4], Failure> {
 fn real_keyboard_state() -> Option<GetKeyboardStateFn> {
     GET_KEYBOARD_STATE
         .get()
-        .or(GET_KEYBOARD_STATE_EXPORT.get())
-        .copied()
+        .or(GET_KEYBOARD_STATE_EXPORT.get().copied())
 }
 
 /// SDL's own key state, one C bool per scancode (what is physically held); `None` if SDL cannot
@@ -450,8 +450,8 @@ fn real_keyboard_state() -> Option<GetKeyboardStateFn> {
 fn real_keys() -> Option<&'static [u8]> {
     let get = real_keyboard_state()?;
     let mut count: c_int = 0;
-    // SAFETY: SDL writes the array's length and returns its own array. Called through the
-    // trampoline, the rebinding's detour does not see it.
+    // SAFETY: SDL writes the array's length and returns its own array. Called directly, the
+    // rebinding's hook does not see it.
     let state = unsafe { get(&mut count) };
     if state.is_null() {
         return None;
@@ -464,13 +464,13 @@ fn real_keys() -> Option<&'static [u8]> {
 /// Whether the game reads the key state the rebinding gives it (without that, keys cannot be
 /// rebound: a held source would read as held).
 pub fn key_state_spoofed() -> bool {
-    KEY_STATE_SPOOFED.load(Ordering::Relaxed)
+    GET_KEYBOARD_STATE.ready()
 }
 
 /// The game's view of the key state: SDL's array, with the rebinding's say on the keys it
 /// holds down or hides ([`rebind_state`]). Minecraft asks for the array afresh every time it
 /// reads a key, so a copy patched now is what it reads.
-unsafe extern "C" fn get_keyboard_state_detour(numkeys: *mut c_int) -> *const bool {
+unsafe extern "C" fn get_keyboard_state_hook(numkeys: *mut c_int) -> *const bool {
     static USED: AtomicBool = AtomicBool::new(false);
     first_use(&USED, "SDL_GetKeyboardState");
     let Some(original) = GET_KEYBOARD_STATE.get() else {
@@ -589,14 +589,14 @@ fn after_modifier_up(
 
 /// Keeps the location Minecraft copies for our F3+C off the clipboard (reporting success, or
 /// the game logs an error), and sees the user's own F3+C.
-unsafe extern "C" fn set_clipboard_text_detour(text: *const c_char) -> bool {
+unsafe extern "C" fn set_clipboard_text_hook(text: *const c_char) -> bool {
     let Some(original) = SET_CLIPBOARD_TEXT.get() else {
         return false;
     };
     // Other writes (the game's own copying) are passed on unread.
     let ours = !text.is_null()
         && f3c::watching()
-        && ffi::catch("SDL_SetClipboardText detour", || {
+        && ffi::catch("SDL_SetClipboardText hook", || {
             // SAFETY: NUL-terminated UTF-8, valid only during this call (LWJGL passes a stack
             // buffer); it is read here, before returning.
             f3c::on_clipboard(&unsafe { CStr::from_ptr(text) }.to_string_lossy())
@@ -1012,11 +1012,11 @@ fn update_text_input() {
         return;
     }
     let followed = START_TEXT_INPUT.get().zip(STOP_TEXT_INPUT.get());
-    // SAFETY: a window SDL reported for an event on this (the event) thread; the trampolines
-    // have the exports' signature.
+    // SAFETY: a window SDL reported for an event on this (the event) thread; the real
+    // functions have the exports' signature.
     unsafe {
         match followed {
-            Some((&start, &stop)) => {
+            Some((start, stop)) => {
                 let active = (api.text_input_active)(window);
                 if open || GAME_TEXT_INPUT.load(Ordering::Relaxed) {
                     if !active {
@@ -1041,7 +1041,7 @@ fn update_text_input() {
 }
 
 /// The game (or SDL) switches text input on: remembered for when the UI closes.
-unsafe extern "C" fn start_text_input_detour(window: *mut c_void) -> bool {
+unsafe extern "C" fn start_text_input_hook(window: *mut c_void) -> bool {
     GAME_TEXT_INPUT.store(true, Ordering::Relaxed);
     let Some(original) = START_TEXT_INPUT.get() else {
         return false;
@@ -1052,7 +1052,7 @@ unsafe extern "C" fn start_text_input_detour(window: *mut c_void) -> bool {
 
 /// The game switches text input off: remembered, and while the UI is open put off until it
 /// closes (the UI's text fields need it).
-unsafe extern "C" fn stop_text_input_detour(window: *mut c_void) -> bool {
+unsafe extern "C" fn stop_text_input_hook(window: *mut c_void) -> bool {
     GAME_TEXT_INPUT.store(false, Ordering::Relaxed);
     if UI_TEXT_INPUT.load(Ordering::Relaxed) {
         return true;
@@ -1162,8 +1162,8 @@ fn first_use(flag: &AtomicBool, name: &str) {
 }
 
 macro_rules! probe {
-    ($detour:ident, $original:ident, $name:literal, ($($arg:ident: $ty:ty),*) -> $ret:ty, $default:expr) => {
-        unsafe extern "C" fn $detour($($arg: $ty),*) -> $ret {
+    ($hook:ident, $original:ident, $name:literal, ($($arg:ident: $ty:ty),*) -> $ret:ty, $default:expr) => {
+        unsafe extern "C" fn $hook($($arg: $ty),*) -> $ret {
             static USED: AtomicBool = AtomicBool::new(false);
             first_use(&USED, $name);
             match $original.get() {
@@ -1264,7 +1264,7 @@ mod tests {
         assert!(burst.iter().all(|(e, _)| u32_at(e, OFF_WINDOW_ID) == ID));
     }
 
-    /// Hands out the queue as the poll detour does, settling the burst with `copied`.
+    /// Hands out the queue as the poll hook does, settling the burst with `copied`.
     fn hand_out(mut queue: VecDeque<(Event, Tag)>, copied: Injected) -> (Vec<Event>, Vec<Failure>) {
         let (mut out, mut failures) = (Vec::new(), Vec::new());
         while let Some((event, tag)) = queue.pop_front() {
