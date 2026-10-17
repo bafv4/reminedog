@@ -2,7 +2,6 @@
 
 use std::ffi::{CStr, c_void};
 use std::mem::offset_of;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
 use windows_sys::Win32::Foundation::HMODULE;
@@ -16,19 +15,7 @@ use windows_sys::Win32::System::SystemServices::{
     IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE, IMAGE_EXPORT_DIRECTORY, IMAGE_NT_SIGNATURE,
 };
 
-/// Runs `f`, turning a panic into a log entry. Every function the JVM, LWJGL or a library
-/// calls into must go through this: a panic unwinding into foreign frames aborts
-/// the process, which here means crashing the game.
-pub fn catch<R>(what: &str, f: impl FnOnce() -> R) -> Option<R> {
-    match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(value) => Some(value),
-        Err(_) => {
-            // The panic hook already logged the message and location.
-            log::error!("recovered from a panic in {what}");
-            None
-        }
-    }
-}
+pub use reminedog_agent::catch;
 
 /// Address of an exported function of a fully loaded module, or `None` if the module
 /// doesn't export it.

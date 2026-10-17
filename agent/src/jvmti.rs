@@ -1,22 +1,21 @@
 //! Sees LWJGL's calls into the window library and OpenGL through JVMTI, patching nothing.
 //!
 //! The JVM reports each native method as it binds it (NativeMethodBind) and lets the agent
-//! bind another function in its place. LWJGL looks up every GLFW and SDL function with
-//! `WinBase.nGetProcAddress`, a JNI native in every version: in its place, the agent hands
-//! LWJGL the hook for the functions of the hooked window library ([`crate::hook::Hook`]),
-//! which calls the real one. LWJGL then calls the hook whichever way it calls: JNI natives up
-//! to LWJGL 3.3 (`JavaCritical_` entries on Java 8 with 3.2), FFM downcalls in LWJGL 3.4 on
-//! Java 25.
+//! bind another function in its place. LWJGL looks up every GLFW and SDL function with a JNI
+//! native in every version (`WinBase.nGetProcAddress` on Windows, `DynamicLinkLoader.ndlsym`
+//! on Linux and macOS): in its place, the agent hands LWJGL the platform's hook for the
+//! function ([`Platform::hook`], [`crate::hook::Hook`]), which calls the real one. LWJGL then
+//! calls the hook whichever way it calls: JNI natives up to LWJGL 3.3 (`JavaCritical_`
+//! entries on Java 8 with 3.2), FFM downcalls in LWJGL 3.4 on Java 25. Other natives of
+//! LWJGL (its GL functions) may be replaced by the platform as they are bound
+//! ([`Platform::native`]).
 //!
-//! Nothing is patched, so other systems can do the same (with `DynamicLinkLoader.ndlsym`).
 //! Only natives bound after `Agent_OnLoad` are seen, which are all of LWJGL's.
 
 use std::ffi::{CStr, c_char, c_void};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use windows_sys::Win32::Foundation::HMODULE;
-
-use crate::ffi;
 use crate::hook::Hook;
 
 const JNI_OK: i32 = 0;
@@ -51,7 +50,8 @@ type NativeMethodBindFn = unsafe extern "system" fn(
     address: Ptr,
     new_address: *mut Ptr,
 );
-/// `WinBase.nGetProcAddress(module, name)` (LWJGL 3.2 and 3.3).
+/// `WinBase.nGetProcAddress(module, name)` (LWJGL 3.2 and 3.3), and
+/// `DynamicLinkLoader.ndlsym(handle, name)`.
 type GetProcAddressFn = unsafe extern "system" fn(Ptr, Ptr, i64, i64) -> i64;
 /// `WinBase.nGetProcAddress(lastError, module, name)` (LWJGL 3.4).
 type GetProcAddressLastErrorFn = unsafe extern "system" fn(Ptr, Ptr, i64, i64, i64) -> i64;
@@ -64,39 +64,44 @@ struct EventCallbacks {
     native_method_bind: NativeMethodBindFn,
 }
 
-/// The JVM's own `nGetProcAddress`, by signature.
+/// What the platform does with LWJGL's lookups and natives.
+pub struct Platform {
+    /// The hook LWJGL is handed for the function `name` it looked up in `library` (a module
+    /// handle), if any: the hooked window library's.
+    pub hook: fn(library: usize, name: &CStr) -> Option<&'static Hook>,
+    /// The platform's native in place of LWJGL's `name` of `class` (signatures as JNI writes
+    /// them), the JVM's own `address` kept to call; `None` leaves it.
+    pub native: fn(
+        class: &str,
+        name: &str,
+        signature: &str,
+        address: *const c_void,
+    ) -> Option<*const c_void>,
+}
+
+static PLATFORM: OnceLock<Platform> = OnceLock::new();
+
+/// The JVM's own natives that LWJGL looks functions up with, by signature.
 static GET_PROC_ADDRESS: AtomicUsize = AtomicUsize::new(0);
 static GET_PROC_ADDRESS_LAST_ERROR: AtomicUsize = AtomicUsize::new(0);
+static DLSYM: AtomicUsize = AtomicUsize::new(0);
 
 /// Whether LWJGL's lookups go through the agent: functions LWJGL looks up from now on are
 /// handed their hooks.
 pub fn handing_out() -> bool {
-    GET_PROC_ADDRESS.load(Ordering::Acquire) != 0
-        || GET_PROC_ADDRESS_LAST_ERROR.load(Ordering::Acquire) != 0
-}
-
-/// The hook of `name` if `module` is the hooked window library (the first GLFW or SDL3 that
-/// LWJGL looks a function up in).
-fn hook_for(module: usize, name: &[u8]) -> Option<&'static Hook> {
-    crate::library::identify(module as HMODULE);
-    let hooks: &[&[Hook]] = if crate::glfw::is_hooked(module) {
-        &[crate::glfw::hooks(), crate::glfw_input::hooks()]
-    } else if crate::sdl::is_hooked(module) {
-        &[crate::sdl::hooks(), crate::sdl_input::hooks()]
-    } else {
-        return None;
-    };
-    hooks
+    [&GET_PROC_ADDRESS, &GET_PROC_ADDRESS_LAST_ERROR, &DLSYM]
         .iter()
-        .flat_map(|hooks| hooks.iter())
-        .find(|hook| hook.name.to_bytes() == name)
+        .any(|native| native.load(Ordering::Acquire) != 0)
 }
 
-/// Has the JVM report native methods as it binds them.
+/// Has the JVM report native methods as it binds them, for `platform`.
 ///
 /// # Safety
 /// `vm` is the `JavaVM*` the JVM passed `Agent_OnLoad`.
-pub unsafe fn start(vm: *mut c_void) -> Result<(), String> {
+pub unsafe fn start(vm: *mut c_void, platform: Platform) -> Result<(), String> {
+    if PLATFORM.set(platform).is_err() {
+        return Err("started twice".into());
+    }
     if vm.is_null() {
         return Err("no JavaVM".into());
     }
@@ -237,18 +242,11 @@ unsafe extern "system" fn native_method_bind(
     address: Ptr,
     new_address: *mut Ptr,
 ) {
-    ffi::catch("NativeMethodBind", || {
+    crate::catch("NativeMethodBind", || {
         // SAFETY: the event's env and method.
         let Some((class, name, signature)) = (unsafe { describe(env, method) }) else {
             return;
         };
-        if class.starts_with("Lorg/lwjgl/opengl/") {
-            if let Some(ours) = crate::tall::wrap_native(&name, &signature, address) {
-                // SAFETY: the JVM binds what the event leaves here.
-                unsafe { *new_address = ours.cast_mut() };
-            }
-            return;
-        }
         let (original, ours) = match (class.as_str(), name.as_str(), signature.as_str()) {
             ("Lorg/lwjgl/system/windows/WinBase;", "nGetProcAddress", "(JJ)J") => (
                 &GET_PROC_ADDRESS,
@@ -258,7 +256,22 @@ unsafe extern "system" fn native_method_bind(
                 &GET_PROC_ADDRESS_LAST_ERROR,
                 get_proc_address_last_error as GetProcAddressLastErrorFn as Ptr,
             ),
-            _ => return,
+            (
+                "Lorg/lwjgl/system/linux/DynamicLinkLoader;"
+                | "Lorg/lwjgl/system/macosx/DynamicLinkLoader;",
+                "ndlsym",
+                "(JJ)J",
+            ) => (&DLSYM, dlsym as GetProcAddressFn as Ptr),
+            _ => {
+                let Some(platform) = PLATFORM.get() else {
+                    return;
+                };
+                if let Some(ours) = (platform.native)(&class, &name, &signature, address) {
+                    // SAFETY: the JVM binds what the event leaves here.
+                    unsafe { *new_address = ours.cast_mut() };
+                }
+                return;
+            }
         };
         if address.is_null() || address == ours {
             return;
@@ -280,6 +293,17 @@ unsafe extern "system" fn get_proc_address(env: Ptr, class: Ptr, module: i64, na
     };
     // SAFETY: `name` is the NUL-terminated name LWJGL looked up.
     unsafe { handed(module, name, address) }
+}
+
+/// In place of LWJGL's `DynamicLinkLoader.ndlsym` (Linux, macOS).
+unsafe extern "system" fn dlsym(env: Ptr, class: Ptr, handle: i64, name: i64) -> i64 {
+    // SAFETY: as above.
+    let address = unsafe {
+        let original: GetProcAddressFn = std::mem::transmute(DLSYM.load(Ordering::Acquire));
+        original(env, class, handle, name)
+    };
+    // SAFETY: as above.
+    unsafe { handed(handle, name, address) }
 }
 
 /// In place of LWJGL 3.4's `WinBase.nGetProcAddress`.
@@ -309,11 +333,12 @@ unsafe fn handed(module: i64, name: i64, address: i64) -> i64 {
     if name == 0 || address == 0 {
         return address;
     }
-    ffi::catch("LWJGL's lookup", || {
+    crate::catch("LWJGL's lookup", || {
         // SAFETY: guaranteed by the caller.
         let name = unsafe { CStr::from_ptr(name as *const c_char) };
-        let Some(hook) = hook_for(module as usize, name.to_bytes()) else {
-            return address;
+        let platform = PLATFORM.get()?;
+        let Some(hook) = (platform.hook)(module as usize, name) else {
+            return Some(address);
         };
         // SAFETY: the function of the hook's name, of the slot's type.
         unsafe { hook.original.set_looked_up(address as *const c_void) };
@@ -321,7 +346,8 @@ unsafe fn handed(module: i64, name: i64, address: i64) -> i64 {
             "jvmti: LWJGL looked up {}; handed the agent's hook",
             name.to_string_lossy()
         );
-        hook.hook as i64
+        Some(hook.hook as i64)
     })
+    .flatten()
     .unwrap_or(address)
 }

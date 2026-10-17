@@ -14,8 +14,6 @@ use std::time::Duration;
 
 use reminedog_core::write_file;
 
-use crate::ffi;
-
 struct Write {
     path: PathBuf,
     bytes: Vec<u8>,
@@ -34,7 +32,7 @@ fn queue() -> Option<&'static Mutex<Sender<Write>>> {
                 .spawn(move || {
                     for write in rx {
                         let result =
-                            ffi::catch("saving a file", || write_file(&write.path, &write.bytes))
+                            crate::catch("saving a file", || write_file(&write.path, &write.bytes))
                                 .unwrap_or_else(|| Err(io::Error::other("panicked while saving")));
                         let _ = write.done.send(result);
                     }

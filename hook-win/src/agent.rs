@@ -117,8 +117,12 @@ pub fn on_load(raw_options: &str, vm: *mut std::ffi::c_void) {
     if globals().is_some_and(|globals| globals.options.overlay) {
         crate::fonts::preload();
     }
+    let platform = crate::jvmti::Platform {
+        hook: crate::library::hook,
+        native: crate::library::native,
+    };
     // SAFETY: the JavaVM the JVM passed Agent_OnLoad.
-    if let Err(e) = unsafe { crate::jvmti::start(vm) } {
+    if let Err(e) = unsafe { crate::jvmti::start(vm, platform) } {
         log::error!("jvmti: not started, the overlay will not work: {e}");
     }
 }

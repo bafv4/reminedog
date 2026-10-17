@@ -14,26 +14,23 @@
 mod agent;
 mod browser;
 mod clipboard;
-mod f3c;
 mod ffi;
 mod fonts;
 mod frame;
 mod glfw;
 mod glfw_input;
-mod hook;
-mod input;
-mod jvmti;
 mod library;
 mod pointer;
 mod rebind_state;
-mod saver;
 mod sdl;
 mod sdl_input;
 mod tall;
-mod waypoints;
 mod wgl;
 
 use std::ffi::{CStr, c_char, c_void};
+
+// The OS-independent parts, at the paths the modules here use.
+use reminedog_agent::{f3c, hook, input, jvmti, saver, waypoints};
 
 const JNI_OK: i32 = 0;
 

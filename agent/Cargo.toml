@@ -1,0 +1,15 @@
+[package]
+name = "reminedog-agent"
+description = "OS-independent agent parts: JVMTI, hook tables, F3+C, waypoints, input routing, file saving"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+reminedog-core.workspace = true
+reminedog-render.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -936,6 +936,33 @@ LWJGL 3.2.2 の `lwjgl.dll` には `WinBase.nGetProcAddress` の `JavaCritical_`
 - 前の修正（2026-10-09 の `Swapping`）は「OBS が `glBindFramebuffer` で 0 を結び付け直す」という誤った前提で、ラッパーの差し替えを止めるだけだったので効いていなかった（実機では確かめていなかった）
 - 修正：`tall::Swapping` が、ズーム中に本物のスワップを呼ぶ間だけ、ゲームのコンテキストで読み取り・描き込みのフレームバッファを 0 に結び付け（自前の縦長のものが結び付いていたときだけ）、スワップの後で元に戻す。
   ウィンドウにはその前にズームの中央を写してある。戻すのは、Minecraft が結び付けたつもりのフレームバッファを覚えていて、結び付け直しを省くため。`glBindFramebuffer` は `wglGetProcAddress` から本物を引く（LWJGL を通らないので、ズームの差し替えには当たらない）
-- 確かめたこと：スモーク（GLFW 3.3.3 の `--mc`・`--mc --sodium`、SDL3 3.4.3）でズームが縦長で描かれ、`=log=debug` に `zoom: the window's framebuffer is bound for the swap` が出ること。OBS での録画は実機で確かめる
+- 確かめたこと：スモーク（GLFW 3.3.3 の `--mc`・`--mc --sodium`、SDL3 3.4.3）でズームが縦長で描かれ、`=log=debug` に `zoom: the window's framebuffer is bound for the swap` が出ること。
+  実機（2026-10-18、利用者）：ズーム中を OBS で録画して、画面の中央が映った
 
-段階 4 の後半（OS に依存しない部分をクレートに分ける）はまだ
+段階 4 の後半は下の「追記：OS に依存しない部分を agent/ に分ける」
+
+## 追記：OS に依存しない部分を agent/ に分ける（2026-10-18）
+
+段階 4 の後半。Windows の API を使っていないモジュールを、新しいクレート `agent/`（`reminedog-agent`）に移した（`git mv`）。どの OS でもビルドでき、Linux の CI でビルドとテストが動く。
+
+- 移したもの：`jvmti.rs`、`hook.rs`、`f3c.rs`、`waypoints.rs`、`saver.rs`、`input.rs`、`catch`（`ffi.rs` から。`hook-win` の `ffi::catch` は再公開）。
+  `hook-win` の `lib.rs` が `use reminedog_agent::{f3c, hook, input, jvmti, saver, waypoints};` で取り込むので、`hook-win` のモジュールは今までどおり `crate::f3c` などで使う
+- `jvmti`：OS ごとの判断は `jvmti::Platform` で受け取る。`hook`（引いた関数に渡すフック。`hook-win` はウィンドウのライブラリの判定とフックの表の検索、`library::hook`）と、
+  `native`（ほかの LWJGL のネイティブ。`hook-win` はズームの GL の関数、`library::native` → `tall::wrap_native`）。
+  関数の引き当ては、Windows の `WinBase.nGetProcAddress` に加えて、Linux・macOS の `DynamicLinkLoader.ndlsym(JJ)J` も差し替える（Windows では結び付かないだけ）
+- `hook.rs` の `export`（PE を読む）は `hook-win` の `library.rs` に移した
+
+`hook-win` に残したもの（Windows の API か、それを使うモジュールに依存する）と、Linux に移すときに要る切り分け：
+
+| モジュール | Windows に依存するところ | 切り分けの案 |
+|---|---|---|
+| `glfw.rs`・`sdl.rs` | ウィンドウのハンドル（`HWND`、`glfwGetWin32Window`、`SDL.window.win32.hwnd`）、`frame::before_swap` | ネイティブのウィンドウを OS ごとの型にし、スワップの処理は OS ごとの関数を呼ぶ |
+| `glfw_input.rs`・`sdl_input.rs` | `rebind_state`・`tall` を使う。関数の引き当て（`export`） | 下の 2 つを分ければ移せる。引き当ては OS ごと（`dlsym`） |
+| `rebind_state.rs` | 取り逃した解放の安全網（`GetAsyncKeyState`、`GetSystemMetrics`、Windows のスキャンコード） | 表と判断は共通、物理のキーの状態を読むところだけ OS ごと（X11 は `XQueryKeymap`、macOS は `CGEventSourceKeyState`） |
+| `tall.rs` | ゲームのコンテキストの判定と GL の関数の引き当て（`wgl`） | 「今のコンテキスト」と「GL の関数の引き当て」を OS ごとに（GLX・EGL・CGL） |
+| `frame.rs`・`wgl.rs` | 自前の WGL コンテキスト、HDC、最小化の判定 | OS ごと。設定・ブラウザ・ウェイポイントの毎フレームの処理は共通にできる |
+| `clipboard.rs`・`pointer.rs`・`fonts.rs`・`browser*` | Win32、WebView2 | OS ごと（ブラウザは後回し） |
+
+確かめたこと：fmt、clippy（警告 0）、テスト（agent 25、hook-win 29。分ける前の hook-win の 54 と同じ）、手元のスモーク（GLFW 3.3.3＋Java 25、SDL3 3.4.3＋Java 25、GLFW 3.2.2＋Java 8 で、オーバーレイ、F3+C、J でウェイポイント、Z で縦長、スワップの間の結び付け直し。警告・エラーなし）。
+確かめていないこと：Linux・mingw でのビルド（手元にターゲットがない。CI で確かめる）、実機（動きは変えていない）
+

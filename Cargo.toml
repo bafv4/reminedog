@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "render", "hook-win"]
+members = ["core", "render", "agent", "hook-win"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ publish = false
 [workspace.dependencies]
 reminedog-core = { path = "core" }
 reminedog-render = { path = "render" }
+reminedog-agent = { path = "agent" }
 
 egui = "0.36"
 # egui_glow 0.36 is built against glow 0.17; keep them in lockstep.

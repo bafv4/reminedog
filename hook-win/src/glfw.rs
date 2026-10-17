@@ -14,7 +14,8 @@ use windows_sys::Win32::Foundation::{HMODULE, HWND};
 
 use crate::ffi;
 use crate::frame::{self, WindowSystem};
-use crate::hook::{Hook, Original, export};
+use crate::hook::{Hook, Original};
+use crate::library::export;
 
 type SwapBuffersFn = unsafe extern "C" fn(window: *mut c_void);
 type GetFramebufferSizeFn =

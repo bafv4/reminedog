@@ -1,4 +1,4 @@
-//! Hooks on the window library's functions, and export lookup.
+//! Hooks on the window library's functions.
 //!
 //! LWJGL is handed a hook in place of a function when it looks the function up
 //! ([`crate::jvmti`]); nothing is patched. The hook runs the real function, which LWJGL
@@ -7,10 +7,6 @@
 use std::ffi::{CStr, c_void};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-use windows_sys::Win32::Foundation::HMODULE;
-
-use crate::ffi;
 
 /// The real function behind a hook, once LWJGL has looked it up.
 pub struct Original<F> {
@@ -36,6 +32,12 @@ impl<F: Copy> Original<F> {
         let address = self.looked_up.load(Ordering::Acquire);
         // SAFETY: the real function, whose type F is (see `Slot::set_looked_up`).
         (address != 0).then(|| unsafe { std::mem::transmute_copy::<usize, F>(&address) })
+    }
+}
+
+impl<F: Copy> Default for Original<F> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -83,11 +85,4 @@ impl Hook {
             original,
         }
     }
-}
-
-/// The address of an exported function of `module`, a loaded module (read from its PE
-/// headers).
-pub fn export(module: HMODULE, name: &CStr) -> Option<*const c_void> {
-    // SAFETY: every caller passes a module LWJGL loaded and looks functions up in.
-    unsafe { ffi::export_address(module, name) }
 }

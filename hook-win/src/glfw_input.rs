@@ -28,8 +28,9 @@ use windows_sys::Win32::Foundation::HMODULE;
 
 use crate::f3c::{self, Failure, Injected, Purpose};
 use crate::ffi;
-use crate::hook::{Hook, Original, Slot as _, export};
+use crate::hook::{Hook, Original, Slot as _};
 use crate::input::{self, FUNCTION_KEYS, router};
+use crate::library::export;
 use crate::rebind_state;
 
 type KeyFn = unsafe extern "C" fn(*mut c_void, c_int, c_int, c_int, c_int);

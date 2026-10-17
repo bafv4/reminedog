@@ -20,7 +20,8 @@ use windows_sys::Win32::Foundation::{HMODULE, HWND};
 
 use crate::ffi;
 use crate::frame::{self, WindowSystem};
-use crate::hook::{Hook, Original, export};
+use crate::hook::{Hook, Original};
+use crate::library::export;
 
 type CreateWindowFn =
     unsafe extern "C" fn(title: *const c_char, w: c_int, h: c_int, flags: u64) -> *mut c_void;
