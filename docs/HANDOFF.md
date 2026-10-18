@@ -1039,3 +1039,25 @@ JVMTI に移した後の残りを整理した。動きは変えていない。
 手元のスモーク（GLFW 3.3.3＋Java 25、SDL3 3.4.3＋Java 25、GLFW 3.2.2＋Java 8 で、オーバーレイ、F3+C、J でウェイポイント、Z で縦長、スワップの間の結び付け直し、日本語フォント。警告・エラーなし）。
 Linux（Docker）：fmt、clippy（警告 0）、テスト（agent 46、core 183）、スモーク（GLFW 3.3.3・3.2.2、SDL3 3.4.3 で同じ項目。警告・エラーなし）。
 確かめていないこと：実機（動きは変えていないつもり）。
+
+## 追記：macOS の試作（2026-10-18）
+
+`hook-macos/`（`libreminedog_macos.dylib`）。Linux と同じく `agent` に macOS の `Os` を渡すだけ。手元に Mac がないので、確かめられたのは macOS 向けの clippy（aarch64・x86_64、警告 0）まで。
+動かすのは CI の `macos` ジョブ（macos-15、Apple silicon）で、まだ動かしていない。
+
+- 関数の引き当ては `dlsym`。LWJGL の macOS の GLFW・SDL3 は `dlopen` で読み込まれ、関数は `DynamicLinkLoader.ndlsym` で引かれる（jvmti.rs は macOS のクラス名も受けている）。
+  GL は OpenGL.framework を CFBundle で読むので `ndlsym` を通らないが、ズームは JNI のネイティブの差し替え（`wrap_native`）なので関係ない。ライブラリのパスは `dlinfo` がないので、dyld の image を順に `RTLD_NOLOAD` で開いてハンドルを比べる（ログのためだけ）
+- コンテキスト（`nsgl.rs`）：GLFW も SDL3 も `NSOpenGLContext` の `makeCurrentContext` で切り替えるので、ハンドルは CGL ではなく `NSOpenGLContext`、描画先はその `view`。
+  自前のコンテキストは、ゲームのコンテキストの `pixelFormat` で `initWithFormat:shareContext:`（共有なし）で作り、同じビューに `setView:` で付ける。
+  Apple の資料では、1 つの描画先に複数のコンテキストを付けられ、描画面はコンテキストではなく描画先のもの。これでオーバーレイがゲームの後ろのバッファに描かれ、ゲームの `flushBuffer` で一緒に出る、という見込み。
+  切り替えの前に、今のコンテキストを `glFlush` する（同じ描画面に描く順番のため）。自前のコンテキストは、ビューの大きさ（`bounds` と `backingScaleFactor`）が変わったら `update`
+- AppKit はメインスレッドで触る。macOS の GLFW・SDL3 はメインスレッドで描く（Minecraft は `-XstartOnFirstThread` で起動する）ので、スワップのフックもメインスレッド。作るときにメインスレッドでなければやめる
+- Objective-C は crate を足さず、libobjc を直接呼ぶ（`objc.rs`。`objc_msgSend` をメソッドの型に変えて呼ぶ。`NSRect` を返すものは x86_64 では `objc_msgSend_stret`）。AppKit の getter は autorelease しうるので、呼ぶ所を autorelease pool で包む
+- クリップボードは `NSPasteboard`。フォントはヒラギノ角ゴシック W3（`/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc`）
+- まだ：物理のキーの状態（`CGEventSourceKeyState` は入力監視の許可がないと全部離して見えるかもしれず、安全網がキーを離してしまう。許可の有無を確かめてから）、ポインターの速度、ブラウザ、`another_copy_runs`
+- CI：`scripts/macos/smoke.sh`（`-XstartOnFirstThread`、`timeout` がないので見張りのプロセス、`--grab` で `screencapture`）。LWJGL は natives-macos-arm64 の jar（3.3.3、3.4.3。3.2.2 には arm64 がない）。
+  キーは送らない（`CGEventPost` や System Events にはアクセシビリティの許可が要る）ので、見るのはフックが渡ったことと、最初のフレームを描いたことと、撮った画面にオーバーレイの案内が出ているか
+
+確かめること（最初に CI を動かしたとき）：ログの `nsgl: overlay context ... (layer-backed ...)` と `overlay: first frame rendered`、成果物の `screen.png` にオーバーレイが出ているか。
+出ていなければ、同じビューに付けたコンテキストの絵が出ない（レイヤーで裏打ちされたビューでは描画面がコンテキストごとになる、など）ということなので、
+ゲームのコンテキストと共有する自前のコンテキストでテクスチャに描き、スワップの前にゲームのコンテキストでそれを重ねる方式（`tall.rs` と同じく状態を保存して戻す）を考える。

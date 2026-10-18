@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Download the LWJGL 3 jars the smoke harness needs (core, GLFW, OpenGL and their natives
-# jars: natives-windows, or LWJGL_NATIVES=natives-linux) from Maven Central into DEST_DIR,
-# verifying each against the SHA-256 in ci/smoke/lwjgl.sha256 (a jar without one there is
-# refused). Already-present jars are
-# checked again and kept, so re-running is cheap.
+# jars: natives-windows, or LWJGL_NATIVES=natives-linux or natives-macos-arm64) from Maven
+# Central into DEST_DIR, verifying each against the SHA-256 in ci/smoke/lwjgl.sha256 (a jar
+# without one there is refused). Already-present jars are checked again and kept, so
+# re-running is cheap.
 # Prints the path of every jar on stdout (progress goes to stderr).
-# Needs only bash, curl and sha256sum, so it also runs in Git Bash on Windows runners.
+# Needs only bash, curl and sha256sum (shasum on macOS), so it also runs in Git Bash on Windows
+# runners.
 #
 # Usage: ci/smoke/fetch-lwjgl.sh VERSION DEST_DIR
 set -euo pipefail
@@ -61,7 +62,11 @@ for module in lwjgl lwjgl-glfw lwjgl-opengl ${LWJGL_EXTRA_MODULES:-}; do
       fetch "$url" "$out.part"
       mv -f "$out.part" "$out"
     fi
-    got=$(sha256sum "$out" | cut -d ' ' -f 1)
+    if command -v sha256sum >/dev/null; then
+      got=$(sha256sum "$out" | cut -d ' ' -f 1)
+    else
+      got=$(shasum -a 256 "$out" | cut -d ' ' -f 1)
+    fi
     if [ "$want" != "$got" ]; then
       rm -f "$out"
       echo "fetch-lwjgl: SHA-256 mismatch for $name (expected '$want', got '$got')" >&2

@@ -1,0 +1,20 @@
+[package]
+name = "reminedog-hook-macos"
+description = "macOS JVMTI agent: the agent with macOS's Os (dlsym, NSOpenGLContext, AppKit)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# Not "reminedog": hook-win builds an empty libreminedog.dylib on macOS, and two libraries of
+# one name would collide (like hook-linux).
+name = "reminedog_macos"
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+reminedog-agent.workspace = true
+reminedog-core.workspace = true
+reminedog-render.workspace = true
+libc.workspace = true
+log.workspace = true

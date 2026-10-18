@@ -30,3 +30,10 @@ d719e545a6db4ea87eb64d55630ba628755572bb5b56d51a1548347b5354cadb  lwjgl-3.4.3-na
 aa25296d8fc96355acf0b69eb39083e98c881a204950a708a0c47ab1be34a5d4  lwjgl-glfw-3.4.3-natives-linux.jar
 4056e81c1174201f63e980f76b9955746c0f13d712e4d30ee02c38ae6bccd4ce  lwjgl-opengl-3.4.3-natives-linux.jar
 e1880683a4af33299e9a1b8d7ec1799bed8fb709064ea08dcc2a15cd1101c0b3  lwjgl-sdl-3.4.3-natives-linux.jar
+50ac9ca09e59f051dcacf4dc0b2145e9e916e6ab14633b75694231bfe59314a8  lwjgl-3.3.3-natives-macos-arm64.jar
+0cf1eac3c360395846320ec47a5e0da313fbb5ee92414ce09ba7e7cc11274509  lwjgl-3.4.3-natives-macos-arm64.jar
+b9451d67bc17c906fb8282a5522f258b022f30569e0b62da001d590a17b45e19  lwjgl-glfw-3.3.3-natives-macos-arm64.jar
+0ded43fd421c832e7ec6fbb4f63b6860c3760fa4385d58e2a17778e59a951ace  lwjgl-glfw-3.4.3-natives-macos-arm64.jar
+f1b3f1de83f973abae3a4bc32db5b229ae5d55cc80dbbc5f7c841812fe20b5fe  lwjgl-opengl-3.3.3-natives-macos-arm64.jar
+13aafa148f6f2d81403f1eb0635691443a5f463db7c5655d65c83cbdadd6268d  lwjgl-opengl-3.4.3-natives-macos-arm64.jar
+1c338a23271d92e7884af03c06ac57decb1494a35798249f46b98b299416db3d  lwjgl-sdl-3.4.3-natives-macos-arm64.jar

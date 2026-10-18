@@ -665,6 +665,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "reminedog-hook-macos"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+ "reminedog-agent",
+ "reminedog-core",
+ "reminedog-render",
+]
+
+[[package]]
 name = "reminedog-hook-win"
 version = "0.1.0"
 dependencies = [

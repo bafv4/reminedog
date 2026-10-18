@@ -3,6 +3,7 @@
 Minecraft Java Edition（1.13 以降、26.x を含む）のサバイバル向けゲーム内ツール。
 Mod ではなく、JVM に `-agentpath:` で読み込ませる Rust 製のネイティブのエージェント（JVMTI）。ゲームのウィンドウにオーバーレイ（egui）を描き、入力を横取りする。
 まず Windows。Linux（X11）は作り始めたところ（`hook-linux/`。手元のスモークで動く。本物のゲームでは未確認）。
+macOS は試作（`hook-macos/`。macOS 向けの clippy が通るだけ。動かすのは CI の macOS のランナーで、まだ動かしていない）。
 
 - 設計と経緯：[docs/HANDOFF.md](docs/HANDOFF.md)（最初の設計資料に、実装で分かったことを「追記」として順に足している）
 - 使い方：[README.md](README.md)
@@ -88,6 +89,15 @@ hook-linux/ Linux のエージェント（libreminedog_linux.so。hook-win が L
                切り替え・削除。Xlib の既定のエラー処理はプロセスを終えるので、失敗しうる呼び出しは自前のエラー処理の下で行う（trap_x_errors。切り替えは、一度成功した描画先とコンテキストの組なら省く）
   dl.rs        dlsym、dlinfo（ライブラリのパス）、RTLD_NOLOAD で読み込み済みのライブラリ
   fonts.rs     日本語フォント（fc-match の sans-serif:lang=ja、なければ Noto Sans CJK・IPA ゴシックのよくある場所）を読む
+hook-macos/ macOS のエージェント（libreminedog_macos.dylib。試作）：agent に macOS の Os を渡す
+  lib.rs       Agent_OnLoad（オプションの文字列を読んで agent::start へ）
+  macos.rs     macOS の Os（dlsym、glfwGetCocoaWindow・SDL.window.cocoa.window の NSWindow、NSOpenGLContext、NSPasteboard、fonts）。物理のキーの状態・ポインターの速度はまだ読まない。ブラウザはない
+  nsgl.rs      NSOpenGLContext：今のコンテキストとそのビュー（描画先）、ゲームのコンテキストのピクセルフォーマットで自前のコンテキストを作って同じビューに付ける、
+               切り替え（前のコンテキストを glFlush、ビューの大きさが変わったら update）・削除。GL の関数は OpenGL.framework の export。AppKit はメインスレッドで触る
+  objc.rs      Objective-C のランタイム（クラス、セレクタ、objc_msgSend、NSRect を返すとき、autorelease pool）。AppKit のクラスはゲームが読み込んでから名前で引く
+  clipboard.rs メニューの貼り付け・コピー用の NSPasteboard
+  dl.rs        dlsym、dyld の image の一覧（ライブラリのパス）、RTLD_NOLOAD で読み込み済みのライブラリ
+  fonts.rs     日本語フォント（ヒラギノ角ゴシック W3、なければ Arial Unicode などのよくある場所）を読む
 installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）。Java 8 以降で動く 1 つの jar（reminedog-installer.jar）
   Main.kt            FlatLaf（Windows のダークモードに合わせる）と画面の起動
   InstallerFrame.kt  画面：DLL（GitHub からダウンロードするか、PC のファイル）、インスタンスの一覧と状態、インストール／アンインストール、
@@ -104,7 +114,7 @@ installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）。Java 8
   Processes.kt       起動中のランチャーの判定（%SystemRoot%\System32\tasklist.exe、裏のスレッドで）
 ci/smoke/  LWJGL で Minecraft と同じようにウィンドウを作るテスト用の Java（GLFW 版 Smoke、SDL3 版 SmokeSdl）。F3+C の真似（--world、--f3c-refuse、--f3c-events）。
            キーの置き換えの確認（SMOKE_VERBOSE=1 で受け取ったイベント、--screen-key・--watch-keys で画面を閉じたときのキーの状態）
-scripts/   wine-smoke.sh（Linux 上で Wine を使って動かす）、fetch-wine-jre.sh
+scripts/   wine-smoke.sh（Linux 上で Wine を使って動かす）、fetch-wine-jre.sh、linux/（Docker のビルドとスモーク）、macos/smoke.sh（macOS でスモーク）
 ```
 
 ## ビルドとテスト
@@ -128,6 +138,8 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
   キーは `smoke.sh --xdotool "key j sleep 2 keydown z sleep 1.5 keyup z" -- --seconds=10 --mc --capture --world=test` のように送る（ウィンドウマネージャがないので、GLFW のウィンドウは名前で探してフォーカスを移す。
   SDL3 は自分でフォーカスを取る。SDL3 のウィンドウの名前は `_NET_WM_NAME` だけで xdotool から見えないので、別のウィンドウにフォーカスを移すと SDL3 がフォーカスを失い、キーのイベントのウィンドウ番号が 0 になる）。
   コンテナを止めるときは `docker ps --filter ancestor=reminedog-linux -q | xargs -r docker kill`（ほかのコンテナに触れない）
+- macOS（試作）：手元に Mac はない。Windows で `rustup target add aarch64-apple-darwin x86_64-apple-darwin` をしておけば、`cargo clippy --target aarch64-apple-darwin --workspace --all-targets` で型と lint は確かめられる（リンクはできない）。
+  動かすのは CI の `macos` ジョブ（macos-15 の Apple silicon。`scripts/macos/smoke.sh` で `-XstartOnFirstThread`、`--grab` で画面を撮って成果物に上げる）。キーはまだ送れない（キーのイベントを送るにはアクセシビリティの許可が要る）
 - Linux からは `--target x86_64-pc-windows-gnu` で DLL をビルドし、`scripts/wine-smoke.sh` で試せる（README の「開発」）。Windows では DLL を置いてゲームで確かめるのが早い
 - テスト用プログラムを Windows で直接動かすなら、`ci/smoke/*.java` を LWJGL の jar と一緒にコンパイルし、`java -agentpath:...\reminedog.dll -cp ... Smoke --seconds=20 --capture --mc` のように動かす（`.github/workflows/ci.yml` の `smoke-windows` ジョブが手順の見本）。
   Prism の libraries に LWJGL のネイティブの jar がないときは、ゲームが展開したもの（`-Dorg.lwjgl.librarypath=%TEMP%\lwjgl_yuanq\3.3.3+5\x64` など）を使う
@@ -144,7 +156,8 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
   画面を確かめるなら、利用者の設定ファイルの写しを scratchpad に作り、`APPDATA`・`LOCALAPPDATA` をそこに向けて起動する（本物のランチャーの設定を書き換えない）
 - CI（GitHub Actions。push は main だけ、ほかは pull request）：Linux（fmt、clippy、テスト、mingw での clippy）、インストーラー（ラッパーの確認、テスト、成果物 `reminedog-installer`）、Windows（clippy、テスト）、
   Windows の DLL（リリースビルド、`ci/check-dll.ps1` で x64・export・読み込む DLL の許可リスト・バージョン情報、成果物 `reminedog-windows-x64`）、Windows のスモークテスト（LWJGL 3.2.2/Java 8、3.3.3/Java 21、3.4.3/Java 25 の SDL3。Mesa の llvmpipe で描く。
-  Mesa は `MESA_TAG` と `MESA_SHA256`、LWJGL の jar は `ci/smoke/lwjgl.sha256` で確かめる）。アクションはコミットの SHA で固定（`.github/dependabot.yml`）、cargo は `--locked`。
+  Mesa は `MESA_TAG` と `MESA_SHA256`、LWJGL の jar は `ci/smoke/lwjgl.sha256` で確かめる）、Linux のスモーク（`smoke-linux`）、
+  macOS（`macos`：clippy、テスト、LWJGL 3.3.3 と 3.4.3 の SDL3 のスモーク。キーは送らない）。アクションはコミットの SHA で固定（`.github/dependabot.yml`）、cargo は `--locked`。
   DLL が新しい DLL を読み込むようになったら check-dll.ps1 の許可リストに足す（どの Windows にもあるものだけ）
 - リリース（`.github/workflows/release.yml`）：Actions から版を入れて、main で手で実行する（そのコミットで CI が通っていること。キャッシュは使わない）。版は環境変数 `REMINEDOG_VERSION`（DLL：`agent/build.rs` の `reminedog_agent::VERSION` とログ・状態の行、`hook-win/build.rs` が embed-resource で埋めるバージョン情報）と Gradle の `-PreminedogVersion`（jar の名前と manifest の `Implementation-Version`、画面のタイトル）で入れる。
   リポジトリの `Cargo.toml` の版は変えない（版を渡さないビルドでは、DLL は Cargo の版、インストーラーは `dev`）。成果物は `reminedog-<版>.dll`・`.pdb`・`reminedog-installer-<版>.jar` の下書きのリリース。利用者の PC では DLL は `reminedog.dll` のまま（インストーラーが名前を変えて置く。`Download` は `reminedog-<版>.dll` を探す）
@@ -181,6 +194,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 | インストーラー（公式ランチャー、MultiMC、Prism Launcher、MCSR Launcher） | 設定ファイルの写しに対して画面から操作して確認済み、Java 8・17・21・25 で表示を確認。本物のランチャーでは未確認。ダウンロードと「最新版に更新」はリリースがないので失敗する（置き換えは単体テストで確認） |
 | フックを JVMTI の差し替えだけで渡す（`agent/` の `jvmti.rs`・`library.rs`・`hook.rs`・`tall.rs`。Linux・macOS への準備の段階 1〜4） | MinHook をやめた版（ズーム中の OBS の録画の修正を含む）は実機の 1.21.11・26.3 で確認済み。エージェント本体を `agent/` に移し、OS に頼ることを `Os` に分けた版は手元のスモーク（Windows）と、Linux のビルド・テストで確認済み |
 | Linux（`hook-linux/`。X11 の GLX） | Docker の Xvfb＋Mesa のスモーク（GLFW 3.3.3・3.2.2、SDL3 3.4.3）で、オーバーレイ（日本語）、メニュー、J でウェイポイント、Z の高精細のズームまで確認済み（CI の `smoke-linux` も同じ）。本物のゲーム・Wayland（EGL）・物理のキーの状態・クリップボード・ポインターの速度は未対応 |
+| macOS（`hook-macos/`。NSOpenGLContext。試作） | macOS 向けの clippy（aarch64・x86_64）だけ。CI の `macos` ジョブ（スモーク）はまだ動かしていない。同じビューに付けた 2 つ目のコンテキストの絵がゲームの絵と一緒に出るかが最初に確かめること |
 | 監査（`docs/AUDIT-2026-10-09.md`）の全件の修正 | テスト・clippy・インストーラーのビルドで確認。実機では未確認（`docs/TESTING.md` の「監査の修正で確認すること」）。設計は HANDOFF.md の「追記：監査の修正」 |
 
 ### 高精細のズームの仕組み（`hook-win/src/tall.rs`）
@@ -231,7 +245,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
    - インストーラーのダウンロードには、公開されたリポジトリの公開済みのリリース（`release.yml` で作った下書きを公開したもの）が要る（今は非公開でリリースもない）
 2. CI のスモークテストで F3+C とキーの置き換えを確かめる（`--world`・`--f3c-refuse`、settings.json のルールと `--screen-key`・`--watch-keys` を使い、マーカーに `F3+C: clipboard hooks ready`・`SETALL` などを足す。今の CI は新しいオプションを使っていない。`scripts/wine-smoke.sh` もまだ渡せない）
 3. IME の変換中の文字をメニューの入力欄に出す（今は確定した文字だけ）
-4. Linux の続き（`hook-linux/`）：本物のゲーム（WSLg か本物の Linux）、Wayland（EGL）、物理のキーの状態（安全網）、クリップボード、ポインターの速度、メニューのブラウザの欄（Linux では使えない）。macOS（CGL）。方針は HANDOFF.md の「追記：試作：LWJGL の呼び出しを JVMTI で横取りする」以降
+4. Linux の続き（`hook-linux/`）：本物のゲーム（WSLg か本物の Linux）、Wayland（EGL）、物理のキーの状態（安全網）、クリップボード、ポインターの速度、メニューのブラウザの欄（Linux では使えない）。macOS（`hook-macos/`）は CI のスモークで動かすところから（HANDOFF.md の「追記：macOS の試作」）。方針は HANDOFF.md の「追記：試作：LWJGL の呼び出しを JVMTI で横取りする」以降
 
 ## 開発環境についての注意
 

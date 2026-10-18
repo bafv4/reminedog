@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "render", "agent", "hook-win", "hook-linux"]
+members = ["core", "render", "agent", "hook-win", "hook-linux", "hook-macos"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,7 +19,7 @@ egui_glow = { version = "0.36", default-features = false }
 # level.dat is gzipped NBT (the singleplayer world's name).
 flate2 = "1"
 glow = "0.17"
-# dlsym, dlinfo and dlopen for the Linux agent.
+# dlsym, dlinfo and dlopen for the Linux and macOS agents.
 libc = "0.2"
 log = { version = "0.4", features = ["std"] }
 regex = "1"
