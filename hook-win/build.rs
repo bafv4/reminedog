@@ -1,7 +1,7 @@
 //! Puts the version into reminedog.dll's version resource (Explorer's Properties > Details),
 //! since the file keeps its name across versions. The release workflow sets
-//! REMINEDOG_VERSION; other builds use the crate's version. The code gets the same version
-//! and build id (`agent::VERSION`, `agent::BUILD_ID`) from here.
+//! REMINEDOG_VERSION (and CI REMINEDOG_BUILD_ID); other builds use the crate's version, as
+//! `reminedog_agent::VERSION` and `BUILD_ID` do.
 
 use std::env;
 use std::fs;
@@ -13,8 +13,6 @@ fn main() {
     let version = env::var("REMINEDOG_VERSION")
         .unwrap_or_else(|_| env::var("CARGO_PKG_VERSION").expect("set by cargo"));
     let build = env::var("REMINEDOG_BUILD_ID").unwrap_or_else(|_| "local".into());
-    println!("cargo:rustc-env=REMINEDOG_VERSION={version}");
-    println!("cargo:rustc-env=REMINEDOG_BUILD_ID={build}");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }

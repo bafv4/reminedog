@@ -1018,3 +1018,24 @@ GLFW のスモークで B でブラウザが開いて絵が取り込まれた。
 CI に `smoke-linux`（同じ 3 つの組み合わせ、Java 25）を足した。
 確かめていないこと：本物のゲーム（WSLg か本物の Linux）、本物の GPU のドライバー（NVIDIA など）、Wayland
 
+## 追記：見直し（2026-10-18）
+
+JVMTI に移した後の残りを整理した。動きは変えていない。
+
+- 起動（`Agent_OnLoad` の中身）は `agent/src/start.rs` の `start` に 1 つにした。`hook-win`・`hook-linux` の `agent.rs` はなくなり、各 OS のライブラリはオプションの文字列を読んで `start` に自分の `Os` を渡すだけ。
+  Windows だけの処理（ほかの場所の DLL が動いているか、ログが書けないときの `OutputDebugString`、パニックの戻り先のアドレス）は `Os` の既定のある関数（`another_copy_runs`・`report`・`panic_details`）として `hook-win/src/startup.rs` に置いた
+- 版と BUILD_ID は `agent/build.rs` が入れ、`reminedog_agent::VERSION`・`BUILD_ID` になった（`Globals` から外した）。`hook-win/build.rs` はバージョン情報のリソースだけ
+- 日本語フォントの先読みとプロセスの間の保持は `agent/src/fonts.rs`。`Os::japanese_font` はファイルを読むだけ
+- 関数の引き当ては、Windows も `GetProcAddress` にした（PE を自分で読むのはローダーロックの中で呼ぶためだったが、MinHook と DllMain の読み込みをやめたので要らない）。`ffi::export_address` とそのテストは消した
+- フックの表の `Original` は LWJGL が引いた本物だけを持つ。F3+C・キーの状態の偽装の準備ができたかは、各ライブラリの入力のフックが本物の関数（`glfwGetKey`／`SDL_GetKeyboardState`）を得たときに `f3c::set_hooks_ready` で知らせる
+- `jvmti.rs` は `WinBase.nGetProcAddress` と `DynamicLinkLoader.ndlsym` を同じ差し替えで受ける
+- GLFW・SDL3 の取り付けの Mutex をやめた（SDL3 は `AtomicBool` の swap）。フレームバッファの大きさは export を直接呼ぶ
+- `glGetIntegerv` は見つかったら覚える（ズームの結び付けのたびに引かない）。今のコンテキストだけを聞く `Os::current_context` を足した（ズームはゲームの結び付けのたびに聞く）
+- GLX：一度成功した描画先とコンテキストの組の切り替えは、エラー処理の差し替えと `XSync` を省く（毎フレーム 2 回の往復をなくす）。コンテキストを消したらその組も忘れる
+
+採らなかったこと：メニューのクリップボードをウィンドウのライブラリの関数で読み書きする（F3+C のフックを通ってしまう。動きが変わる）、`hook-win`・`hook-linux` を 1 つのクレートにする（ライブラリの名前のため。組み替えが大きい）。
+
+確かめたこと：fmt、clippy（Windows で警告 0）、テスト（agent 46、core 184、hook-win 5。消した PE のテスト 3 つの分だけ減った）、
+手元のスモーク（GLFW 3.3.3＋Java 25、SDL3 3.4.3＋Java 25、GLFW 3.2.2＋Java 8 で、オーバーレイ、F3+C、J でウェイポイント、Z で縦長、スワップの間の結び付け直し、日本語フォント。警告・エラーなし）。
+Linux（Docker）：fmt、clippy（警告 0）、テスト（agent 46、core 183）、スモーク（GLFW 3.3.3・3.2.2、SDL3 3.4.3 で同じ項目。警告・エラーなし）。
+確かめていないこと：実機（動きは変えていないつもり）。

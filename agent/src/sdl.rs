@@ -13,7 +13,7 @@
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex, OnceLock};
+use std::sync::{LazyLock, OnceLock};
 
 use reminedog_core::{InputId, Naming, SCANCODE_COUNT};
 
@@ -106,7 +106,8 @@ pub fn is_hooked(module: usize) -> bool {
     module != 0 && MODULE.load(Ordering::Acquire) == module
 }
 
-static ATTACHED: Mutex<bool> = Mutex::new(false);
+/// An SDL3 library was offered, whether or not it could be hooked.
+static ATTACHED: AtomicBool = AtomicBool::new(false);
 static RENDERER_LOGGED: AtomicBool = AtomicBool::new(false);
 static SWAPS: AtomicU64 = AtomicU64::new(0);
 
@@ -199,10 +200,6 @@ impl WindowSystem for Sdl {
         Naming::Modern
     }
 
-    fn key_state_spoofed(&self) -> bool {
-        crate::sdl_input::key_state_spoofed()
-    }
-
     /// Any scancode SDL3 knows, and the five buttons it reports on Windows.
     fn can_send(&self, id: InputId) -> bool {
         match id {
@@ -219,11 +216,8 @@ impl WindowSystem for Sdl {
 
     fn framebuffer_size(&self, window: *mut c_void) -> (i32, i32) {
         let (mut w, mut h) = (0, 0);
-        let get = GET_WINDOW_SIZE_IN_PIXELS
-            .get()
-            .unwrap_or(self.get_window_size_in_pixels);
-        // SAFETY: see above.
-        if unsafe { get(window, &mut w, &mut h) } {
+        // SAFETY: see above; the real size (the game's calls go through the hook).
+        if unsafe { (self.get_window_size_in_pixels)(window, &mut w, &mut h) } {
             (w, h)
         } else {
             (0, 0)
@@ -285,13 +279,12 @@ pub fn attached() -> bool {
     SDL.get().is_some()
 }
 
+/// Hooks `module` (called by [`crate::library`], one library at a time).
 pub fn attach(module: usize, path: &str) {
-    let mut attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner());
-    if *attached {
+    if ATTACHED.swap(true, Ordering::AcqRel) {
         log::warn!("a second SDL3 library is ignored: {path}");
         return;
     }
-    *attached = true;
     match Sdl::resolve(module) {
         Ok(sdl) => {
             let _ = SDL.set(sdl);
@@ -436,7 +429,7 @@ fn real_warp_y(window: *mut c_void, y: f32) -> f32 {
     let Some([_, tall_h]) = crate::tall::own_query(|| crate::tall::size_override(window)) else {
         return y;
     };
-    let Some(real_size) = GET_WINDOW_SIZE_IN_PIXELS.get() else {
+    let Some(real_size) = SDL.get().map(|sdl| sdl.get_window_size_in_pixels) else {
         return y;
     };
     let (mut w, mut h) = (0, 0);

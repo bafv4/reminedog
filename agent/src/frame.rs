@@ -31,9 +31,6 @@ const SAVE_WAIT: Duration = Duration::from_secs(2);
 /// How long a failed save's notice shows, in seconds.
 const NOTICE_SECONDS: f64 = 6.0;
 
-/// The menu's note when keys cannot be rebound.
-const NO_KEY_REBINDS: &str = "ゲームがキーの状態を読む関数をフックできなかったので、キーボードのキーは置き換えられない（マウスのボタンは置き換えられる）";
-
 /// Consecutive failed frames after which the overlay gives up for the session.
 const MAX_FAILURES: u32 = 30;
 /// GL errors reported before going quiet.
@@ -72,9 +69,6 @@ pub trait WindowSystem: Sync {
     fn captured(&self, window: *mut c_void) -> bool;
     /// How the game's options.txt names keys under this library.
     fn naming(&self) -> Naming;
-    /// Whether the game's reads of the key state go through the key rebinding. Without it keys
-    /// cannot be rebound: the game would read a held source as held (when a screen closes).
-    fn key_state_spoofed(&self) -> bool;
     /// Whether the game can be given `id` (as a key or mouse button event) under this library.
     fn can_send(&self, id: InputId) -> bool;
     /// Whether this library reports presses of `id` (a rule's source must be one).
@@ -218,10 +212,6 @@ struct Runtime {
     tall: TallZoom,
     /// The router's hotkeys, from `settings`.
     hotkeys: Hotkeys,
-    /// Keys may be rebound ([`WindowSystem::key_state_spoofed`]), not only mouse buttons.
-    key_rebinds: bool,
-    /// Why some rebinding rules cannot work, for the menu.
-    rebind_note: Option<String>,
 }
 
 // SAFETY: the GL handles and objects are only used inside the swap hook while STATE is
@@ -276,7 +266,7 @@ impl Runtime {
             let gl = Arc::new(unsafe { gl::glow_context() });
             let overlay_gl = gl_summary(&gl);
             log::info!("overlay GL: {overlay_gl}");
-            let overlay = Overlay::new(gl.clone(), os.japanese_fonts(), settings.clone())
+            let overlay = Overlay::new(gl.clone(), crate::fonts::japanese(), settings.clone())
                 .map_err(|e| e.to_string())?;
             Ok::<_, String>((gl, overlay, overlay_gl))
         })();
@@ -289,22 +279,21 @@ impl Runtime {
         };
         log::info!("overlay: initialized");
         let keys = hotkeys(&settings);
-        let key_rebinds = ws.key_state_spoofed();
-        if !key_rebinds {
-            log::warn!("rebinds: the game's key state reads are not hooked; keys are not rebound");
-        }
         let rules = rebind_rules(ws, &settings, &keys);
         let active = {
             let mut router = input::router();
             router.set_hotkeys(keys);
-            router.set_rebinds(rules, key_rebinds);
+            router.set_rebinds(rules, true);
             router.set_pointer_speed(pointer_speed(ws, window));
             router.rebinds().to_vec()
         };
         log_active_rebinds(&active);
 
         let status = vec![
-            StatusLine::new("ビルド", format!("{} ({})", agent.version, agent.build_id)),
+            StatusLine::new(
+                "ビルド",
+                format!("{} ({})", crate::VERSION, crate::BUILD_ID),
+            ),
             StatusLine::new("ウィンドウ", ws.describe()),
             StatusLine::new("ゲームのGL", game_gl),
             StatusLine::new("オーバーレイのGL", overlay_gl),
@@ -331,8 +320,6 @@ impl Runtime {
             page_version: os::NO_PICTURE,
             tall: TallZoom::default(),
             hotkeys: keys,
-            key_rebinds,
-            rebind_note: (!key_rebinds).then(|| NO_KEY_REBINDS.to_owned()),
         }))
     }
 
@@ -443,7 +430,7 @@ impl Runtime {
                         .collect(),
                     reserved_keys: marks.reserved_keys,
                     game_bindings,
-                    rebind_note: self.rebind_note.clone(),
+                    rebind_note: None,
                     settings_note: self.settings_note(),
                     unsupported_inputs,
                     browser,
@@ -496,7 +483,7 @@ impl Runtime {
                     Some((keys, rules)) => {
                         router.set_hotkeys(*keys);
                         rules.as_ref().map(|rules| {
-                            router.set_rebinds(rules.clone(), self.key_rebinds);
+                            router.set_rebinds(rules.clone(), true);
                             router.rebinds().to_vec()
                         })
                     }
@@ -553,7 +540,6 @@ impl Runtime {
         match self.overlay.frames() {
             1 => {
                 log::info!("overlay: first frame rendered ({width}x{height}, scale {scale:.2})");
-                crate::f3c::log_hooks();
             }
             n @ (100 | 1000 | 10_000) => log::info!(
                 "overlay: {n} frames rendered, {:.2} ms per frame",
@@ -754,8 +740,7 @@ fn unsupported_inputs(ws: &dyn WindowSystem, settings: &Settings) -> Vec<InputId
     ids
 }
 
-/// The rules the router uses in the end (keys may be left out there, see
-/// [`WindowSystem::key_state_spoofed`]).
+/// The rules the router uses in the end.
 fn log_active_rebinds(rules: &[(InputId, InputId)]) {
     let list: Vec<String> = rules
         .iter()

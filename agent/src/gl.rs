@@ -7,6 +7,7 @@
 //! core or a compatibility profile.
 
 use std::ffi::{CStr, c_void};
+use std::sync::OnceLock;
 
 use crate::os::{self, Os};
 
@@ -18,9 +19,12 @@ const GL_CONTEXT_PROFILE_MASK: u32 = 0x9126;
 type GlGetStringFn = unsafe extern "system" fn(u32) -> *const u8;
 type GlGetIntegervFn = unsafe extern "system" fn(u32, *mut i32);
 
+/// `glGetIntegerv`, once found (a GL 1.1 function: the same for every context of a driver).
+static GET_INTEGERV: OnceLock<GlGetIntegervFn> = OnceLock::new();
+
 /// The current context, or 0.
 pub fn current_context() -> usize {
-    os::get().current_gl().1
+    os::get().current_context()
 }
 
 /// A GL function of the current context as `F` (its fn pointer type).
@@ -36,9 +40,15 @@ pub unsafe fn function<F: Copy>(name: &CStr) -> Option<F> {
 
 /// `glGetIntegerv(name)` on the current context (0 if it cannot be asked).
 pub fn integer(name: u32) -> i32 {
+    let get = match GET_INTEGERV.get() {
+        Some(&get) => Some(get),
+        // SAFETY: glGetIntegerv's type. Kept only once found (no context current: not yet).
+        None => unsafe { function::<GlGetIntegervFn>(c"glGetIntegerv") }
+            .map(|get| *GET_INTEGERV.get_or_init(|| get)),
+    };
     let mut value = 0;
-    // SAFETY: glGetIntegerv's type; a single-value query writes one integer.
-    if let Some(get) = unsafe { function::<GlGetIntegervFn>(c"glGetIntegerv") } {
+    if let Some(get) = get {
+        // SAFETY: a single-value query writes one integer.
         unsafe { get(name, &mut value) };
     }
     value

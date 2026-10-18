@@ -63,18 +63,11 @@ struct EventCallbacks {
     native_method_bind: NativeMethodBindFn,
 }
 
-/// The JVM's own natives that LWJGL looks functions up with, by signature.
+/// The JVM's own natives that LWJGL looks functions up with, by signature: (handle, name) on
+/// every system up to LWJGL 3.3 and on Linux and macOS, (last error, handle, name) on Windows
+/// with LWJGL 3.4.
 static GET_PROC_ADDRESS: AtomicUsize = AtomicUsize::new(0);
 static GET_PROC_ADDRESS_LAST_ERROR: AtomicUsize = AtomicUsize::new(0);
-static DLSYM: AtomicUsize = AtomicUsize::new(0);
-
-/// Whether LWJGL's lookups go through the agent: functions LWJGL looks up from now on are
-/// handed their hooks.
-pub fn handing_out() -> bool {
-    [&GET_PROC_ADDRESS, &GET_PROC_ADDRESS_LAST_ERROR, &DLSYM]
-        .iter()
-        .any(|native| native.load(Ordering::Acquire) != 0)
-}
 
 /// Has the JVM report native methods as it binds them.
 ///
@@ -227,7 +220,13 @@ unsafe extern "system" fn native_method_bind(
             return;
         };
         let (original, ours) = match (class.as_str(), name.as_str(), signature.as_str()) {
-            ("Lorg/lwjgl/system/windows/WinBase;", "nGetProcAddress", "(JJ)J") => (
+            ("Lorg/lwjgl/system/windows/WinBase;", "nGetProcAddress", "(JJ)J")
+            | (
+                "Lorg/lwjgl/system/linux/DynamicLinkLoader;"
+                | "Lorg/lwjgl/system/macosx/DynamicLinkLoader;",
+                "ndlsym",
+                "(JJ)J",
+            ) => (
                 &GET_PROC_ADDRESS,
                 get_proc_address as GetProcAddressFn as Ptr,
             ),
@@ -235,12 +234,6 @@ unsafe extern "system" fn native_method_bind(
                 &GET_PROC_ADDRESS_LAST_ERROR,
                 get_proc_address_last_error as GetProcAddressLastErrorFn as Ptr,
             ),
-            (
-                "Lorg/lwjgl/system/linux/DynamicLinkLoader;"
-                | "Lorg/lwjgl/system/macosx/DynamicLinkLoader;",
-                "ndlsym",
-                "(JJ)J",
-            ) => (&DLSYM, dlsym as GetProcAddressFn as Ptr),
             _ => {
                 if let Some(ours) = library::native(&class, &name, &signature, address) {
                     // SAFETY: the JVM binds what the event leaves here.
@@ -259,7 +252,8 @@ unsafe extern "system" fn native_method_bind(
     });
 }
 
-/// In place of LWJGL 3.2's and 3.3's `WinBase.nGetProcAddress`.
+/// In place of LWJGL 3.2's and 3.3's `WinBase.nGetProcAddress`, and of
+/// `DynamicLinkLoader.ndlsym` (Linux, macOS).
 unsafe extern "system" fn get_proc_address(env: Ptr, class: Ptr, module: i64, name: i64) -> i64 {
     // SAFETY: bound only after the JVM's own native was stored, with its signature.
     let address = unsafe {
@@ -269,17 +263,6 @@ unsafe extern "system" fn get_proc_address(env: Ptr, class: Ptr, module: i64, na
     };
     // SAFETY: `name` is the NUL-terminated name LWJGL looked up.
     unsafe { handed(module, name, address) }
-}
-
-/// In place of LWJGL's `DynamicLinkLoader.ndlsym` (Linux, macOS).
-unsafe extern "system" fn dlsym(env: Ptr, class: Ptr, handle: i64, name: i64) -> i64 {
-    // SAFETY: as above.
-    let address = unsafe {
-        let original: GetProcAddressFn = std::mem::transmute(DLSYM.load(Ordering::Acquire));
-        original(env, class, handle, name)
-    };
-    // SAFETY: as above.
-    unsafe { handed(handle, name, address) }
 }
 
 /// In place of LWJGL 3.4's `WinBase.nGetProcAddress`.

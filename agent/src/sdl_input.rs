@@ -23,7 +23,7 @@ use reminedog_core::{InputId, Naming, SCANCODE_COUNT, sdl_keycode, sdl_keycode_o
 use reminedog_render::{Delivery, Key, Modifiers, Output, Phase, PointerButton, Route};
 
 use crate::f3c::{self, Failure, Injected, Job, Purpose};
-use crate::hook::{Hook, Original, Slot as _};
+use crate::hook::{Hook, Original};
 use crate::input::{self, FUNCTION_KEYS, router};
 use crate::library::export;
 use crate::rebind_state;
@@ -150,10 +150,10 @@ static PEEP_EVENTS: Original<PeepEventsFn> = Original::new();
 static WAIT_EVENT: Original<WaitEventFn> = Original::new();
 static WAIT_EVENT_TIMEOUT: Original<WaitEventTimeoutFn> = Original::new();
 static SET_RELATIVE_MOUSE_MODE: Original<SetRelativeMouseModeFn> = Original::new();
-/// The real SDL_GetKeyboardState; also called directly for the real key state (F3+C, the
-/// rebinding), which made-up events never change.
+/// The game's SDL_GetKeyboardState, behind the hook that gives it the rebinding's key state.
 static GET_KEYBOARD_STATE: Original<GetKeyboardStateFn> = Original::new();
-/// SDL_GetKeyboardState itself, for the real key state before LWJGL looks it up.
+/// SDL_GetKeyboardState itself: the real key state, for the agent (F3+C, the rebinding), which
+/// made-up events never change.
 static GET_KEYBOARD_STATE_EXPORT: OnceLock<GetKeyboardStateFn> = OnceLock::new();
 /// What SDL_GetKeyboardState returns while the rebinding has a say on some key: SDL's array with
 /// that applied (a C bool per scancode, as SDL's).
@@ -285,12 +285,7 @@ pub fn install(module: usize) {
     if !has_window_id {
         log::warn!("SDL3 does not export SDL_GetWindowID");
     }
-    f3c::set_hooks_check(|| {
-        POLL_EVENT.ready()
-            && SET_CLIPBOARD_TEXT.ready()
-            && API.get().is_some_and(|api| api.get_window_id.is_some())
-            && real_keyboard_state().is_some()
-    });
+    f3c::set_hooks_ready(has_window_id && real_keyboard_state().is_some());
 }
 
 unsafe extern "C" fn poll_event_hook(event: *mut u8) -> bool {
@@ -439,9 +434,7 @@ fn f3c_events(job: &Job) -> Result<[(Event, Tag); 4], Failure> {
 }
 
 fn real_keyboard_state() -> Option<GetKeyboardStateFn> {
-    GET_KEYBOARD_STATE
-        .get()
-        .or(GET_KEYBOARD_STATE_EXPORT.get().copied())
+    GET_KEYBOARD_STATE_EXPORT.get().copied()
 }
 
 /// SDL's own key state, one C bool per scancode (what is physically held); `None` if SDL cannot
@@ -458,12 +451,6 @@ fn real_keys() -> Option<&'static [u8]> {
     let count = usize::try_from(count).unwrap_or(0);
     // SAFETY: SDL's array of `count` one-byte bools, which lives as long as SDL.
     Some(unsafe { std::slice::from_raw_parts(state.cast::<u8>(), count) })
-}
-
-/// Whether the game reads the key state the rebinding gives it (without that, keys cannot be
-/// rebound: a held source would read as held).
-pub fn key_state_spoofed() -> bool {
-    GET_KEYBOARD_STATE.ready()
 }
 
 /// The game's view of the key state: SDL's array, with the rebinding's say on the keys it

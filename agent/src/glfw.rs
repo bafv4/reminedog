@@ -5,7 +5,7 @@
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex, OnceLock};
+use std::sync::{LazyLock, OnceLock};
 
 use reminedog_core::{
     InputId, Naming, glfw_button_of, glfw_key_of, input_from_glfw_button, input_from_glfw_key,
@@ -31,7 +31,7 @@ const GLFW_VISIBLE: c_int = 0x0002_0004;
 /// GLFW functions the agent calls itself.
 pub struct Glfw {
     pub path: String,
-    /// The export, while LWJGL has not looked the function up.
+    /// The real size (the game's calls go through the hook, which reports the zoom's).
     get_framebuffer_size: GetFramebufferSizeFn,
     /// GLFW 3.3+.
     get_window_content_scale: Option<GetWindowContentScaleFn>,
@@ -44,11 +44,8 @@ pub struct Glfw {
 impl WindowSystem for Glfw {
     fn framebuffer_size(&self, window: *mut c_void) -> (i32, i32) {
         let (mut width, mut height) = (0, 0);
-        let get = GET_FRAMEBUFFER_SIZE
-            .get()
-            .unwrap_or(self.get_framebuffer_size);
         // SAFETY: `window` is the handle GLFW itself passed to glfwSwapBuffers.
-        unsafe { get(window, &mut width, &mut height) };
+        unsafe { (self.get_framebuffer_size)(window, &mut width, &mut height) };
         (width, height)
     }
 
@@ -93,10 +90,6 @@ impl WindowSystem for Glfw {
         Naming::Glfw
     }
 
-    fn key_state_spoofed(&self) -> bool {
-        crate::glfw_input::key_state_spoofed()
-    }
-
     fn can_send(&self, id: InputId) -> bool {
         match id {
             InputId::Key(_) => glfw_key_of(id).is_some(),
@@ -126,10 +119,7 @@ static GLFW: OnceLock<Glfw> = OnceLock::new();
 /// The hooked GLFW library (0 before).
 static MODULE: AtomicUsize = AtomicUsize::new(0);
 static SWAP_BUFFERS: Original<SwapBuffersFn> = Original::new();
-/// The real glfwGetFramebufferSize (the overlay needs the real size).
 static GET_FRAMEBUFFER_SIZE: Original<GetFramebufferSizeFn> = Original::new();
-/// Serializes `attach`.
-static ATTACH: Mutex<()> = Mutex::new(());
 
 static HOOKS: LazyLock<[Hook; 2]> = LazyLock::new(|| {
     [
@@ -167,8 +157,8 @@ pub fn attached() -> bool {
     GLFW.get().is_some()
 }
 
+/// Hooks `module` (called by [`crate::library`], one library at a time).
 pub fn attach(module: usize, path: &str) {
-    let _guard = ATTACH.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = GLFW.get() {
         log::warn!(
             "a second GLFW library is ignored: {path} (hooked: {})",

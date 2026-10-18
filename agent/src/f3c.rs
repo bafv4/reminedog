@@ -14,8 +14,8 @@
 //! f3c lock is held, and no game code runs under it. Call [`take_job`] before locking
 //! `INJECTED`.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use reminedog_core::{
@@ -316,7 +316,7 @@ impl State {
 }
 
 static STATE: Mutex<State> = Mutex::new(State::new());
-static HOOKS_READY: OnceLock<fn() -> bool> = OnceLock::new();
+static HOOKS_READY: AtomicBool = AtomicBool::new(false);
 /// Mirrors `State::watching`, so most clipboard writes skip the lock.
 static WATCHING: AtomicBool = AtomicBool::new(false);
 /// Mirrors `State.pending.is_some()`, for the platforms' check on every swap or poll.
@@ -333,20 +333,12 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
     result
 }
 
-/// Set by the platform: whether its clipboard hook and the hook it sends keys through get the
-/// game's calls. Asked when needed, since LWJGL may look the functions up later
-/// ([`crate::jvmti`]).
-pub fn set_hooks_check(check: fn() -> bool) {
-    let _ = HOOKS_READY.set(check);
-}
-
-fn hooks_ready() -> bool {
-    HOOKS_READY.get().is_some_and(|check| check())
-}
-
-/// Logs whether F3+C can be sent, once the game draws (LWJGL has looked GLFW or SDL3 up).
-pub fn log_hooks() {
-    if hooks_ready() {
+/// Set by the window library's input once it is hooked: whether the agent can read the real
+/// key state and address the game's window (F3+C's other needs are LWJGL's hooks, which the
+/// game gets whenever it uses the functions).
+pub fn set_hooks_ready(ready: bool) {
+    HOOKS_READY.store(ready, Ordering::Release);
+    if ready {
         log::info!("F3+C: clipboard hooks ready");
     } else {
         log::warn!("F3+C: hooks missing; no waypoints");
@@ -356,7 +348,7 @@ pub fn log_hooks() {
 /// Asks the platform to send F3+C. While another job is pending or in flight this does
 /// nothing (the UI disables its buttons meanwhile).
 pub fn request(job: Job) -> Result<(), Failure> {
-    if !hooks_ready() {
+    if !HOOKS_READY.load(Ordering::Acquire) {
         return Err(Failure::NoHooks);
     }
     let purpose = job.purpose;

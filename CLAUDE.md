@@ -47,10 +47,12 @@ render/    glow + egui_glow の描画（OS に依存しない、テストあり�
   browser.rs   ゲーム内ブラウザ：メニューを開いている間の窓（移動、右下の角で大きさ、アドレス欄、ページへの入力の変換）、閉じている間のページの絵、メニューの欄、
                ページの絵のテクスチャ（PageTexture）。BrowserView/BrowserCommand/BrowserPixels でフックとやり取り
 agent/     エージェント本体（OS に依存しない。テストあり。Linux の CI でもビルド・テストする）。OS に頼ることは os.rs の Os を通す
-  lib.rs       catch（パニックをログにして止める。JVM・LWJGL・ライブラリから呼ばれる関数は全部これで包む）。公開するのは os・globals・jvmti・catch だけ
+  lib.rs       catch（パニックをログにして止める。JVM・LWJGL・ライブラリから呼ばれる関数は全部これで包む）、VERSION・BUILD_ID（build.rs）。公開するのは os・globals・jvmti・catch・start だけ
+  start.rs     Agent_OnLoad の中身（各 OS のライブラリから呼ぶ）：二重の読み込みの確認、オプション、ログ、パニックフック、globals::init、os::set、フォントの先読み、jvmti::start
   os.rs        Os：OS に頼ること（ライブラリの関数の引き当てとパス、GLFW・SDL3 のネイティブのウィンドウの取り方、ウィンドウの描画先、GL のコンテキストの作成・切り替え・削除と関数の引き当て、
                物理のキーの状態、ポインターの速度、クリップボード、日本語フォント、ブラウザ）。Browser：ゲーム内ブラウザの毎フレームの受け渡し。set（Agent_OnLoad で 1 回）
-  globals.rs   Globals：オプション、ゲームフォルダ、版。init（Agent_OnLoad で 1 回）
+  globals.rs   Globals：オプション、ゲームフォルダ、起動の時刻。init（Agent_OnLoad で 1 回）
+  fonts.rs     日本語フォント（Os::japanese_font）を読み込みの直後に別スレッドで読み、プロセスの間持つ
   jvmti.rs     JVMTI の NativeMethodBind：LWJGL の関数の引き当て（WinBase.nGetProcAddress、Linux・macOS は DynamicLinkLoader.ndlsym）を差し替え、
                引いた関数のフックを library::hook に聞いて渡す（本物は Original に覚える）。ほかの LWJGL のネイティブは library::native へ
   library.rs   ウィンドウのライブラリの判定（LWJGL が関数を引いた最初の GLFW か SDL3 をフックする。Mod の SDL などは外す）とフックの表の検索
@@ -69,22 +71,23 @@ agent/     エージェント本体（OS に依存しない。テストあり。
   f3c.rs       F3+C の要求と結果（ウィンドウのライブラリに依存しない）。送った F3+C の書き込みは握りつぶし、利用者の F3+C は通す
   waypoints.rs ワールドの追跡、options.txt（デバッグのキーと、メニューに出す各キーの割り当て）、F3+C の要求と結果、通知（frame.rs から毎フレーム）
 hook-win/  Windows のエージェント（reminedog.dll）：agent に Windows の Os を渡す
-  lib.rs/agent.rs  Agent_OnLoad。オプション、ログ、パニックフック、globals::init、os::set、jvmti::start
-  windows.rs   Windows の Os（PE を読む関数の引き当て、glfwGetWin32Window・SDL.window.win32.hwnd、GetDC、WGL、keys・pointer・clipboard・fonts・browser）
+  lib.rs       Agent_OnLoad（オプションの文字列を読んで agent::start へ）
+  startup.rs   Windows だけの起動の処理：ほかの場所の DLL が動いているかの確認、ログが書けないときの OutputDebugString、パニックの戻り先のアドレス
+  windows.rs   Windows の Os（GetProcAddress での関数の引き当て、glfwGetWin32Window・SDL.window.win32.hwnd、GetDC、WGL、keys・pointer・clipboard・fonts・browser）
   wgl.rs       opengl32 の関数表（コンテキストの作成・切り替え・削除、wglGetProcAddress）、ピクセルフォーマットの説明
   keys.rs      物理のキーとボタンの状態（GetAsyncKeyState。InputId から仮想キーへ、ボタンの左右の入れ替え）
   clipboard.rs メニューの貼り付け・コピー用の Win32 のクリップボード（GLFW・SDL の関数は F3+C でフックしているので使わない）
   pointer.rs   Windows のマウスの設定の読み取り
-  fonts.rs     日本語フォント（游ゴシック → メイリオ → MS ゴシック）。読み込みの直後に別スレッドで読み、プロセスの間持つ
+  fonts.rs     日本語フォント（游ゴシック → メイリオ → MS ゴシック）を読む
   browser.rs   ゲーム内ブラウザ（WebView2）のゲームのスレッド側：表示・非表示・終了、コマンドのメールボックス、状態、最新の絵（FRAME）。Os::browser の WebView2
   browser/     ブラウザのスレッド（thread.rs）、WebView2 の作成・設定・イベント（webview.rs）、画面の取り込み（capture.rs）。MSVC のビルドだけ（GNU では外す）
 hook-linux/ Linux のエージェント（libreminedog_linux.so。hook-win が Linux で空の libreminedog.so を作るので、名前を分けた）：agent に Linux の Os を渡す
-  lib.rs/agent.rs  Agent_OnLoad。オプション、ログ、パニックフック、globals::init、os::set、jvmti::start
+  lib.rs       Agent_OnLoad（オプションの文字列を読んで agent::start へ）
   linux.rs     Linux の Os（dlsym・dlinfo、glfwGetX11Window・SDL.window.x11.window、GLX、fonts）。物理のキーの状態・クリップボード・ポインターの速度はまだ読まない。ブラウザはない
   glx.rs       GLX（ゲームが読み込んだ libGL・libX11 から引く）：今のコンテキストと描画先、ゲームのコンテキストの GLX_FBCONFIG_ID で自前のコンテキストを作る、
-               切り替え・削除。Xlib の既定のエラー処理はプロセスを終えるので、失敗しうる呼び出しは自前のエラー処理の下で行う（trap_x_errors）
+               切り替え・削除。Xlib の既定のエラー処理はプロセスを終えるので、失敗しうる呼び出しは自前のエラー処理の下で行う（trap_x_errors。切り替えは、一度成功した描画先とコンテキストの組なら省く）
   dl.rs        dlsym、dlinfo（ライブラリのパス）、RTLD_NOLOAD で読み込み済みのライブラリ
-  fonts.rs     日本語フォント（fc-match の sans-serif:lang=ja、なければ Noto Sans CJK・IPA ゴシックのよくある場所）。読み込みの直後に別スレッドで読む
+  fonts.rs     日本語フォント（fc-match の sans-serif:lang=ja、なければ Noto Sans CJK・IPA ゴシックのよくある場所）を読む
 installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）。Java 8 以降で動く 1 つの jar（reminedog-installer.jar）
   Main.kt            FlatLaf（Windows のダークモードに合わせる）と画面の起動
   InstallerFrame.kt  画面：DLL（GitHub からダウンロードするか、PC のファイル）、インスタンスの一覧と状態、インストール／アンインストール、
@@ -143,7 +146,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
   Windows の DLL（リリースビルド、`ci/check-dll.ps1` で x64・export・読み込む DLL の許可リスト・バージョン情報、成果物 `reminedog-windows-x64`）、Windows のスモークテスト（LWJGL 3.2.2/Java 8、3.3.3/Java 21、3.4.3/Java 25 の SDL3。Mesa の llvmpipe で描く。
   Mesa は `MESA_TAG` と `MESA_SHA256`、LWJGL の jar は `ci/smoke/lwjgl.sha256` で確かめる）。アクションはコミットの SHA で固定（`.github/dependabot.yml`）、cargo は `--locked`。
   DLL が新しい DLL を読み込むようになったら check-dll.ps1 の許可リストに足す（どの Windows にもあるものだけ）
-- リリース（`.github/workflows/release.yml`）：Actions から版を入れて、main で手で実行する（そのコミットで CI が通っていること。キャッシュは使わない）。版は環境変数 `REMINEDOG_VERSION`（DLL：`agent::VERSION` とログ・状態の行、`hook-win/build.rs` が embed-resource で埋めるバージョン情報）と Gradle の `-PreminedogVersion`（jar の名前と manifest の `Implementation-Version`、画面のタイトル）で入れる。
+- リリース（`.github/workflows/release.yml`）：Actions から版を入れて、main で手で実行する（そのコミットで CI が通っていること。キャッシュは使わない）。版は環境変数 `REMINEDOG_VERSION`（DLL：`agent/build.rs` の `reminedog_agent::VERSION` とログ・状態の行、`hook-win/build.rs` が embed-resource で埋めるバージョン情報）と Gradle の `-PreminedogVersion`（jar の名前と manifest の `Implementation-Version`、画面のタイトル）で入れる。
   リポジトリの `Cargo.toml` の版は変えない（版を渡さないビルドでは、DLL は Cargo の版、インストーラーは `dev`）。成果物は `reminedog-<版>.dll`・`.pdb`・`reminedog-installer-<版>.jar` の下書きのリリース。利用者の PC では DLL は `reminedog.dll` のまま（インストーラーが名前を変えて置く。`Download` は `reminedog-<版>.dll` を探す）
 
 コミットする前に `cargo fmt --all`、clippy（警告 0）、テストを通す。
@@ -152,11 +155,10 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 
 - **コマンドラインをログに出さない**（Minecraft の `--accessToken` が入っている）
 - **Minecraft の jar やアセットをリポジトリに入れない**
-- フックの中でパニックさせない（`ffi::catch` で包む）。失敗しても `JNI_OK` を返し、ゲームは止めない
+- フックの中でパニックさせない（`reminedog_agent::catch` で包む）。失敗しても `JNI_OK` を返し、ゲームは止めない
 - ゲームの GL の状態を変えたら必ず元に戻す（オーバーレイは自前のコンテキストで描く。`tall.rs` だけはゲームのコンテキストで blit し、`SavedState` で戻す）
 - ゲームのコードを呼ぶ間（コールバックの転送など）は、`input::router()` のロックを持たない
 - ゲームやライブラリのコードは書き換えない。フックは JVMTI で LWJGL に渡す（`jvmti.rs`）。2026-10-18 に MinHook のデトアをやめた（経緯は HANDOFF.md の「追記：MinHook をやめる」）
-- export は `ffi::export_address`（PE を自分で読む）で引く。ローダーロックの中で GetProcAddress を呼ばないため
 - F3+C を送るときは、C（クラッシュのキー）が押されているとゲームに読ませない（修飾キーと同時だと、10 秒でゲームを落とすデバッグのクラッシュが動く）。GLFW の修飾キーの偽装は、ガードの Drop で必ず消す。ロックの順序は `hook-win/src/f3c.rs` の先頭に書いてある
 - インストーラーはランチャーの設定ファイルを書き換える。変えるのは JVM 引数の reminedog の部分と、それを効かせるためのキーだけで、ほかの行・キー・引数はそのまま残す。書き込みは一時ファイルからの置き換えで行い、試すときは設定ファイルの写しを使う
 - キーの置き換えは押したときに決め、その押下のリピートと解放は押したときの決定に従う（ルール・画面・メニューがその後で変わっても）。ゲームの中でキーが押されたまま残らないようにする。送る F3+C は置き換えを通さない

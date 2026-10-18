@@ -13,13 +13,13 @@
 //! so the workspace still builds.
 #![cfg(windows)]
 
-mod agent;
 mod browser;
 mod clipboard;
 mod ffi;
 mod fonts;
 mod keys;
 mod pointer;
+mod startup;
 mod wgl;
 mod windows;
 
@@ -45,7 +45,8 @@ pub unsafe extern "system" fn Agent_OnLoad(
             // SAFETY: the JVM passes a NUL-terminated string.
             ffi::decode_command_line_text(unsafe { CStr::from_ptr(options) }.to_bytes())
         };
-        agent::on_load(&options, vm);
+        // SAFETY: the JVM's JavaVM.
+        unsafe { reminedog_agent::start(&options, vm, &windows::WINDOWS) };
     });
     // Whatever happened, never keep the game from starting.
     JNI_OK

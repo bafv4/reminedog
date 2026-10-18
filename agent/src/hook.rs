@@ -46,22 +46,11 @@ pub trait Slot: Sync {
     /// # Safety
     /// `address` is a function of the slot's type.
     unsafe fn set_looked_up(&self, address: *const c_void);
-    /// Whether the game's calls reach the hook.
-    fn hooked(&self) -> bool;
-
-    /// Whether the game's calls reach the hook, or will once LWJGL looks the function up.
-    fn ready(&self) -> bool {
-        self.hooked() || crate::jvmti::handing_out()
-    }
 }
 
 impl<F: Copy + Send + Sync> Slot for Original<F> {
     unsafe fn set_looked_up(&self, address: *const c_void) {
         self.looked_up.store(address as usize, Ordering::Release);
-    }
-
-    fn hooked(&self) -> bool {
-        self.looked_up.load(Ordering::Acquire) != 0
     }
 }
 

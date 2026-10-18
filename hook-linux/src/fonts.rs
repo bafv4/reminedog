@@ -1,16 +1,11 @@
 //! A Japanese font for egui's fallbacks, found with fontconfig (`fc-match`), else in the
-//! places distributions put Noto Sans CJK or IPA Gothic.
-//!
-//! The file is read once, on a thread of its own right after the agent loads ([`preload`]),
-//! and kept for the process: the overlay, made again when the game's drawable changes,
-//! borrows it.
+//! places distributions put Noto Sans CJK or IPA Gothic. The agent reads it once, on a thread
+//! of its own, and keeps it for the process.
 
-use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 
-use reminedog_render::FontSource;
+use reminedog_agent::os::FontFile;
 
 /// Files tried when fontconfig gives none, with the face of Japanese in collections.
 const CANDIDATES: &[(&str, u32)] = &[
@@ -24,36 +19,8 @@ const CANDIDATES: &[(&str, u32)] = &[
     ("/usr/share/fonts/ipa-gothic/ipag.ttf", 0),
 ];
 
-/// The font read: its file name, contents and face.
-static FONT: OnceLock<Option<(String, &'static [u8], u32)>> = OnceLock::new();
-
-/// Starts reading the font, so the first frame does not wait for the disk.
-pub fn preload() {
-    let spawned = std::thread::Builder::new()
-        .name("reminedog-fonts".into())
-        .spawn(|| {
-            reminedog_agent::catch("reading the fonts", || {
-                FONT.get_or_init(read);
-            });
-        });
-    if let Err(e) = spawned {
-        log::debug!("fonts: no thread to read them ahead ({e})");
-    }
-}
-
-/// The Japanese fallback font (waiting for [`preload`] if it is still reading).
-pub fn load_japanese() -> Vec<FontSource> {
-    match FONT.get_or_init(read) {
-        Some((name, data, index)) => vec![FontSource {
-            name: name.clone(),
-            data: Cow::Borrowed(data),
-            index: *index,
-        }],
-        None => Vec::new(),
-    }
-}
-
-fn read() -> Option<(String, &'static [u8], u32)> {
+/// The Japanese font fontconfig chooses, else one in the usual places.
+pub fn read() -> Option<FontFile> {
     let found = fontconfig().into_iter().chain(
         CANDIDATES
             .iter()
@@ -63,8 +30,11 @@ fn read() -> Option<(String, &'static [u8], u32)> {
         match std::fs::read(&path) {
             Ok(data) => {
                 log::info!("fonts: {} (face {index})", path.display());
-                let name = file_name(&path);
-                return Some((name, Vec::leak(data), index));
+                return Some(FontFile {
+                    name: file_name(&path),
+                    data,
+                    index,
+                });
             }
             Err(e) => log::debug!("fonts: cannot read {}: {e}", path.display()),
         }

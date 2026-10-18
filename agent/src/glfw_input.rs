@@ -26,7 +26,7 @@ use reminedog_core::{
 use reminedog_render::{Delivery, Key, Output, Phase, PointerButton, Route};
 
 use crate::f3c::{self, Failure, Injected, Purpose};
-use crate::hook::{Hook, Original, Slot as _};
+use crate::hook::{Hook, Original};
 use crate::input::{self, FUNCTION_KEYS, router};
 use crate::library::export;
 use crate::rebind_state;
@@ -109,7 +109,7 @@ static RAW_MOTION_OPTIONAL: AtomicBool = AtomicBool::new(false);
 static SET_CLIPBOARD_STRING: Original<SetClipboardStringFn> = Original::new();
 /// The real glfwGetKey: the real key state, never spoofed.
 static GET_KEY: Original<GetKeyFn> = Original::new();
-/// glfwGetKey itself, for the real key state if it is not hooked.
+/// glfwGetKey itself: the real key state, for the agent (the game's calls go through the hook).
 static GET_KEY_EXPORT: OnceLock<GetKeyFn> = OnceLock::new();
 static GET_KEY_SCANCODE: OnceLock<GetKeyScancodeFn> = OnceLock::new();
 /// While F3+C is being sent, glfwGetKey reports `SPOOF_KEY` of this window as pressed
@@ -295,9 +295,7 @@ pub fn install(module: usize) {
         let _ = GET_KEY_SCANCODE
             .set(unsafe { std::mem::transmute::<*const c_void, GetKeyScancodeFn>(f) });
     }
-    f3c::set_hooks_check(|| {
-        SET_KEY.ready() && SET_CLIPBOARD_STRING.ready() && real_get_key().is_some()
-    });
+    f3c::set_hooks_ready(real_get_key().is_some());
 }
 
 fn modifiers(mods: c_int) -> reminedog_render::Modifiers {
@@ -306,12 +304,6 @@ fn modifiers(mods: c_int) -> reminedog_render::Modifiers {
         mods & MOD_CONTROL != 0,
         mods & MOD_ALT != 0,
     )
-}
-
-/// Whether the game reads the key state the rebinding gives it (without that, keys cannot be
-/// rebound: a held source would read as held).
-pub fn key_state_spoofed() -> bool {
-    GET_KEY.ready()
 }
 
 /// The rebinding's key id of a GLFW key code (key -1 has none: GLFW keeps no state for it).
@@ -614,7 +606,7 @@ unsafe extern "C" fn get_key_hook(window: *mut c_void, key: c_int) -> c_int {
 
 /// glfwGetKey without the spoof.
 fn real_get_key() -> Option<GetKeyFn> {
-    GET_KEY.get().or(GET_KEY_EXPORT.get().copied())
+    GET_KEY_EXPORT.get().copied()
 }
 
 /// The scancode GLFW would report with `key`; 0 if it cannot tell (Minecraft only looks at

@@ -200,7 +200,6 @@ CapsLock を押すたびに大文字の入力が切り替わる（Windows が処
 ### ログ
 
 - [ ] ゲームフォルダの `reminedog/reminedog.log` に `rebinds: N active (key.mouse.4 -> key.keyboard.f3, ...)` の行がある（起動時と、置き換えを変えたとき。N は実際に使う置き換えの数で、使えない理由が行の下に出ている行は数えない。「キーの置き換えを使う」を外していれば `rebinds: off (...)` の後に `rebinds: 0 active ()`）
-- [ ] `rebinds: the game's key state reads are not hooked; keys are not rebound` の警告が出ていない（出ていれば、メニューの欄に「ゲームがキーの状態を読む関数をフックできなかったので、キーボードのキーは置き換えられない（マウスのボタンは置き換えられる）」と出る）
 
 日本語配列（JIS）のキーは確かめなくてよい（この PC は US 配列）。JIS のキーボードがあれば、変換・無変換などを置き換え先にして試し、結果を知らせてほしい。
 
@@ -446,10 +445,9 @@ J と K は、Minecraft の F3+C で座標を取る。reminedog が送った F3+
 | `zoom: LWJGL's <関数> native goes through the agent` | 高精細のズームのために、LWJGL の GL の関数（`glBindFramebuffer` など）のネイティブを差し替えた |
 | `F3+C: clipboard hooks ready` | 座標を取るためのフック（クリップボード、キー）が揃った。`F3+C: hooks missing; no waypoints` なら、ウェイポイントは使えない |
 | `settings: ...` | 設定ファイルの場所と、メニュー・ズーム・記録・更新のキー、キーの置き換えの数（`rebinds N`。「キーの置き換えを使う」が外れていれば `rebinds off (N)`） |
-| `rebinds: N active (...)` | 実際に使うキーの置き換え（`元 -> 先`、名前は 26.x のもの）。下の `left out` の行で除いたものと、キーの状態を読む関数をフックできなかったときのキーボードのキーを元にするものは入らない。全体がオフなら `rebinds: off (...)` の後に `rebinds: 0 active ()` |
+| `rebinds: N active (...)` | 実際に使うキーの置き換え（`元 -> 先`、名前は 26.x のもの）。下の `left out` の行で除いたものは入らない。全体がオフなら `rebinds: off (...)` の後に `rebinds: 0 active ()` |
 | `rebinds: left out ...` | 使えないので除いた置き換えと、その理由（メニューの行の下にも出る）。この版のゲームが扱えないキーは `the game's window library has no <名前>` |
 | `settings: some rebinding values in ... cannot be read; copied the file to ...` | settings.json の置き換えに読めない値や項目があったので、読み飛ばし、ファイルを `settings.rebinds-<数字>.json` に写した（その前の `settings: dropped the rebind ...` などの行が、読み飛ばしたもの） |
-| `rebinds: the game's key state reads are not hooked; keys are not rebound` | ゲームがキーの状態を読む関数をフックできなかったので、キーボードのキーを元にする置き換えは使わない（マウスのボタンは使う） |
 | `options.txt: ...` | Minecraft の F3+C のキー（修飾キー、座標のコピー、クラッシュ）と、座標のコピーと同じキーに割り当てたほかの操作 |
 | `world: ...` | 今のワールド（シングルプレイはフォルダ名、マルチプレイはサーバー）。`not in a world` はワールドの外、`unknown` は判定できていない |
 | `F3+C: requested (...)` / `F3+C: location captured (...)` | 座標の取得を送った／座標が取れた（`manual` は自分で押した F3+C） |

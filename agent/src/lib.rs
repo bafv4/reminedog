@@ -11,8 +11,10 @@
 //! - [`f3c`], [`waypoints`]: F3+C requests and their results, the waypoints of the current world
 //! - [`input`]: the input router shared by the window library's hooks and the overlay
 //! - [`saver`]: the thread that writes files; [`globals`]: the options and the game folder
+//! - [`start`]: the `Agent_OnLoad` sequence, which the platform's library calls
 
 mod f3c;
+mod fonts;
 mod frame;
 mod gl;
 mod glfw;
@@ -27,8 +29,18 @@ mod rebind_state;
 mod saver;
 mod sdl;
 mod sdl_input;
+mod start;
 mod tall;
 mod waypoints;
+
+pub use start::start;
+
+/// The version: the release's (the release workflow sets REMINEDOG_VERSION), otherwise the
+/// crate's (`build.rs`).
+pub const VERSION: &str = env!("REMINEDOG_VERSION");
+
+/// Identifies the build in logs; CI sets it to the commit hash ("local" otherwise).
+pub const BUILD_ID: &str = env!("REMINEDOG_BUILD_ID");
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

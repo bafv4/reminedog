@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 
 use reminedog_core::{InputId, Settings};
 use reminedog_render::{
-    BrowserAction, BrowserCommand, BrowserPixels, BrowserView, FontSource, Notice, PointerSpeed,
+    BrowserAction, BrowserCommand, BrowserPixels, BrowserView, Notice, PointerSpeed,
 };
 
 pub trait Os: Sync {
@@ -34,6 +34,11 @@ pub trait Os: Sync {
     fn describe_surface(&self, surface: usize) -> String;
     /// The surface and context current on this thread (0 if none).
     fn current_gl(&self) -> (usize, usize);
+    /// Only the context current on this thread (0 if none): the zoom asks at the game's
+    /// framebuffer binds.
+    fn current_context(&self) -> usize {
+        self.current_gl().1
+    }
     /// A GL function for the current context, null if there is none.
     fn gl_function(&self, name: &CStr) -> *const c_void;
     /// A new context for `surface`, with its pixel format.
@@ -52,10 +57,32 @@ pub trait Os: Sync {
     fn read_clipboard(&self, native_window: Option<usize>) -> Option<String>;
     /// Puts the menu's copied text on the clipboard.
     fn write_clipboard(&self, native_window: Option<usize>, text: &str) -> bool;
-    /// Fonts for Japanese text, most wanted first.
-    fn japanese_fonts(&self) -> Vec<FontSource>;
+    /// Reads the font for Japanese text (on a thread of its own; [`crate::fonts`] keeps it).
+    fn japanese_font(&self) -> Option<FontFile>;
     /// The in-game browser, where there is one.
     fn browser(&self) -> Option<&dyn Browser>;
+
+    /// Whether another copy of the agent (from another folder, with statics of its own) runs in
+    /// this process; this one then stays off.
+    fn another_copy_runs(&self) -> bool {
+        false
+    }
+    /// Tells a problem where no log can be written.
+    fn report(&self, message: &str) {
+        eprintln!("reminedog: {message}");
+    }
+    /// Where a panic happened, for the log (called from the panic hook).
+    fn panic_details(&self) -> Option<String> {
+        None
+    }
+}
+
+/// A font file read for the overlay.
+pub struct FontFile {
+    pub name: String,
+    pub data: Vec<u8>,
+    /// The face in a collection (`.ttc`); 0 for a plain font.
+    pub index: u32,
 }
 
 /// How SDL3 gives a window's native window.

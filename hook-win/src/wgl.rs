@@ -92,6 +92,12 @@ impl Wgl {
         unsafe { ((self.get_current_dc)(), (self.get_current_context)()) }
     }
 
+    /// The context current on this thread (null if none).
+    pub fn current_context(&self) -> HGLRC {
+        // SAFETY: no preconditions.
+        unsafe { (self.get_current_context)() }
+    }
+
     /// Looks up a GL function for the current context: extensions and GL > 1.1 come from
     /// the driver via wglGetProcAddress, GL 1.1 only from opengl32's exports.
     pub fn load(&self, name: &CStr) -> *const c_void {

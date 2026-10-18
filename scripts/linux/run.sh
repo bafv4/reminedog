@@ -5,7 +5,7 @@
 #
 # Usage (from the repository, in Git Bash or WSL): scripts/linux/run.sh COMMAND...
 #   scripts/linux/run.sh cargo test -p reminedog-agent
-#   scripts/linux/run.sh scripts/linux/smoke.sh --agent /target/release/libreminedog.so
+#   scripts/linux/run.sh scripts/linux/smoke.sh --agent /target/release/libreminedog_linux.so
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

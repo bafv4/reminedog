@@ -2,7 +2,7 @@
 //!
 //! The agent itself is OS-independent ([`reminedog_agent`]); this library adds what it needs
 //! from Linux ([`linux`]: symbol lookup with `dlsym`, GLX contexts ([`glx`]), Japanese fonts
-//! from fontconfig ([`fonts`])) and the JVMTI entry point ([`agent`]).
+//! from fontconfig ([`fonts`])) and the JVMTI entry point.
 //!
 //! Only X11 with GLX so far; the key state, the clipboard and the pointer's speed are not read
 //! yet, and there is no in-game browser.
@@ -11,7 +11,6 @@
 //! workspace still builds.
 #![cfg(target_os = "linux")]
 
-mod agent;
 mod dl;
 mod fonts;
 mod glx;
@@ -41,7 +40,8 @@ pub unsafe extern "C" fn Agent_OnLoad(
                 .to_string_lossy()
                 .into_owned()
         };
-        agent::on_load(&options, vm);
+        // SAFETY: the JVM's JavaVM.
+        unsafe { reminedog_agent::start(&options, vm, &linux::LINUX) };
     });
     // Whatever happened, never keep the game from starting.
     JNI_OK

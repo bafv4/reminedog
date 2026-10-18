@@ -2,14 +2,14 @@
 
 use std::ffi::{CStr, c_void};
 
-use reminedog_agent::os::{Browser, Os, SdlProperty};
+use reminedog_agent::os::{Browser, FontFile, Os, SdlProperty};
 use reminedog_core::InputId;
-use reminedog_render::{FontSource, PointerSpeed};
+use reminedog_render::PointerSpeed;
 use windows_sys::Win32::Foundation::{HMODULE, HWND};
 use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
 use windows_sys::Win32::Graphics::OpenGL::HGLRC;
 
-use crate::{browser, clipboard, ffi, fonts, keys, pointer, wgl};
+use crate::{browser, clipboard, ffi, fonts, keys, pointer, startup, wgl};
 
 pub struct Windows;
 
@@ -17,8 +17,7 @@ pub static WINDOWS: Windows = Windows;
 
 impl Os for Windows {
     fn symbol(&self, library: usize, name: &CStr) -> Option<*const c_void> {
-        // SAFETY: LWJGL's handle of a module it loaded and looks functions up in.
-        unsafe { ffi::export_address(library as HMODULE, name) }
+        ffi::proc_address(library as HMODULE, name)
     }
 
     fn library_path(&self, library: usize) -> String {
@@ -60,6 +59,10 @@ impl Os for Windows {
         })
     }
 
+    fn current_context(&self) -> usize {
+        wgl::get().map_or(0, |wgl| wgl.current_context() as usize)
+    }
+
     fn gl_function(&self, name: &CStr) -> *const c_void {
         wgl::get().map_or(std::ptr::null(), |wgl| wgl.load(name))
     }
@@ -94,11 +97,23 @@ impl Os for Windows {
         native_window.is_some_and(|hwnd| clipboard::write_text(hwnd as HWND, text))
     }
 
-    fn japanese_fonts(&self) -> Vec<FontSource> {
-        fonts::load_japanese()
+    fn japanese_font(&self) -> Option<FontFile> {
+        fonts::read()
     }
 
     fn browser(&self) -> Option<&dyn Browser> {
         Some(&browser::WEBVIEW2)
+    }
+
+    fn another_copy_runs(&self) -> bool {
+        startup::another_copy_runs()
+    }
+
+    fn report(&self, message: &str) {
+        startup::debug_output(message);
+    }
+
+    fn panic_details(&self) -> Option<String> {
+        Some(startup::return_addresses())
     }
 }

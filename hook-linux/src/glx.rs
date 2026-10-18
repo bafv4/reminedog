@@ -69,6 +69,9 @@ static DISPLAY: AtomicUsize = AtomicUsize::new(0);
 static X_ERROR: AtomicI32 = AtomicI32::new(0);
 /// Serializes [`trap_x_errors`] (the error handler is process-wide).
 static TRAP: Mutex<()> = Mutex::new(());
+/// The (drawable, context) pairs made current once without an X error: switching between them
+/// again (twice a frame) skips the error trap and its round trip to the X server.
+static SWITCHED: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
 
 fn get() -> Result<&'static Glx, String> {
     GLX.get_or_init(resolve).as_ref().map_err(Clone::clone)
@@ -165,6 +168,14 @@ pub fn current() -> (usize, usize) {
     }
 }
 
+/// The context current on this thread (0 if none).
+pub fn current_context() -> usize {
+    get().map_or(0, |glx| {
+        // SAFETY: a plain query.
+        unsafe { (glx.get_current_context)() as usize }
+    })
+}
+
 /// A GL function for the current context, null if there is none.
 pub fn function(name: &CStr) -> *const c_void {
     get().map_or(std::ptr::null(), |glx| {
@@ -215,7 +226,7 @@ pub fn create_context(_surface: usize) -> Result<usize, String> {
 pub fn make_current(drawable: usize, context: usize) -> Result<(), String> {
     let glx = get()?;
     let display = display()?;
-    let made = trap_x_errors(glx, display, || {
+    let switch = || {
         // SAFETY: a context of `display` and a drawable it can draw on, or none.
         unsafe {
             (glx.make_context_current)(
@@ -225,7 +236,18 @@ pub fn make_current(drawable: usize, context: usize) -> Result<(), String> {
                 context as GlxContext,
             )
         }
-    })?;
+    };
+    let pair = (drawable, context);
+    let mut switched = SWITCHED.lock().unwrap_or_else(|e| e.into_inner());
+    let made = if switched.contains(&pair) {
+        switch()
+    } else {
+        let made = trap_x_errors(glx, display, switch)?;
+        if made != 0 {
+            switched.push(pair);
+        }
+        made
+    };
     if made == 0 {
         return Err("glXMakeContextCurrent failed".into());
     }
@@ -236,6 +258,10 @@ pub fn make_current(drawable: usize, context: usize) -> Result<(), String> {
 pub fn delete_context(context: usize) -> Result<(), String> {
     let glx = get()?;
     let display = display()?;
+    SWITCHED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|&(_, c)| c != context);
     trap_x_errors(glx, display, || {
         // SAFETY: the agent's context, not current.
         unsafe { (glx.destroy_context)(display, context as GlxContext) }

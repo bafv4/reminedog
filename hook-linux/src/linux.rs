@@ -2,9 +2,9 @@
 
 use std::ffi::{CStr, c_void};
 
-use reminedog_agent::os::{Browser, Os, SdlProperty};
+use reminedog_agent::os::{Browser, FontFile, Os, SdlProperty};
 use reminedog_core::InputId;
-use reminedog_render::{FontSource, PointerSpeed};
+use reminedog_render::PointerSpeed;
 
 use crate::{dl, fonts, glx};
 
@@ -46,6 +46,10 @@ impl Os for Linux {
         glx::current()
     }
 
+    fn current_context(&self) -> usize {
+        glx::current_context()
+    }
+
     fn gl_function(&self, name: &CStr) -> *const c_void {
         glx::function(name)
     }
@@ -80,8 +84,8 @@ impl Os for Linux {
         false
     }
 
-    fn japanese_fonts(&self) -> Vec<FontSource> {
-        fonts::load_japanese()
+    fn japanese_font(&self) -> Option<FontFile> {
+        fonts::read()
     }
 
     fn browser(&self) -> Option<&dyn Browser> {
