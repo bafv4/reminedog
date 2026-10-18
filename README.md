@@ -116,7 +116,7 @@ reminedog は Mod ではなく、Java の起動オプション `-agentpath:` で
 ### ほかの入手方法
 
 - **GitHub Actions**：リポジトリの Actions タブ → 最新の `CI` の実行 → Artifacts の `reminedog-windows-x64`（DLL）と `reminedog-installer`（インストーラー。版は `dev`）からダウンロードできます
-- **自分でビルドする**：下の「開発」を参照してください
+- **自分でビルドする**：下の「開発」の「ビルド」を参照してください（OS ごとのスクリプトがあります）
 
 ## 使用方法
 
@@ -360,75 +360,104 @@ scripts/   OS ごとのビルドのスクリプト（windows/build.ps1、linux/b
 
 ファイルごとの役割は [CLAUDE.md](CLAUDE.md) の「構成」にあります。
 
-### ビルドのスクリプト
+### 必要なもの
 
-OS ごとに、エージェントをリリースでビルドして `dist/<OS>/` に集めるスクリプトがあります。
-`-Check`／`--check` で先に fmt（確認だけ）・clippy（警告はエラー）・テストを CI と同じように行い、`-Installer`／`--installer` でインストーラーの jar も作ります。
-環境変数 `REMINEDOG_VERSION` を入れると、その版が DLL などとインストーラーに入ります（リリースと同じ。DLL などのファイル名は変わらず、jar は `reminedog-installer-<版>.jar` になります）。
+- 共通：[Rust](https://rustup.rs/)（1.95 以降）。インストーラーも作るなら JDK 17 以降（Gradle は初回に `gradlew` がダウンロードします）
+- Windows：Visual Studio Build Tools（C++ によるデスクトップ開発）。MSVC では CRT を静的にリンクします（`.cargo/config.toml` の `+crt-static`。Java 8 に vcruntime140 がないためです）
+- Linux：Linux の上ならそのまま。Windows からは Docker Desktop と WSL2（`scripts/linux/run.sh` がコンテナを作り、その中で動かします）
+- macOS：Xcode のコマンドラインツールと、`rustup target add aarch64-apple-darwin x86_64-apple-darwin`
 
-| OS | 実行するもの | 作るもの |
-| --- | --- | --- |
-| Windows | `scripts\windows\build.ps1 [-Check] [-Installer] [-InstallDir C:\reminedog]` | `dist\windows\reminedog.dll`・`.pdb`（`ci/check-dll.ps1` で確かめる）。`-InstallDir` でそのフォルダにもコピーします（ゲームが DLL を読み込んでいる間は失敗します） |
-| Linux | `scripts/linux/build.sh [--check] [--installer]`（Windows からは `scripts/linux/run.sh scripts/linux/build.sh ...` で Docker の中で） | `dist/linux/libreminedog_linux.so` |
-| macOS | `scripts/macos/build.sh [--check] [--installer] [--native]`（Mac で） | `dist/macos/libreminedog_macos.dylib`（Apple silicon と Intel を 1 つにしたもの。`--native` でその Mac の分だけ） |
+### ビルド
 
-PowerShell でスクリプトの実行が止められているときは、`powershell -ExecutionPolicy Bypass -File scripts\windows\build.ps1` のように実行します。
-macOS では、先に `rustup target add aarch64-apple-darwin x86_64-apple-darwin` が必要です（`--native` なら不要）。
+OS ごとのスクリプトで、エージェントをリリースでビルドし、`dist/<OS>/` に集めます。CI の Linux と macOS のジョブも同じスクリプトでビルドします。
 
-### ビルドとテスト（Windows）
-
-[Rust](https://rustup.rs/)（1.95 以降）と Visual Studio Build Tools（C++ によるデスクトップ開発）を入れて、次を実行します。
+| OS      | スクリプト                   | 作るもの                                                                                                       |
+| ------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Windows | `scripts\windows\build.ps1` | `dist\windows\reminedog.dll`・`.pdb`（`ci/check-dll.ps1` で、x64・`Agent_OnLoad`・読み込む DLL・版を確かめます） |
+| Linux   | `scripts/linux/build.sh`     | `dist/linux/libreminedog_linux.so`                                                                             |
+| macOS   | `scripts/macos/build.sh`     | `dist/macos/libreminedog_macos.dylib`（Apple silicon と Intel を 1 つにしたもの）                              |
 
 ```
-cargo build --release -p reminedog-hook-win      # target\release\reminedog.dll
+# Windows（PowerShell）
+powershell -ExecutionPolicy Bypass -File scripts\windows\build.ps1 -Check -Installer -InstallDir C:\reminedog
+
+# Linux（Windows からは scripts/linux/run.sh scripts/linux/build.sh --check で、Docker の中で）
+scripts/linux/build.sh --check --installer
+
+# macOS
+scripts/macos/build.sh --check
+```
+
+| オプション                     | 動作                                                                                                         |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `-Check`／`--check`            | 先に fmt（確認だけ）・clippy（警告はエラー）・テストを、CI と同じように行います                              |
+| `-Installer`／`--installer`    | インストーラーのテストと jar（`reminedog-installer.jar`）も作ります                                          |
+| `-Out`／`--out`                | 集める場所を変えます                                                                                         |
+| `-InstallDir`（Windows）       | そのフォルダにもコピーします（`-agentpath:C:\reminedog\reminedog.dll` ならそのまま試せます。ゲームが DLL を読み込んでいる間は失敗します） |
+| `--native`（macOS）            | その Mac のアーキテクチャの分だけ作ります（ターゲットを足さなくてよくなります）                              |
+
+環境変数 `REMINEDOG_VERSION` を入れると、その版が DLL などとインストーラーに入ります（リリースと同じです。DLL などのファイル名は変わらず、jar は `reminedog-installer-<版>.jar` になります）。
+入れなければ、DLL などは `Cargo.toml` の版、インストーラーは `dev` です。
+
+### テスト
+
+ビルドのスクリプトの `-Check`／`--check` と同じことを、手で行うなら次のとおりです。コミットする前に通してください。
+
+```
+cargo fmt --all
+cargo clippy --workspace --all-targets      # 警告 0
 cargo test --workspace
-cargo clippy --workspace --all-targets
 ```
 
-- MSVC では CRT を静的にリンクします（`.cargo/config.toml` の `+crt-static`。Java 8 に vcruntime140 がないためです）
 - ブラウザ（WebView2）を実際に動かすテストは、WebView2 ランタイムと画面のあるセッションが必要なので、通常は実行しません：`cargo test -p reminedog-hook-win browser -- --ignored --test-threads=1`
-- コミットする前に `cargo fmt --all`、clippy（警告 0）、テストを通してください
+- Windows で macOS 向けの型と lint を確かめるなら、`rustup target add aarch64-apple-darwin` の後に `cargo clippy --target aarch64-apple-darwin --workspace --all-targets`（リンクはできないので、ビルドは Mac か CI で）
 
-### Linux（Docker）
+### 動かして確かめる
 
-Linux 版のエージェント（`hook-linux/`）は作り始めたところで、X11（GLX）だけです。Docker の中でビルドし、画面なしの X サーバー（Xvfb）とソフトウェアで描く Mesa の上で、テスト用のプログラムに読み込ませて確かめます（Windows では Docker Desktop と WSL2 が必要です）。
+Windows では、ビルドした DLL を `-agentpath` でゲームに読み込ませるのが早いです（手順は [docs/TESTING.md](docs/TESTING.md)）。
+ゲームの代わりに、`ci/smoke/` のテスト用のプログラム（LWJGL で Minecraft と同じようにウィンドウを作ります。GLFW 版の `Smoke` と SDL3 版の `SmokeSdl`）に読み込ませることもできます。
+
+**Linux（Docker）**：画面なしの X サーバー（Xvfb）と、ソフトウェアで描く Mesa の上で動かします。xdotool でキーを送れます。
 
 ```sh
-scripts/linux/run.sh cargo test -p reminedog-agent                     # コンテナの中でテスト
-scripts/linux/run.sh cargo build --release -p reminedog-hook-linux     # /target/release/libreminedog_linux.so
-scripts/linux/run.sh scripts/linux/smoke.sh --agent /target/release/libreminedog_linux.so \
+scripts/linux/run.sh scripts/linux/build.sh
+scripts/linux/run.sh scripts/linux/smoke.sh --agent /src/dist/linux/libreminedog_linux.so \
   --xdotool "key j sleep 2 keydown z sleep 1.5 keyup z" -- --seconds=10 --mc --capture --screenshot
 ```
 
 `--sdl --lwjgl 3.4.3` で SDL3 版（Minecraft 26.x と同じ形）になります。ログは `/tmp/smoke-run/reminedog/reminedog.log` です。
 
-### Linux から（Wine）
+**macOS**：Java を `-XstartOnFirstThread` で起動します。`--grab 4` で 4 秒後の画面を `screen.png` に撮ります。
 
 ```sh
-cargo test --workspace                 # core と render のテスト（Linux でも動く）
-cargo clippy --workspace --all-targets
+scripts/macos/build.sh --native
+scripts/macos/smoke.sh --agent "$PWD/dist/macos/libreminedog_macos.dylib" --sdl --lwjgl 3.4.3 --grab 4 -- --seconds=6 --mc
+```
+
+GLFW 版は GPU が必要です（GLFW は GPU で描くピクセルフォーマットを必ず求めるので、GPU のない仮想マシンではウィンドウを作れません）。
+
+**Linux から Windows 版を（Wine）**：mingw-w64 で Windows 向けにビルドし、Wine 上の Windows 版 Java で動かします。
+
+```sh
 rustup target add x86_64-pc-windows-gnu                           # 初回のみ。mingw-w64 も必要
-cargo build -p reminedog-hook-win --target x86_64-pc-windows-gnu   # Linux から Windows 向けにビルド
+cargo build -p reminedog-hook-win --target x86_64-pc-windows-gnu
 scripts/wine-smoke.sh --agent target/x86_64-pc-windows-gnu/debug/reminedog.dll --screenshot shot.png
 ```
 
 GNU でビルドした DLL には、ゲーム内ブラウザは入りません（WebView2 などの DLL を Wine で読み込めるか分からないためです）。
-
-`scripts/wine-smoke.sh` は、Wine 上の Windows 版 Java で LWJGL のウィンドウを開き、エージェントを読み込ませて動作を確かめます。
 必要なもの：64 ビットの Wine、Xvfb（`xvfb-run`、Mesa の GLX）、JDK 9 以降の `javac`、pip の入った `python3`、`curl`、`flock` と `timeout`。
 初回は PyPI（Windows 版 Java）と Maven Central（LWJGL）からダウンロードし、`target/wine-cache` に Wine の環境を作ります（`cargo clean` で消えます）。
-`--screenshot` を付けると、最後のフレームを PNG で保存します。
 `--seconds 8 --capture --xdotool "key ctrl+i"` のように、秒数を決めて動かし、`xdotool` でキーやマウスの操作を送れます（`--sdl` で SDL3 版になります）。
 `--mc` を付けると、Minecraft と同じように自前のフレームバッファに描いてからウィンドウに転送するので、高精細のズームを試せます（例：`--capture --mc --xdotool "keydown z sleep 2" --grab zoom.png` で Z を押したままの画面を保存します）。
 日本語を表示するには、日本語フォントを `target/wine-cache/prefix/drive_c/windows/Fonts/msgothic.ttc` などの名前で置きます（`~/.wine` ではありません。初回の実行でフォルダができます）。
 
 ### インストーラー
 
-Gradle でビルドします（JDK 17 以降が必要です。Gradle は初回に `gradlew` がダウンロードします）。
+ビルドのスクリプトの `-Installer`／`--installer` で作れます。インストーラーだけなら Gradle で直接ビルドします。
 
 ```
 cd installer
-gradlew build      # テストと installer\build\libs\reminedog-installer.jar（Linux は ./gradlew build）
+gradlew build      # テストと installer\build\libs\reminedog-installer.jar（Linux・macOS は ./gradlew build）
 ```
 
 jar には FlatLaf と Kotlin のライブラリが入っていて、Java 8 以降で動きます。
@@ -438,7 +467,8 @@ jar には FlatLaf と Kotlin のライブラリが入っていて、Java 8 以�
 GitHub Actions（`.github/workflows/ci.yml`）で、push のたびに次を行います。
 
 - Linux：fmt、clippy、テスト、mingw でのクロスビルドの clippy
-- Linux のスモークテスト：Linux 版のエージェントを、Xvfb と Mesa の上のテスト用のプログラムに読み込ませ、xdotool で J（ウェイポイント）と Z（高精細のズーム）を送ります（LWJGL 3.2.2、3.3.3、3.4.3 の SDL3。Java 25）
+- Linux のスモークテスト：`scripts/linux/build.sh` でビルドしたエージェントを、Xvfb と Mesa の上のテスト用のプログラムに読み込ませ、xdotool で J（ウェイポイント）と Z（高精細のズーム）を送ります（LWJGL 3.2.2、3.3.3、3.4.3 の SDL3。Java 25）
+- macOS：clippy、テスト、`scripts/macos/build.sh` でのビルド、テスト用のプログラム（LWJGL 3.4.3 の SDL3。Java 25）でのスモークテスト。ランナーには GPU がないので GLFW 版は動かせず、キーも送りません（アクセシビリティの許可が要るため）。画面を撮って成果物に上げます
 - インストーラー：テストと jar のビルド（成果物 `reminedog-installer`）
 - Windows：clippy、テスト
 - Windows（DLL）：リリースビルド、`ci/check-dll.ps1` での DLL の確認（x64 であること、`Agent_OnLoad` があること、CRT を静的にリンクしていること、どの PC にもある DLL だけを読み込むこと、バージョン情報）、成果物 `reminedog-windows-x64`
