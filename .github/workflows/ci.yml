@@ -121,9 +121,11 @@ jobs:
         run: cat "$RUNNER_TEMP/smoke-run/reminedog/reminedog.log" 2>/dev/null || true
 
   # The macOS agent (hook-macos, a prototype): clippy and the tests on macOS, then the LWJGL
-  # smoke harness in the runner's session (Apple silicon: LWJGL 3.3 and later). No keys are
-  # sent yet (posting key events needs the Accessibility permission), so this checks that the
-  # hooks are handed out and that the overlay draws.
+  # smoke harness in the runner's session (Apple silicon: LWJGL 3.3 and later). Only SDL3: the
+  # runners have no GPU, only Apple's software renderer, and GLFW always asks for an
+  # accelerated pixel format (glfwCreateWindow fails). No keys are sent yet (posting key events
+  # needs the Accessibility permission), so this checks that the hooks are handed out and that
+  # the overlay draws (the screen grab is uploaded).
   macos:
     name: macOS (clippy, test, smoke LWJGL ${{ matrix.lwjgl }}${{ matrix.sdl && ', SDL3' || '' }})
     runs-on: macos-15
@@ -132,8 +134,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - lwjgl: "3.3.3"
-            sdl: ""
           - lwjgl: "3.4.3"
             sdl: --sdl
     steps:

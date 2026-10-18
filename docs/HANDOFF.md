@@ -1042,8 +1042,8 @@ Linux（Docker）：fmt、clippy（警告 0）、テスト（agent 46、core 183
 
 ## 追記：macOS の試作（2026-10-18）
 
-`hook-macos/`（`libreminedog_macos.dylib`）。Linux と同じく `agent` に macOS の `Os` を渡すだけ。手元に Mac がないので、確かめられたのは macOS 向けの clippy（aarch64・x86_64、警告 0）まで。
-動かすのは CI の `macos` ジョブ（macos-15、Apple silicon）で、まだ動かしていない。
+`hook-macos/`（`libreminedog_macos.dylib`）。Linux と同じく `agent` に macOS の `Os` を渡すだけ。手元に Mac がないので、Windows で macOS 向けの clippy（aarch64・x86_64、警告 0）を通し、
+動かすのは CI の `macos` ジョブ（macos-15、Apple silicon）。
 
 - 関数の引き当ては `dlsym`。LWJGL の macOS の GLFW・SDL3 は `dlopen` で読み込まれ、関数は `DynamicLinkLoader.ndlsym` で引かれる（jvmti.rs は macOS のクラス名も受けている）。
   GL は OpenGL.framework を CFBundle で読むので `ndlsym` を通らないが、ズームは JNI のネイティブの差し替え（`wrap_native`）なので関係ない。ライブラリのパスは `dlinfo` がないので、dyld の image を順に `RTLD_NOLOAD` で開いてハンドルを比べる（ログのためだけ）
@@ -1058,6 +1058,13 @@ Linux（Docker）：fmt、clippy（警告 0）、テスト（agent 46、core 183
 - CI：`scripts/macos/smoke.sh`（`-XstartOnFirstThread`、`timeout` がないので見張りのプロセス、`--grab` で `screencapture`）。LWJGL は natives-macos-arm64 の jar（3.3.3、3.4.3。3.2.2 には arm64 がない）。
   キーは送らない（`CGEventPost` や System Events にはアクセシビリティの許可が要る）ので、見るのはフックが渡ったことと、最初のフレームを描いたことと、撮った画面にオーバーレイの案内が出ているか
 
-確かめること（最初に CI を動かしたとき）：ログの `nsgl: overlay context ... (layer-backed ...)` と `overlay: first frame rendered`、成果物の `screen.png` にオーバーレイが出ているか。
-出ていなければ、同じビューに付けたコンテキストの絵が出ない（レイヤーで裏打ちされたビューでは描画面がコンテキストごとになる、など）ということなので、
-ゲームのコンテキストと共有する自前のコンテキストでテクスチャに描き、スワップの前にゲームのコンテキストでそれを重ねる方式（`tall.rs` と同じく状態を保存して戻す）を考える。
+確かめたこと（CI、macos-15、LWJGL 3.4.3 の SDL3 3.4.14、Java 25）：エージェントの読み込み、SDL3 のフック、F3+C のフックの準備、ズームの `glBindFramebuffer`・`glViewport` の差し替え、
+ヒラギノのフォント、オーバーレイ（`screencapture` で撮った画面にも、最後のスワップの後のバックバッファにも、日本語の案内「Ctrl+I でメニューを開く」が出た）。警告・エラーなし。
+ゲームの GL は `4.1 APPLE-21.1.1 | Apple Software Renderer`、ピクセルフォーマットは 3.2 core・Accelerated なし、ビューはレイヤーで裏打ちされていない（`wantsLayer` が false）。
+同じビューに付けた 2 つ目のコンテキストの絵は、少なくともこの組み合わせではゲームの絵と一緒に出る。
+
+GLFW は CI では動かせない：ランナーには GPU がなく、GLFW は macOS で必ず `NSOpenGLPFAAccelerated` を求めるので、`glfwCreateWindow` が「NSGL: Failed to find a suitable pixel format」で失敗する（テスト用のプログラムの側。エージェントのせいではない）。
+CI は SDL3 だけにした。
+
+確かめていないこと：GLFW（1.21 まで。GLFW 3.3 以降はビューをレイヤーで裏打ちすることがある）、本物の GPU、Retina（拡大率 2）、キー（ウェイポイント・ズーム・メニュー）、クリップボード、本物のゲーム。
+オーバーレイが出ない構成があれば、ゲームのコンテキストと共有する自前のコンテキストでテクスチャに描き、スワップの前にゲームのコンテキストでそれを重ねる方式（`tall.rs` と同じく状態を保存して戻す）を考える。
