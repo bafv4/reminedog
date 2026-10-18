@@ -114,7 +114,8 @@ installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）。Java 8
   Processes.kt       起動中のランチャーの判定（%SystemRoot%\System32\tasklist.exe、裏のスレッドで）
 ci/smoke/  LWJGL で Minecraft と同じようにウィンドウを作るテスト用の Java（GLFW 版 Smoke、SDL3 版 SmokeSdl）。F3+C の真似（--world、--f3c-refuse、--f3c-events）。
            キーの置き換えの確認（SMOKE_VERBOSE=1 で受け取ったイベント、--screen-key・--watch-keys で画面を閉じたときのキーの状態）
-scripts/   wine-smoke.sh（Linux 上で Wine を使って動かす）、fetch-wine-jre.sh、linux/（Docker のビルドとスモーク）、macos/smoke.sh（macOS でスモーク）
+scripts/   OS ごとのビルド（windows/build.ps1、linux/build.sh、macos/build.sh。成果物は dist/<OS>/）、wine-smoke.sh（Linux 上で Wine を使って動かす）、fetch-wine-jre.sh、
+           linux/（Docker の開発環境とスモーク）、macos/smoke.sh（macOS でスモーク）
 ```
 
 ## ビルドとテスト
@@ -162,6 +163,10 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
   DLL が新しい DLL を読み込むようになったら check-dll.ps1 の許可リストに足す（どの Windows にもあるものだけ）
 - リリース（`.github/workflows/release.yml`）：Actions から版を入れて、main で手で実行する（そのコミットで CI が通っていること。キャッシュは使わない）。版は環境変数 `REMINEDOG_VERSION`（DLL：`agent/build.rs` の `reminedog_agent::VERSION` とログ・状態の行、`hook-win/build.rs` が embed-resource で埋めるバージョン情報）と Gradle の `-PreminedogVersion`（jar の名前と manifest の `Implementation-Version`、画面のタイトル）で入れる。
   リポジトリの `Cargo.toml` の版は変えない（版を渡さないビルドでは、DLL は Cargo の版、インストーラーは `dev`）。成果物は `reminedog-<版>.dll`・`.pdb`・`reminedog-installer-<版>.jar` の下書きのリリース。利用者の PC では DLL は `reminedog.dll` のまま（インストーラーが名前を変えて置く。`Download` は `reminedog-<版>.dll` を探す）
+
+- ビルドのスクリプト（README の「ビルドのスクリプト」）：`scripts\windows\build.ps1 -Check -Installer -InstallDir C:\reminedog`（確認、DLL の check-dll、インストーラー、利用者の置き場所へのコピーまで。
+  PowerShell 5.1 では `powershell -ExecutionPolicy Bypass -File ...`）、`scripts/linux/run.sh scripts/linux/build.sh --check`、Mac では `scripts/macos/build.sh`（Apple silicon と Intel を lipo で 1 つに）。
+  CI の `smoke-linux` と `macos` もこのスクリプトでビルドする。成果物は `dist/<OS>/`（git に入れない）
 
 コミットする前に `cargo fmt --all`、clippy（警告 0）、テストを通す。
 

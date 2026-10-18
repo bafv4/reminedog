@@ -351,12 +351,29 @@ render/    glow + egui_glow によるオーバーレイの描画（OS に依存�
 agent/     エージェント本体（OS に依存しない、テストあり）：JVMTI、GLFW・SDL3 のフック、キーの置き換え、毎フレームの処理、高精細のズーム、F3+C、ウェイポイント
 hook-win/  Windows 用のエージェント（reminedog.dll）：エージェントに渡す Windows の機能（WGL、キーの状態、クリップボード、フォント、ブラウザ（WebView2））
 hook-linux/ Linux 用のエージェント（libreminedog_linux.so。作り始めたところ）：エージェントに渡す Linux の機能（GLX、フォント）
+hook-macos/ macOS 用のエージェント（libreminedog_macos.dylib。試作）：エージェントに渡す macOS の機能（NSOpenGLContext、クリップボード、フォント）
 installer/ インストーラー（Kotlin、Swing＋FlatLaf、Gradle）：DLL を置き、ランチャーのインスタンスの JVM 引数に -agentpath を足す
 ci/        DLL の確認のスクリプト（check-dll.ps1）と、LWJGL で Minecraft と同じようにウィンドウを作るテスト用のプログラム（ci/smoke/。GLFW 版と SDL3 版）
-scripts/   Linux 上で Wine を使ってエージェントを動かすスクリプト、Linux の開発環境（Docker。scripts/linux/）
+scripts/   OS ごとのビルドのスクリプト（windows/build.ps1、linux/build.sh、macos/build.sh）、Linux の開発環境（Docker。scripts/linux/）、
+           macOS のスモークテスト（scripts/macos/smoke.sh）、Linux 上で Wine を使ってエージェントを動かすスクリプト
 ```
 
 ファイルごとの役割は [CLAUDE.md](CLAUDE.md) の「構成」にあります。
+
+### ビルドのスクリプト
+
+OS ごとに、エージェントをリリースでビルドして `dist/<OS>/` に集めるスクリプトがあります。
+`-Check`／`--check` で先に fmt（確認だけ）・clippy（警告はエラー）・テストを CI と同じように行い、`-Installer`／`--installer` でインストーラーの jar も作ります。
+環境変数 `REMINEDOG_VERSION` を入れると、その版が DLL などとインストーラーに入ります（リリースと同じ。DLL などのファイル名は変わらず、jar は `reminedog-installer-<版>.jar` になります）。
+
+| OS | 実行するもの | 作るもの |
+| --- | --- | --- |
+| Windows | `scripts\windows\build.ps1 [-Check] [-Installer] [-InstallDir C:\reminedog]` | `dist\windows\reminedog.dll`・`.pdb`（`ci/check-dll.ps1` で確かめる）。`-InstallDir` でそのフォルダにもコピーします（ゲームが DLL を読み込んでいる間は失敗します） |
+| Linux | `scripts/linux/build.sh [--check] [--installer]`（Windows からは `scripts/linux/run.sh scripts/linux/build.sh ...` で Docker の中で） | `dist/linux/libreminedog_linux.so` |
+| macOS | `scripts/macos/build.sh [--check] [--installer] [--native]`（Mac で） | `dist/macos/libreminedog_macos.dylib`（Apple silicon と Intel を 1 つにしたもの。`--native` でその Mac の分だけ） |
+
+PowerShell でスクリプトの実行が止められているときは、`powershell -ExecutionPolicy Bypass -File scripts\windows\build.ps1` のように実行します。
+macOS では、先に `rustup target add aarch64-apple-darwin x86_64-apple-darwin` が必要です（`--native` なら不要）。
 
 ### ビルドとテスト（Windows）
 

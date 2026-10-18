@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Builds the Linux agent (libreminedog_linux.so) in release, optionally with the installer's
+# jar, into dist/linux. Runs on Linux with Rust (and a JDK 17 or later for the installer), or
+# from Windows in the development container:
+#   scripts/linux/run.sh scripts/linux/build.sh [OPTIONS]
+#
+# Usage: build.sh [--check] [--installer] [--out DIR]
+#   --check      first fmt (check only), clippy (warnings are errors) and the tests, as the CI
+#   --installer  also build the installer (its tests and reminedog-installer.jar)
+#   --out DIR    where the files go (default: dist/linux in the repository)
+# REMINEDOG_VERSION, when set, is the version in the library and the jar (as the release
+# workflow sets it); the library keeps its plain name, the jar is reminedog-installer-<version>.jar.
+set -euo pipefail
+
+repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+check='' installer='' out=$repo/dist/linux
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    --check) check=1; shift ;;
+    --installer) installer=1; shift ;;
+    --out) out=$2; shift 2 ;;
+    *) echo "build.sh: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+
+cd "$repo"
+target=${CARGO_TARGET_DIR:-$repo/target}
+if [ -n "$check" ]; then
+  echo "== fmt" && cargo fmt --all --check
+  echo "== clippy" && cargo clippy --locked --workspace --all-targets -- -D warnings
+  echo "== test" && cargo test --locked --workspace
+fi
+
+echo "== build libreminedog_linux.so"
+cargo build --locked --release -p reminedog-hook-linux
+lib=$target/release/libreminedog_linux.so
+# The JVM looks the entry point up by name.
+if command -v nm >/dev/null && ! nm -D --defined-only "$lib" | grep -qw Agent_OnLoad; then
+  echo "build.sh: $lib does not export Agent_OnLoad" >&2
+  exit 1
+fi
+files=("$lib")
+
+if [ -n "$installer" ]; then
+  echo "== build the installer"
+  gradle_args=(build --no-daemon)
+  jar=reminedog-installer.jar
+  if [ -n "${REMINEDOG_VERSION:-}" ]; then
+    gradle_args+=("-PreminedogVersion=$REMINEDOG_VERSION")
+    jar=reminedog-installer-$REMINEDOG_VERSION.jar
+  fi
+  (cd installer && sh ./gradlew "${gradle_args[@]}")
+  files+=("$repo/installer/build/libs/$jar")
+fi
+
+mkdir -p "$out"
+cp -f "${files[@]}" "$out/"
+echo "== done"
+for file in "${files[@]}"; do
+  ls -l "$out/$(basename "$file")"
+done

@@ -92,7 +92,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends xvfb x11-utils xdotool \
             libgl1 libglx-mesa0 libgl1-mesa-dri libegl1 fontconfig fonts-ipafont-gothic
       - name: Build the agent
-        run: cargo build --locked --release -p reminedog-hook-linux
+        run: bash scripts/linux/build.sh
       - name: Smoke
         env:
           SMOKE_SRC: ${{ github.workspace }}
@@ -101,7 +101,7 @@ jobs:
           SMOKE_TIMEOUT: "90"
         run: |
           bash scripts/linux/smoke.sh ${{ matrix.sdl }} --lwjgl ${{ matrix.lwjgl }} \
-            --agent "$PWD/target/release/libreminedog_linux.so" --agent-options log=debug \
+            --agent "$PWD/dist/linux/libreminedog_linux.so" --agent-options log=debug \
             --xdotool "key j sleep 2 keydown z sleep 1.5 keyup z sleep 0.5" \
             -- --seconds=10 --mc --capture --world=citest | tee "$RUNNER_TEMP/smoke.txt"
           fail=0
@@ -144,6 +144,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -155,8 +156,9 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked --workspace
+      # As on a Mac: Apple silicon and Intel in one library (dist/macos).
       - name: Build the agent
-        run: cargo build --locked --release -p reminedog-hook-macos
+        run: bash scripts/macos/build.sh
       - name: Smoke
         env:
           SMOKE_CACHE: ${{ runner.temp }}/smoke-cache
@@ -164,7 +166,7 @@ jobs:
           SMOKE_TIMEOUT: "90"
         run: |
           bash scripts/macos/smoke.sh ${{ matrix.sdl }} --lwjgl ${{ matrix.lwjgl }} \
-            --agent "$PWD/target/release/libreminedog_macos.dylib" --agent-options log=debug \
+            --agent "$PWD/dist/macos/libreminedog_macos.dylib" --agent-options log=debug \
             --grab 4 -- --seconds=6 --mc --world=citest --screenshot | tee "$RUNNER_TEMP/smoke.txt"
           fail=0
           grep -qF "SMOKE OK" "$RUNNER_TEMP/smoke.txt" || { echo "::error::the harness did not print 'SMOKE OK'"; fail=1; }
