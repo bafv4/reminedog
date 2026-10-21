@@ -14,8 +14,8 @@
 //! f3c lock is held, and no game code runs under it. Call [`take_job`] before locking
 //! `INJECTED`.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use reminedog_core::{
@@ -316,7 +316,10 @@ impl State {
 }
 
 static STATE: Mutex<State> = Mutex::new(State::new());
-static HOOKS_READY: AtomicBool = AtomicBool::new(false);
+/// Whether the window library's hooks F3+C needs are in ([`set_hooks`]).
+static HOOKS: OnceLock<fn() -> bool> = OnceLock::new();
+/// The hooks were seen in once (logged then).
+static HOOKS_SEEN: AtomicBool = AtomicBool::new(false);
 /// Mirrors `State::watching`, so most clipboard writes skip the lock.
 static WATCHING: AtomicBool = AtomicBool::new(false);
 /// Mirrors `State.pending.is_some()`, for the platforms' check on every swap or poll.
@@ -333,22 +336,27 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
     result
 }
 
-/// Set by the window library's input once it is hooked: whether the agent can read the real
-/// key state and address the game's window (F3+C's other needs are LWJGL's hooks, which the
-/// game gets whenever it uses the functions).
-pub fn set_hooks_ready(ready: bool) {
-    HOOKS_READY.store(ready, Ordering::Release);
-    if ready {
+/// Set by the window library's input once it is hooked: tells whether the hooks F3+C needs
+/// are in (LWJGL hands them out as it looks the functions up, after the library is hooked).
+pub fn set_hooks(ready: fn() -> bool) {
+    let _ = HOOKS.set(ready);
+}
+
+/// Whether F3+C can be sent; logs the first time it can (the frame asks on every swap, so the
+/// log tells when the hooks are in).
+pub fn hooks_ready() -> bool {
+    let ready = HOOKS.get().is_some_and(|ready| ready());
+    if ready && !HOOKS_SEEN.swap(true, Ordering::Relaxed) {
         log::info!("F3+C: clipboard hooks ready");
-    } else {
-        log::warn!("F3+C: hooks missing; no waypoints");
     }
+    ready
 }
 
 /// Asks the platform to send F3+C. While another job is pending or in flight this does
 /// nothing (the UI disables its buttons meanwhile).
 pub fn request(job: Job) -> Result<(), Failure> {
-    if !HOOKS_READY.load(Ordering::Acquire) {
+    if !hooks_ready() {
+        log::warn!("F3+C: hooks missing; no waypoints");
         return Err(Failure::NoHooks);
     }
     let purpose = job.purpose;

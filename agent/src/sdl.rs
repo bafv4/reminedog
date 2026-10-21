@@ -296,8 +296,9 @@ pub fn attach(module: usize, path: &str) {
         }
     }
     log::info!("SDL3 loaded: {path}");
-    MODULE.store(module, Ordering::Release);
     crate::sdl_input::install(module);
+    // Hooked only now, all set up: other threads hand out the hooks from here on.
+    MODULE.store(module, Ordering::Release);
     log::info!("SDL3 hooks installed");
 }
 

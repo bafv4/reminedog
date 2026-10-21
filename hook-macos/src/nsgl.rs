@@ -130,7 +130,8 @@ fn flush() {
     }
 }
 
-fn on_main_thread() -> bool {
+/// Whether this is the main thread, the only one that may touch AppKit's views.
+pub fn on_main_thread() -> bool {
     // SAFETY: no preconditions.
     unsafe { pthread_main_np() != 0 }
 }
@@ -213,6 +214,10 @@ pub fn make_current(_view: usize, context: usize) -> Result<(), String> {
         }
         let mut own = OWN.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(own) = own.iter_mut().find(|own| own.context == context) {
+            // Following the view is AppKit's; a swap on another thread skips the overlay.
+            if !on_main_thread() {
+                return Err("not on the main thread".into());
+            }
             let size = view_size(own.view);
             if own.size != Some(size) {
                 objc::send::<()>(context as Id, &UPDATE);
@@ -228,8 +233,12 @@ pub fn make_current(_view: usize, context: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// Deletes one of the agent's contexts, not current.
+/// Deletes one of the agent's contexts, not current. Off the main thread it is left (detaching
+/// it from the view is AppKit's).
 pub fn delete_context(context: usize) -> Result<(), String> {
+    if !on_main_thread() {
+        return Err("not on the main thread; the context is left".into());
+    }
     OWN.lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|own| own.context != context);

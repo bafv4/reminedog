@@ -11,7 +11,9 @@
 #   --xdotool CMDS       once the window is up (after --xdotool-delay seconds, default 3),
 #                        focus it and run "xdotool CMDS", e.g. "keydown z sleep 1 keyup z"
 #   ARGS                 the harness's own arguments (default: --seconds=5 --mc)
-# The run directory (game dir, output, logs) is /tmp/smoke-run, printed at the end.
+# The run directory (game dir, output, the agent's log) is /target/smoke-run, on the
+# container's volume so it outlives the container: read it with, for example,
+#   scripts/linux/run.sh cat /target/smoke-run/reminedog/reminedog.log
 # Environment: SMOKE_SRC (the repository, default /src), SMOKE_CACHE (jars and classes,
 # default /target/smoke-cache), SMOKE_RUN (the run directory), SMOKE_TIMEOUT (seconds, 120).
 set -euo pipefail
@@ -44,7 +46,7 @@ classes=$cache/classes-$lwjgl-$harness
 rm -rf "$classes" && mkdir -p "$classes"
 javac --release 8 -nowarn -cp "$cp" -d "$classes" "$src/ci/smoke/$harness.java" "$src/ci/smoke/SmokeImage.java"
 
-run=${SMOKE_RUN:-/tmp/smoke-run}
+run=${SMOKE_RUN:-/target/smoke-run}
 rm -rf "$run" && mkdir -p "$run/natives" && cd "$run"
 java_args=("-Dorg.lwjgl.system.SharedLibraryExtractPath=$run/natives")
 if [ -n "$agent" ]; then

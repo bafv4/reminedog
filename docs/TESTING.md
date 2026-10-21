@@ -443,7 +443,7 @@ J と K は、Minecraft の F3+C で座標を取る。reminedog が送った F3+
 | `GLFW hooks installed: <パス>` | LWJGL が関数を引いた GLFW をゲームのウィンドウのライブラリとして、フックの準備ができた |
 | `jvmti: LWJGL looked up <関数>; handed the agent's hook` | LWJGL が GLFW・SDL3 の関数を引いたときに、本物の代わりに reminedog のフックを渡した |
 | `zoom: LWJGL's <関数> native goes through the agent` | 高精細のズームのために、LWJGL の GL の関数（`glBindFramebuffer` など）のネイティブを差し替えた |
-| `F3+C: clipboard hooks ready` | 座標を取るためのフック（クリップボード、キー）が揃った。`F3+C: hooks missing; no waypoints` なら、ウェイポイントは使えない |
+| `F3+C: clipboard hooks ready` | 座標を取るためのフック（キー、ゲームの入力）がゲームに渡った（最初に揃ったときに 1 回）。この行がなく、J・K で `F3+C: hooks missing; no waypoints` が出るなら、ウェイポイントは使えない |
 | `settings: ...` | 設定ファイルの場所と、メニュー・ズーム・記録・更新のキー、キーの置き換えの数（`rebinds N`。「キーの置き換えを使う」が外れていれば `rebinds off (N)`） |
 | `rebinds: N active (...)` | 実際に使うキーの置き換え（`元 -> 先`、名前は 26.x のもの）。下の `left out` の行で除いたものは入らない。全体がオフなら `rebinds: off (...)` の後に `rebinds: 0 active ()` |
 | `rebinds: left out ...` | 使えないので除いた置き換えと、その理由（メニューの行の下にも出る）。この版のゲームが扱えないキーは `the game's window library has no <名前>` |

@@ -1068,3 +1068,38 @@ CI は SDL3 だけにした。
 
 確かめていないこと：GLFW（1.21 まで。GLFW 3.3 以降はビューをレイヤーで裏打ちすることがある）、本物の GPU、Retina（拡大率 2）、キー（ウェイポイント・ズーム・メニュー）、クリップボード、本物のゲーム。
 オーバーレイが出ない構成があれば、ゲームのコンテキストと共有する自前のコンテキストでテクスチャに描き、スワップの前にゲームのコンテキストでそれを重ねる方式（`tall.rs` と同じく状態を保存して戻す）を考える。
+
+## 追記：バグ監査（2026-10-21）の修正
+
+[AUDIT-2026-10-21.md](AUDIT-2026-10-21.md) の 18 件（中 4・低 14）を直した。前の追記に書いた振る舞いのうち、変わったもの：
+
+- F3+C の準備（「見直し」の「入力のフックが本物の関数を得たときに `set_hooks_ready` で知らせる」は、実際には export の有無しか見ていなかった）：
+  各ライブラリの入力が `f3c::set_hooks(fn)` で判定の関数を渡し、`f3c::hooks_ready()` がそれを毎フレーム（`waypoints::before_frame`）と要求のときに呼ぶ。最初に揃ったときに「F3+C: clipboard hooks ready」を出す。
+  GLFW は `glfwSetKeyCallback`・`glfwSetClipboardString`・`glfwGetKey` のフックが渡ったこと（LWJGL は GLFW の関数をまとめて引く）。
+  SDL3 はウィンドウの番号・キーの状態・`SDL_PollEvent` のフックで、クリップボードは条件にしない：LWJGL は `SDL_SetClipboardText` を、ゲームが最初にコピーするとき（SDLClipboard のクラスの初期化）に引くので、送った F3+C そのものが最初になりうる。
+  代わりに、何も書かれなかったときにクリップボードのフックがまだなければ「制限（Refused）」ではなく `NoHooks` にする（F3 の画面を戻す押下も、そのワールドで送るのをやめることもしない）
+- `Os` に既定のある 2 つを足した：`can_create_context_here`（macOS はメインスレッドだけ。ほかのスレッドのスワップでは `Uninit` のまま待つ。Forge の早い読み込み画面のため）と、
+  `window_minimized`（Windows は `IsIconic`。SDL3 のフラグはゲームのポーリングまで変わらず、その間の `GetDC` が一時的な DC を返して作り直しと DC の漏れになるため）。
+  `None` のときは今までどおりライブラリに聞く。GLFW の `glfwGetWindowAttrib(GLFW_ICONIFIED)` は X11 では X サーバーとの往復になるので、250 ms 覚える
+- macOS の自前のコンテキストの `update` と削除は、メインスレッドでなければしない（削除は残す）
+- GLX：一度成功した組の切り替えでエラー処理を省くのは、描画先が今の描画先（`glXGetCurrentDrawable`）のときだけ。描画先が変わった後の後片付けで古い描画先に切り替えると、消えた描画先の X のエラーでプロセスが終わりうるため
+- フォント：egui は読めないフォントでパニックする（最初のフレーム、オーバーレイが止まる）ので、`font_definitions` が `skrifa::FontRef::from_index` で読めないフォントを外す。
+  Linux の fc-match は `%{lang}` で日本語を含むときだけ採り（合わなくても最も近いフォントを返すため）、面の番号は下位 16 ビット（可変フォントの名前付きインスタンスは上にインスタンスの番号が入る）。macOS の第 2 候補は日本語のヒラギノに
+- ズームの JNI のネイティブ：LWJGL 3.1.6（1.13）は `glBindFramebuffer` を `GL30` と `ARBFramebufferObject` に、`glBlitNamedFramebuffer` を `GL45` と `ARBDirectStateAccess` に別々に持つ（jar と `lwjgl_opengl.dll` の export で確認。`JavaCritical_` はない。
+  関数を引くネイティブは 3.1.6 でも `WinBase.nGetProcAddress(JJ)J`・`DynamicLinkLoader.ndlsym(JJ)J`）。名前ごとに本物を 2 つまで覚え、包む関数も番号ごとに分けた（`jni_bind_framebuffer::<I>`）。同じ本物がもう一度結び付いたら同じ包む関数を返す
+- 別の場所のエージェント：Linux・macOS でも、各ライブラリが export する `REMINEDOG_AGENT_MARKER` を、読み込み済みのほかのライブラリ・image に探して、あれば止まる（`dl::loaded_elsewhere`）
+- `library::identify` はロックを取った後にフック済みかを確かめ直し、`MODULE`（`is_hooked`）は入力の準備が終わってから立てる
+- 状態の行の「ゲームフォルダ」は、Linux・macOS ではホームを `~` にする（`hide_user`）
+- CI：Linux と macOS のスモークは `shell: bash`（pipefail）でテスト用のプログラムの終了コードも見て、hs_err も出す
+- スクリプト：
+  - ビルドのスクリプトは出力先を `cargo metadata` の `target_directory` から取る（`build.sh` の `--out` は呼んだ場所から）
+  - Linux のスモークの作業フォルダの既定は `/target/smoke-run`（コンテナが消えても残る）
+  - `run.sh` は Linux の上（WSL を含む）では、コンテナが残した root のファイルを利用者に戻す
+  - macOS の smoke.sh の見張りは、時間切れを印のファイルで伝え、TERM で終わらなければ KILL する
+  - `lwjgl.sha256` に Intel の Mac 用（natives-macos）の jar を足した
+
+確かめたこと（Windows）：fmt、clippy（警告 0。macOS 向けの aarch64・x86_64 も）、テスト（agent 50、core 184、render 162、hook-win 5）、
+`scripts/windows/build.ps1 -Check` で DLL の確認まで、手元のスモーク（GLFW 3.3.3＋Java 25、SDL3 3.4.3＋Java 25、GLFW 3.2.2＋Java 8 で、F3+C の準備、J でウェイポイント、Z で縦長、警告・エラーなし）、
+macOS の smoke.sh の見張りの 2 つの場合（時間内に終わる、時間切れ）。
+Linux（Docker）：fmt、clippy（警告 0）、テスト（agent 50、core 183、render 162、hook-linux 2）、fc-match の `%{lang}` の形（`|` 区切り）、`build.sh`（`cargo metadata` の出力先）、スモーク（GLFW 3.3.3・3.2.2、SDL3 3.4.3 で同じ項目、終了コード 0、作業フォルダがコンテナの後も残る）、2 つのコピー（別のフォルダの .so を `-agentpath` に 2 つ）で後の方が「stays off」の行を残して止まる。
+確かめていないこと：実機（Windows の 1.21.11・26.3、1.13）、macOS（CI で）、Linux の別コピーで `JAVA_TOOL_OPTIONS` を使う場合（試したときは JVM が 2 つ目を読み込まなかった）。

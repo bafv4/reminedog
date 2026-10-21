@@ -425,7 +425,7 @@ scripts/linux/run.sh scripts/linux/smoke.sh --agent /src/dist/linux/libreminedog
   --xdotool "key j sleep 2 keydown z sleep 1.5 keyup z" -- --seconds=10 --mc --capture --screenshot
 ```
 
-`--sdl --lwjgl 3.4.3` で SDL3 版（Minecraft 26.x と同じ形）になります。ログは `/tmp/smoke-run/reminedog/reminedog.log` です。
+`--sdl --lwjgl 3.4.3` で SDL3 版（Minecraft 26.x と同じ形）になります。作業フォルダは Docker のボリュームの `/target/smoke-run` で、コンテナが終わっても残ります。ログは `scripts/linux/run.sh cat /target/smoke-run/reminedog/reminedog.log` で読めます。
 
 **macOS**：Java を `-XstartOnFirstThread` で起動します。`--grab 4` で 4 秒後の画面を `screen.png` に撮ります。
 

@@ -54,7 +54,11 @@ fn identify(library: usize) {
         return;
     }
     let mut passed = PASSED.lock().unwrap_or_else(|e| e.into_inner());
-    if passed.contains(&library) {
+    // Another thread may have hooked it while this one waited for the lock.
+    if passed.contains(&library)
+        || crate::glfw::is_hooked(library)
+        || crate::sdl::is_hooked(library)
+    {
         return;
     }
     let path = || os::get().library_path(library);

@@ -285,7 +285,16 @@ pub fn install(module: usize) {
     if !has_window_id {
         log::warn!("SDL3 does not export SDL_GetWindowID");
     }
-    f3c::set_hooks_ready(has_window_id && real_keyboard_state().is_some());
+    f3c::set_hooks(f3c_hooks_ready);
+}
+
+/// What F3+C needs: the game's window id, the real key state and the events through the hook.
+/// Not the clipboard hook: LWJGL looks SDL_SetClipboardText up only when the game first copies
+/// (its class is initialized then), which our F3+C itself may cause.
+fn f3c_hooks_ready() -> bool {
+    API.get().is_some_and(|api| api.get_window_id.is_some())
+        && real_keyboard_state().is_some()
+        && POLL_EVENT.get().is_some()
 }
 
 unsafe extern "C" fn poll_event_hook(event: *mut u8) -> bool {
@@ -542,7 +551,8 @@ fn on_injected(queue: &mut VecDeque<(Event, Tag)>, event: &Event, tag: Tag) {
         Tag::Plain => {}
         Tag::CopyDown(purpose) => f3c::begin_injected(purpose),
         Tag::ModifierUp(purpose) => {
-            if let Some(reason) = after_modifier_up(queue, event, f3c::end_injected()) {
+            let hooked = SET_CLIPBOARD_TEXT.get().is_some();
+            if let Some(reason) = after_modifier_up(queue, event, f3c::end_injected(), hooked) {
                 f3c::fail(purpose, reason);
             }
         }
@@ -551,16 +561,19 @@ fn on_injected(queue: &mut VecDeque<(Event, Tag)>, event: &Event, tag: Tag) {
 
 /// What the game copied settles the burst as its modifier release (`up`) goes out. Refused,
 /// that release toggles the debug overlay: the modifier is pressed and released once more
-/// right after it, in the same poll loop, so no frame shows the toggle.
+/// right after it, in the same poll loop, so no frame shows the toggle. Nothing through a
+/// clipboard hook LWJGL never got (`clipboard_hooked` false) is no refusal.
 fn after_modifier_up(
     queue: &mut VecDeque<(Event, Tag)>,
     up: &Event,
     copied: Injected,
+    clipboard_hooked: bool,
 ) -> Option<Failure> {
     match copied {
         Injected::Captured => None,
         // The game handled the keys; only its text was not a location.
         Injected::Written => Some(Failure::Unreadable),
+        Injected::Nothing if !clipboard_hooked => Some(Failure::NoHooks),
         Injected::Nothing => {
             let mut down = *up;
             down[..4].copy_from_slice(&EVENT_KEY_DOWN.to_ne_bytes());
@@ -1255,11 +1268,31 @@ mod tests {
         let (mut out, mut failures) = (Vec::new(), Vec::new());
         while let Some((event, tag)) = queue.pop_front() {
             if let Tag::ModifierUp(_) = tag {
-                failures.extend(after_modifier_up(&mut queue, &event, copied));
+                failures.extend(after_modifier_up(&mut queue, &event, copied, true));
             }
             out.push(event);
         }
         (out, failures)
+    }
+
+    #[test]
+    fn nothing_copied_without_the_clipboard_hook_is_no_refusal() {
+        let mut queue: VecDeque<_> = burst_events(ID, F3, C, Purpose::Refresh).into();
+        let (mut out, mut failures) = (Vec::new(), Vec::new());
+        while let Some((event, tag)) = queue.pop_front() {
+            if let Tag::ModifierUp(_) = tag {
+                failures.extend(after_modifier_up(
+                    &mut queue,
+                    &event,
+                    Injected::Nothing,
+                    false,
+                ));
+            }
+            out.push(event);
+        }
+        assert_eq!(failures, [Failure::NoHooks]);
+        // No undo: the debug overlay was not toggled.
+        assert_eq!(out.len(), 4);
     }
 
     #[test]

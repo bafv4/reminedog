@@ -8,9 +8,9 @@
 #                 [--grab SECONDS] [-- ARGS...]
 #   --agent DYLIB        load DYLIB with -agentpath:
 #   --agent-options STR  options passed to Agent_OnLoad (-agentpath:DYLIB=STR)
-#   --lwjgl VERSION      LWJGL version (default 3.3.3; Apple silicon needs 3.3.0 or later, --sdl
-#                        3.4.0 or later). GLFW needs a GPU: it asks for an accelerated pixel
-#                        format, which a virtual machine with only the software renderer lacks
+#   --lwjgl VERSION      LWJGL version (3.3.3 or 3.4.3, default 3.3.3; --sdl needs 3.4.3). GLFW
+#                        needs a GPU: it asks for an accelerated pixel format, which a virtual
+#                        machine with only the software renderer lacks
 #   --sdl                run SmokeSdl (an SDL3 window, like Minecraft 26.x) instead of Smoke
 #   --grab SECONDS       that long after start, save the screen as screen.png in the run
 #                        directory (screencapture; the overlay is only checked this way)
@@ -59,11 +59,16 @@ if [ -n "$agent" ]; then
   java_args+=("-agentpath:$agent${agent_options:+=$agent_options}")
 fi
 
-# macOS has no timeout(1): a watchdog ends Java if it hangs. Its output goes elsewhere, so its
-# sleep does not hold this script's stdout (a pipe to tee) open after it is ended.
+# macOS has no timeout(1): a watchdog ends Java if it hangs (TERM, then KILL if Java does not
+# end), and leaves a file saying so. Its output goes elsewhere, so its sleep does not hold this
+# script's stdout (a pipe to tee) open after it is ended.
 java "${java_args[@]}" -cp "$cp:$classes" "$harness" "${args[@]}" >smoke.txt 2>&1 &
 java=$!
-(sleep "${SMOKE_TIMEOUT:-120}" && kill "$java" && echo "smoke.sh: timed out" >&2) >/dev/null 2>&1 &
+(
+  sleep "${SMOKE_TIMEOUT:-120}" &&
+    touch "$run/timed-out" &&
+    kill "$java" && sleep 10 && kill -9 "$java"
+) >/dev/null 2>&1 &
 watchdog=$!
 if [ -n "$grab" ]; then
   sleep "$grab"
@@ -71,7 +76,11 @@ if [ -n "$grab" ]; then
 fi
 status=0
 wait "$java" || status=$?
-{ pkill -P "$watchdog" sleep; kill "$watchdog" && wait "$watchdog"; } 2>/dev/null || true
+# The watchdog first (so it goes no further), then its sleep.
+{ kill "$watchdog"; pkill -P "$watchdog" sleep; wait "$watchdog"; } 2>/dev/null || true
 cat smoke.txt
+if [ -e "$run/timed-out" ]; then
+  echo "smoke.sh: timed out after ${SMOKE_TIMEOUT:-120}s" >&2
+fi
 echo "smoke.sh: exit $status, run directory $run"
 exit "$status"

@@ -1,7 +1,7 @@
 //! The dynamic linker: symbols of the libraries LWJGL loaded, and libraries the agent uses
 //! itself (libGL, libX11) once the game has loaded them.
 
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
 /// The address of `name` in `library`, a `dlopen` handle.
 pub fn symbol(library: usize, name: &CStr) -> Option<*const c_void> {
@@ -38,6 +38,40 @@ pub fn path(library: usize) -> Option<String> {
         unsafe { CStr::from_ptr(name) }
             .to_string_lossy()
             .into_owned()
+    })
+}
+
+/// Whether a loaded library other than this one exports `symbol` (another copy of the agent,
+/// from another folder: the dynamic linker loads each path as its own library).
+pub fn loaded_elsewhere(symbol: &CStr, ours: *const c_void) -> bool {
+    unsafe extern "C" fn collect(
+        info: *mut libc::dl_phdr_info,
+        _size: usize,
+        names: *mut c_void,
+    ) -> c_int {
+        // SAFETY: the linker's entry for one object, during the call; `names` is ours.
+        unsafe {
+            let name = (*info).dlpi_name;
+            if !name.is_null() && *name != 0 {
+                (*names.cast::<Vec<CString>>()).push(CStr::from_ptr(name).to_owned());
+            }
+        }
+        0
+    }
+    let mut names: Vec<CString> = Vec::new();
+    // SAFETY: the callback only reads each entry and adds to `names`.
+    unsafe { libc::dl_iterate_phdr(Some(collect), (&raw mut names).cast()) };
+    names.iter().any(|name| {
+        // SAFETY: RTLD_NOLOAD only looks the library up; the reference is dropped again.
+        unsafe {
+            let handle = libc::dlopen(name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
+            if handle.is_null() {
+                return false;
+            }
+            let found = libc::dlsym(handle, symbol.as_ptr());
+            libc::dlclose(handle);
+            !found.is_null() && found.cast_const() != ours
+        }
     })
 }
 

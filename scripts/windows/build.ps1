@@ -38,8 +38,12 @@ try {
     }
 
     Invoke-Step 'build reminedog.dll' { cargo build --locked --release -p reminedog-hook-win }
-    $dll = Join-Path $repo 'target\release\reminedog.dll'
-    $pdb = Join-Path $repo 'target\release\reminedog.pdb'
+    # Cargo's output folder, wherever its settings put it (CARGO_TARGET_DIR, build.target-dir).
+    $metadata = cargo metadata --format-version 1 --no-deps
+    if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed (exit $LASTEXITCODE)" }
+    $target = ($metadata | ConvertFrom-Json).target_directory
+    $dll = Join-Path $target 'release\reminedog.dll'
+    $pdb = Join-Path $target 'release\reminedog.pdb'
     Write-Host '== check the DLL (x64, exports, imports, version resource)'
     $checkArgs = @{ Dll = $dll }
     if ($env:REMINEDOG_VERSION) { $checkArgs.Version = $env:REMINEDOG_VERSION }

@@ -63,6 +63,11 @@ impl Os for MacOs {
         nsgl::delete_context(context)
     }
 
+    /// AppKit attaches the context to the view on the main thread only.
+    fn can_create_context_here(&self) -> bool {
+        nsgl::on_main_thread()
+    }
+
     /// Not read yet: the safety net never releases a key. (`CGEventSourceKeyState` may need the
     /// Input Monitoring permission; without it every key would look up.)
     fn input_up(&self, _id: InputId) -> bool {
@@ -88,5 +93,12 @@ impl Os for MacOs {
 
     fn browser(&self) -> Option<&dyn Browser> {
         None
+    }
+
+    fn another_copy_runs(&self) -> bool {
+        dl::loaded_elsewhere(
+            c"REMINEDOG_AGENT_MARKER",
+            (&raw const crate::REMINEDOG_AGENT_MARKER).cast(),
+        )
     }
 }

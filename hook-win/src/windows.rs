@@ -8,6 +8,7 @@ use reminedog_render::PointerSpeed;
 use windows_sys::Win32::Foundation::{HMODULE, HWND};
 use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
 use windows_sys::Win32::Graphics::OpenGL::HGLRC;
+use windows_sys::Win32::UI::WindowsAndMessaging::IsIconic;
 
 use crate::{browser, clipboard, ffi, fonts, keys, pointer, startup, wgl};
 
@@ -46,6 +47,13 @@ impl Os for Windows {
             }
         }
         self.current_gl().0
+    }
+
+    /// The window as the OS has it now: a minimized window's GetDC hands out a new temporary
+    /// DC on every call, and SDL3's flag lags until the game polls.
+    fn window_minimized(&self, native_window: Option<usize>) -> Option<bool> {
+        // SAFETY: a window handle (a stale one only answers false).
+        native_window.map(|hwnd| unsafe { IsIconic(hwnd as HWND) } != 0)
     }
 
     fn describe_surface(&self, surface: usize) -> String {

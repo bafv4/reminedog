@@ -22,9 +22,13 @@ while [ "$#" -gt 0 ]; do
     *) echo "build.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
+# Relative to where the script was run, not the repository it changes to.
+case $out in /*) ;; *) out=$PWD/$out ;; esac
 
 cd "$repo"
-target=${CARGO_TARGET_DIR:-$repo/target}
+# Cargo's output folder, wherever its settings put it (CARGO_TARGET_DIR, build.target-dir).
+target=$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+[ -n "$target" ] || { echo "build.sh: cargo metadata gave no target directory" >&2; exit 1; }
 if [ -n "$check" ]; then
   echo "== fmt" && cargo fmt --all --check
   echo "== clippy" && cargo clippy --locked --workspace --all-targets -- -D warnings

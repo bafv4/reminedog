@@ -9,7 +9,8 @@ use reminedog_agent::os::FontFile;
 /// Files tried in order, with the face of Japanese in collections.
 const CANDIDATES: &[(&str, u32)] = &[
     ("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", 0),
-    ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
+    ("/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc", 0),
+    ("/System/Library/Fonts/ヒラギノ丸ゴ ProN W4.ttc", 0),
     ("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 0),
     ("/Library/Fonts/Arial Unicode.ttf", 0),
 ];

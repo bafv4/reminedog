@@ -46,23 +46,63 @@ pub fn read() -> Option<FontFile> {
 /// fontconfig's choice for Japanese sans-serif text: its file and face.
 fn fontconfig() -> Option<(PathBuf, u32)> {
     let output = Command::new("fc-match")
-        .args(["--format=%{file}\n%{index}", "sans-serif:lang=ja"])
+        .args(["--format=%{file}\n%{index}\n%{lang}", "sans-serif:lang=ja"])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
+    let choice = parse_match(&String::from_utf8_lossy(&output.stdout));
+    if choice.is_none() {
+        log::debug!("fonts: fontconfig has no Japanese sans-serif font");
+    }
+    choice
+}
+
+/// fc-match's file, index and languages: the file and face, if the font has Japanese
+/// (fc-match answers its closest font even without one). The index of a variable font's named
+/// instance carries the instance above the face's 16 bits.
+fn parse_match(text: &str) -> Option<(PathBuf, u32)> {
     let mut lines = text.lines();
     let file = lines.next()?.trim();
     let index = lines
         .next()
-        .and_then(|i| i.trim().parse().ok())
-        .unwrap_or(0);
-    (!file.is_empty()).then(|| (PathBuf::from(file), index))
+        .and_then(|i| i.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+        & 0xFFFF;
+    let japanese = lines
+        .next()
+        .is_some_and(|langs| langs.split('|').any(|lang| lang.trim() == "ja"));
+    (!file.is_empty() && japanese).then(|| (PathBuf::from(file), index))
 }
 
 fn file_name(path: &Path) -> String {
     path.file_name()
         .map_or_else(|| "japanese".into(), |n| n.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_match_needs_japanese() {
+        let noto = "/usr/share/fonts/NotoSansCJK-Regular.ttc\n2\nen|ja|ko|zh-cn\n";
+        assert_eq!(
+            parse_match(noto),
+            Some((PathBuf::from("/usr/share/fonts/NotoSansCJK-Regular.ttc"), 2))
+        );
+        let dejavu = "/usr/share/fonts/DejaVuSans.ttf\n0\naa|af|en|fr\n";
+        assert_eq!(parse_match(dejavu), None);
+        assert_eq!(parse_match(""), None);
+    }
+
+    #[test]
+    fn a_named_instance_gives_its_face() {
+        let variable = "/usr/share/fonts/NotoSansCJK-VF.ttc\n131074\nja|ko\n";
+        assert_eq!(
+            parse_match(variable),
+            Some((PathBuf::from("/usr/share/fonts/NotoSansCJK-VF.ttc"), 2))
+        );
+    }
 }

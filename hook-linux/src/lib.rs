@@ -20,6 +20,11 @@ use std::ffi::{CStr, c_char, c_void};
 
 const JNI_OK: i32 = 0;
 
+/// Marks this library among the process's loaded ones, for another copy to find
+/// ([`dl::loaded_elsewhere`]).
+#[unsafe(no_mangle)]
+pub static REMINEDOG_AGENT_MARKER: u8 = 0;
+
 /// JVMTI entry point. The JVM calls it very early during startup, before any Java code
 /// runs and before LWJGL loads GLFW.
 ///

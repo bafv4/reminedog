@@ -66,6 +66,7 @@ pub fn before_frame(game_dir: &Path, window: usize, playing: bool, naming: Namin
     let now = Instant::now();
     let waypoints = state.get_or_insert_with(|| Waypoints::new(game_dir, now));
     waypoints.naming = naming;
+    f3c::hooks_ready();
     if !playing {
         waypoints.in_game_since_poll = false;
     }

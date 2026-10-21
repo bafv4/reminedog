@@ -47,6 +47,17 @@ pub trait Os: Sync {
     fn make_current(&self, surface: usize, context: usize) -> Result<(), String>;
     /// Deletes a context that is not current.
     fn delete_context(&self, context: usize) -> Result<(), String>;
+    /// Whether the overlay's context can be made on this thread; if not, the overlay waits for
+    /// a swap on one that can (macOS: AppKit attaches it to the view on the main thread only,
+    /// and Forge's early loading screen swaps from a thread of its own).
+    fn can_create_context_here(&self) -> bool {
+        true
+    }
+    /// Whether the OS shows `native_window` minimized, where it can tell cheaply; `None` asks
+    /// the window library (Windows answers: SDL3's flag changes only as the game polls).
+    fn window_minimized(&self, _native_window: Option<usize>) -> Option<bool> {
+        None
+    }
 
     /// Whether the system reports the key or mouse button as up now; false when it cannot
     /// tell (the safety net for releases the game never got, [`crate::rebind_state`]).

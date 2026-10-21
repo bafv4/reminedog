@@ -66,11 +66,20 @@ const GL_DRAW_FRAMEBUFFER: u32 = 0x8CA9;
 const GL_DRAW_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
 const GL_READ_FRAMEBUFFER_BINDING: u32 = 0x8CAA;
 
-/// The JVM's own natives of LWJGL's GL functions, once replaced by ours.
-static JNI_BIND_FRAMEBUFFER: OnceLock<JniBindFramebufferFn> = OnceLock::new();
-static JNI_BIND_FRAMEBUFFER_EXT: OnceLock<JniBindFramebufferFn> = OnceLock::new();
-static JNI_BLIT_NAMED_FRAMEBUFFER: OnceLock<JniBlitNamedFramebufferFn> = OnceLock::new();
-static JNI_VIEWPORT: OnceLock<JniViewportFn> = OnceLock::new();
+/// Natives of one GL function LWJGL may have in more than one class (3.1: `GL30` and
+/// `ARBFramebufferObject` each have `glBindFramebuffer`, `GL45` and `ARBDirectStateAccess`
+/// `glBlitNamedFramebuffer`; 3.2 and later one class each).
+const NATIVES: usize = 2;
+
+/// The JVM's own natives of LWJGL's GL functions, once replaced by ours (each by our wrapper
+/// of the same index).
+static JNI_BIND_FRAMEBUFFER: [OnceLock<JniBindFramebufferFn>; NATIVES] =
+    [const { OnceLock::new() }; NATIVES];
+static JNI_BIND_FRAMEBUFFER_EXT: [OnceLock<JniBindFramebufferFn>; NATIVES] =
+    [const { OnceLock::new() }; NATIVES];
+static JNI_BLIT_NAMED_FRAMEBUFFER: [OnceLock<JniBlitNamedFramebufferFn>; NATIVES] =
+    [const { OnceLock::new() }; NATIVES];
+static JNI_VIEWPORT: [OnceLock<JniViewportFn>; NATIVES] = [const { OnceLock::new() }; NATIVES];
 /// The game got our `glViewport`, so the tall size can be confirmed.
 static VIEWPORT_WRAPPED: AtomicBool = AtomicBool::new(false);
 
@@ -171,36 +180,72 @@ static REAL_RESIZED: AtomicBool = AtomicBool::new(false);
 /// Our native in place of LWJGL's `name` (with this JNI signature), the JVM's own `address`
 /// kept to call; `None` for the natives the zoom does not watch.
 pub fn wrap_native(name: &str, signature: &str, address: *const c_void) -> Option<*const c_void> {
-    /// Stores the JVM's native; one class has each of these natives (LWJGL 3.2 to 3.4).
-    fn keep<F: Copy>(slot: &OnceLock<F>, name: &str, address: *const c_void) -> bool {
-        // SAFETY: `F` is the JNI fn type of `name`, and `address` its native.
-        let f = unsafe { std::mem::transmute_copy::<*const c_void, F>(&address) };
-        if slot.set(f).is_err() {
-            log::warn!("zoom: another native of {name} is bound; it is left alone");
-            return false;
-        }
-        true
-    }
     let wrapper = match (name, signature) {
-        ("glBindFramebuffer", "(II)V") => keep(&JNI_BIND_FRAMEBUFFER, name, address)
-            .then_some(jni_bind_framebuffer as *const c_void),
-        ("glBindFramebufferEXT", "(II)V") => keep(&JNI_BIND_FRAMEBUFFER_EXT, name, address)
-            .then_some(jni_bind_framebuffer_ext as *const c_void),
+        ("glBindFramebuffer", "(II)V") => keep(&JNI_BIND_FRAMEBUFFER, name, address).map(|i| {
+            [
+                jni_bind_framebuffer::<0> as *const c_void,
+                jni_bind_framebuffer::<1> as *const c_void,
+            ][i]
+        }),
+        ("glBindFramebufferEXT", "(II)V") => {
+            keep(&JNI_BIND_FRAMEBUFFER_EXT, name, address).map(|i| {
+                [
+                    jni_bind_framebuffer_ext::<0> as *const c_void,
+                    jni_bind_framebuffer_ext::<1> as *const c_void,
+                ][i]
+            })
+        }
         ("glBlitNamedFramebuffer", "(IIIIIIIIIIII)V") => {
-            keep(&JNI_BLIT_NAMED_FRAMEBUFFER, name, address)
-                .then_some(jni_blit_named_framebuffer as *const c_void)
+            keep(&JNI_BLIT_NAMED_FRAMEBUFFER, name, address).map(|i| {
+                [
+                    jni_blit_named_framebuffer::<0> as *const c_void,
+                    jni_blit_named_framebuffer::<1> as *const c_void,
+                ][i]
+            })
         }
         ("glViewport", "(IIII)V") => {
             let kept = keep(&JNI_VIEWPORT, name, address);
-            if kept {
+            if kept.is_some() {
                 VIEWPORT_WRAPPED.store(true, Ordering::Relaxed);
             }
-            kept.then_some(jni_viewport as *const c_void)
+            kept.map(|i| {
+                [
+                    jni_viewport::<0> as *const c_void,
+                    jni_viewport::<1> as *const c_void,
+                ][i]
+            })
         }
         _ => None,
     }?;
     log::info!("zoom: LWJGL's {name} native goes through the agent");
     Some(wrapper)
+}
+
+/// Keeps the JVM's native `address` of `name` in the first free slot, or finds it kept already
+/// (the JVM binds a method again when two threads link it at once): the slot's index, for the
+/// wrapper of that index. `None` once the slots are full of other natives.
+fn keep<F: Copy>(
+    slots: &[OnceLock<F>; NATIVES],
+    name: &str,
+    address: *const c_void,
+) -> Option<usize> {
+    // SAFETY: `F` is the JNI fn type of `name`, and `address` its native.
+    let native = unsafe { std::mem::transmute_copy::<*const c_void, F>(&address) };
+    for (i, slot) in slots.iter().enumerate() {
+        // The first to come takes a free slot; a taken one holds this native or another.
+        let kept = slot.get_or_init(|| native);
+        // SAFETY: a fn pointer, compared by address.
+        if unsafe { std::mem::transmute_copy::<F, *const c_void>(kept) } == address {
+            return Some(i);
+        }
+    }
+    log::warn!("zoom: a further native of {name} is bound; it is left alone");
+    None
+}
+
+/// Whether the game has called any of these natives (the JVM binds a native at its first call).
+fn bound<F>(slots: &[OnceLock<F>; NATIVES]) -> bool {
+    slots.iter().any(|slot| slot.get().is_some())
 }
 
 /// The framebuffer to bind for the game's `glBindFramebuffer(target, framebuffer)`.
@@ -236,34 +281,34 @@ fn note_viewport(width: i32, height: i32) {
     }
 }
 
-unsafe extern "system" fn jni_bind_framebuffer(
+unsafe extern "system" fn jni_bind_framebuffer<const I: usize>(
     env: *mut c_void,
     class: *mut c_void,
     target: u32,
     framebuffer: u32,
 ) {
     let framebuffer = bind_target(target, framebuffer);
-    if let Some(native) = JNI_BIND_FRAMEBUFFER.get() {
+    if let Some(native) = JNI_BIND_FRAMEBUFFER[I].get() {
         // SAFETY: the JVM's arguments, with our framebuffer for 0.
         unsafe { native(env, class, target, framebuffer) }
     }
 }
 
-unsafe extern "system" fn jni_bind_framebuffer_ext(
+unsafe extern "system" fn jni_bind_framebuffer_ext<const I: usize>(
     env: *mut c_void,
     class: *mut c_void,
     target: u32,
     framebuffer: u32,
 ) {
     let framebuffer = bind_target_ext(target, framebuffer);
-    if let Some(native) = JNI_BIND_FRAMEBUFFER_EXT.get() {
+    if let Some(native) = JNI_BIND_FRAMEBUFFER_EXT[I].get() {
         // SAFETY: as above.
         unsafe { native(env, class, target, framebuffer) }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe extern "system" fn jni_blit_named_framebuffer(
+unsafe extern "system" fn jni_blit_named_framebuffer<const I: usize>(
     env: *mut c_void,
     class: *mut c_void,
     read: u32,
@@ -279,7 +324,7 @@ unsafe extern "system" fn jni_blit_named_framebuffer(
     mask: u32,
     filter: u32,
 ) {
-    if let Some(native) = JNI_BLIT_NAMED_FRAMEBUFFER.get() {
+    if let Some(native) = JNI_BLIT_NAMED_FRAMEBUFFER[I].get() {
         // SAFETY: as above.
         unsafe {
             native(
@@ -302,7 +347,7 @@ unsafe extern "system" fn jni_blit_named_framebuffer(
     }
 }
 
-unsafe extern "system" fn jni_viewport(
+unsafe extern "system" fn jni_viewport<const I: usize>(
     env: *mut c_void,
     class: *mut c_void,
     x: i32,
@@ -311,7 +356,7 @@ unsafe extern "system" fn jni_viewport(
     height: i32,
 ) {
     note_viewport(width, height);
-    if let Some(native) = JNI_VIEWPORT.get() {
+    if let Some(native) = JNI_VIEWPORT[I].get() {
         // SAFETY: the JVM's arguments.
         unsafe { native(env, class, x, y, width, height) }
     }
@@ -585,7 +630,7 @@ impl TallZoom {
         if context == 0 {
             return fallback;
         }
-        if JNI_BIND_FRAMEBUFFER.get().is_none() && JNI_BIND_FRAMEBUFFER_EXT.get().is_none() {
+        if !bound(&JNI_BIND_FRAMEBUFFER) && !bound(&JNI_BIND_FRAMEBUFFER_EXT) {
             self.failure = Some((
                 "ゲームの OpenGL の関数をフックできなかった（ゲームを再起動すると試し直す）".into(),
                 false,
@@ -883,5 +928,39 @@ impl SavedState {
             let [r, g, b, a] = self.color_mask;
             gl.color_mask(r, g, b, a);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Three distinct natives (different bodies, so never folded into one address).
+    unsafe extern "system" fn native_a(_: *mut c_void, _: *mut c_void, _: u32, _: u32) {
+        std::hint::black_box(1);
+    }
+    unsafe extern "system" fn native_b(_: *mut c_void, _: *mut c_void, _: u32, _: u32) {
+        std::hint::black_box(2);
+    }
+    unsafe extern "system" fn native_c(_: *mut c_void, _: *mut c_void, _: u32, _: u32) {
+        std::hint::black_box(3);
+    }
+
+    #[test]
+    fn each_class_native_gets_a_wrapper_of_its_own() {
+        let slots: [OnceLock<JniBindFramebufferFn>; NATIVES] = [const { OnceLock::new() }; NATIVES];
+        let (a, b, c) = (
+            native_a as *const c_void,
+            native_b as *const c_void,
+            native_c as *const c_void,
+        );
+        assert!(!bound(&slots));
+        assert_eq!(keep(&slots, "glBindFramebuffer", a), Some(0));
+        // LWJGL 3.1: the same function in a second class.
+        assert_eq!(keep(&slots, "glBindFramebuffer", b), Some(1));
+        // The first one bound again: its wrapper again.
+        assert_eq!(keep(&slots, "glBindFramebuffer", a), Some(0));
+        assert_eq!(keep(&slots, "glBindFramebuffer", c), None);
+        assert!(bound(&slots));
     }
 }

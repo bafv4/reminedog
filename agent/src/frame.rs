@@ -86,7 +86,11 @@ pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
     // A minimized window has nothing to draw on (on Windows, GetDC hands out a new temporary
     // DC on every call instead of the window's own one); skip the frame and keep the overlay.
     // A zoom ends: the game would go on drawing its tall frames unseen.
-    if ws.minimized(window) {
+    let os = os::get();
+    let minimized = os
+        .window_minimized(ws.native_window(window))
+        .unwrap_or_else(|| ws.minimized(window));
+    if minimized {
         if let Ok(mut state) = STATE.try_lock()
             && let State::Ready(runtime) = &mut *state
             && runtime.window == window as usize
@@ -113,6 +117,8 @@ pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
         // A hidden helper window (some mods create one) never gets the overlay; wait for a
         // visible one.
         State::Uninit if !ws.is_visible(window) => State::Uninit,
+        // Nor before a swap on a thread that can make the overlay's context.
+        State::Uninit if !os.can_create_context_here() => State::Uninit,
         State::Uninit => match Runtime::create(ws, window, agent) {
             Ok(runtime) => run_frame(runtime, ws, window, agent),
             Err(e) => {
@@ -678,24 +684,42 @@ impl Runtime {
     }
 }
 
-/// `path` for the screen, with the user's folders as `%APPDATA%` and the like: the status
-/// can be on the screen while streaming, and the full path has the user's name.
+/// `path` for the screen, with the user's folders as `%APPDATA%` and the like (Windows) or
+/// the home folder as `~` (Linux, macOS): the status can be on the screen while streaming, and
+/// the full path has the user's name.
 fn screen_path(path: &std::path::Path) -> String {
-    let text = path.display().to_string();
-    for var in ["APPDATA", "LOCALAPPDATA", "USERPROFILE"] {
-        let Some(dir) = std::env::var_os(var).filter(|dir| !dir.is_empty()) else {
+    hide_user(&path.display().to_string(), |var| {
+        std::env::var(var).ok().filter(|dir| !dir.is_empty())
+    })
+}
+
+/// `text` (a path) with the first of the user's folders it is in replaced by its name;
+/// `var` reads an environment variable.
+fn hide_user(text: &str, var: impl Fn(&str) -> Option<String>) -> String {
+    for name in ["APPDATA", "LOCALAPPDATA", "USERPROFILE"] {
+        let Some(dir) = var(name) else {
             continue;
         };
-        let dir = dir.to_string_lossy();
         let dir = dir.trim_end_matches('\\');
         if let Some(head) = text.get(..dir.len())
             && head.eq_ignore_ascii_case(dir)
             && (text.len() == dir.len() || text[dir.len()..].starts_with('\\'))
         {
-            return format!("%{var}%{}", &text[dir.len()..]);
+            return format!("%{name}%{}", &text[dir.len()..]);
         }
     }
-    text
+    // Unix paths: case matters, and "/" is the only separator. (Git's shells set HOME on
+    // Windows too; the folders above come first there.)
+    if let Some(home) = var("HOME") {
+        let home = home.trim_end_matches('/');
+        if !home.is_empty()
+            && let Some(rest) = text.strip_prefix(home)
+            && (rest.is_empty() || rest.starts_with('/'))
+        {
+            return format!("~{rest}");
+        }
+    }
+    text.to_owned()
 }
 
 /// The menu's note about a settings file that was not read as it is.
@@ -755,5 +779,51 @@ fn rebinds_summary(settings: &Settings) -> String {
         format!("rebinds {}", settings.rebinds.len())
     } else {
         format!("rebinds off ({})", settings.rebinds.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hide_user;
+
+    fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            vars.iter()
+                .find(|(var, _)| *var == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    #[test]
+    fn windows_folders_hide_the_user_name() {
+        let vars = [
+            ("APPDATA", r"C:\Users\Alice\AppData\Roaming"),
+            ("USERPROFILE", r"C:\Users\Alice"),
+            ("HOME", "/c/Users/Alice"),
+        ];
+        assert_eq!(
+            hide_user(r"c:\users\alice\AppData\Roaming\.minecraft", env(&vars)),
+            r"%APPDATA%\.minecraft"
+        );
+        assert_eq!(
+            hide_user(r"C:\Users\Alice\games\mc", env(&vars)),
+            r"%USERPROFILE%\games\mc"
+        );
+        assert_eq!(hide_user(r"D:\mc", env(&vars)), r"D:\mc");
+    }
+
+    #[test]
+    fn the_home_folder_becomes_a_tilde() {
+        let vars = [("HOME", "/home/alice/")];
+        assert_eq!(
+            hide_user("/home/alice/.local/share/PrismLauncher", env(&vars)),
+            "~/.local/share/PrismLauncher"
+        );
+        assert_eq!(hide_user("/home/alice", env(&vars)), "~");
+        // Another user's folder that only starts with the same letters.
+        assert_eq!(hide_user("/home/alice2/mc", env(&vars)), "/home/alice2/mc");
+        assert_eq!(hide_user("/srv/mc", env(&vars)), "/srv/mc");
+        // A home of "/" hides nothing.
+        assert_eq!(hide_user("/srv/mc", env(&[("HOME", "/")])), "/srv/mc");
     }
 }

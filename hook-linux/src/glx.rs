@@ -70,7 +70,8 @@ static X_ERROR: AtomicI32 = AtomicI32::new(0);
 /// Serializes [`trap_x_errors`] (the error handler is process-wide).
 static TRAP: Mutex<()> = Mutex::new(());
 /// The (drawable, context) pairs made current once without an X error: switching between them
-/// again (twice a frame) skips the error trap and its round trip to the X server.
+/// again on the drawable current now (twice a frame) skips the error trap and its round trip to
+/// the X server.
 static SWITCHED: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
 
 fn get() -> Result<&'static Glx, String> {
@@ -239,7 +240,12 @@ pub fn make_current(drawable: usize, context: usize) -> Result<(), String> {
     };
     let pair = (drawable, context);
     let mut switched = SWITCHED.lock().unwrap_or_else(|e| e.into_inner());
-    let made = if switched.contains(&pair) {
+    // Only a switch on the drawable current now (the swap's, which exists) skips the trap: a
+    // pair known before may name a drawable since destroyed (the overlay's teardown after the
+    // game's drawable changed), and an untrapped X error ends the process.
+    // SAFETY: a plain query.
+    let on_current = drawable != 0 && unsafe { (glx.get_current_drawable)() } as usize == drawable;
+    let made = if on_current && switched.contains(&pair) {
         switch()
     } else {
         let made = trap_x_errors(glx, display, switch)?;

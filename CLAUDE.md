@@ -86,12 +86,14 @@ hook-linux/ Linux のエージェント（libreminedog_linux.so。hook-win が L
   lib.rs       Agent_OnLoad（オプションの文字列を読んで agent::start へ）
   linux.rs     Linux の Os（dlsym・dlinfo、glfwGetX11Window・SDL.window.x11.window、GLX、fonts）。物理のキーの状態・クリップボード・ポインターの速度はまだ読まない。ブラウザはない
   glx.rs       GLX（ゲームが読み込んだ libGL・libX11 から引く）：今のコンテキストと描画先、ゲームのコンテキストの GLX_FBCONFIG_ID で自前のコンテキストを作る、
-               切り替え・削除。Xlib の既定のエラー処理はプロセスを終えるので、失敗しうる呼び出しは自前のエラー処理の下で行う（trap_x_errors。切り替えは、一度成功した描画先とコンテキストの組なら省く）
+               切り替え・削除。Xlib の既定のエラー処理はプロセスを終えるので、失敗しうる呼び出しは自前のエラー処理の下で行う（trap_x_errors。今の描画先への切り替えは、一度成功した組なら省く。
+               古い描画先への切り替え（描画先が変わった後の後片付け）は省かない）
   dl.rs        dlsym、dlinfo（ライブラリのパス）、RTLD_NOLOAD で読み込み済みのライブラリ
   fonts.rs     日本語フォント（fc-match の sans-serif:lang=ja、なければ Noto Sans CJK・IPA ゴシックのよくある場所）を読む
 hook-macos/ macOS のエージェント（libreminedog_macos.dylib。試作）：agent に macOS の Os を渡す
   lib.rs       Agent_OnLoad（オプションの文字列を読んで agent::start へ）
-  macos.rs     macOS の Os（dlsym、glfwGetCocoaWindow・SDL.window.cocoa.window の NSWindow、NSOpenGLContext、NSPasteboard、fonts）。物理のキーの状態・ポインターの速度はまだ読まない。ブラウザはない
+  macos.rs     macOS の Os（dlsym、glfwGetCocoaWindow・SDL.window.cocoa.window の NSWindow、NSOpenGLContext、NSPasteboard、fonts）。自前のコンテキストはメインスレッドでだけ作る（can_create_context_here）。
+               物理のキーの状態・ポインターの速度はまだ読まない。ブラウザはない
   nsgl.rs      NSOpenGLContext：今のコンテキストとそのビュー（描画先）、ゲームのコンテキストのピクセルフォーマットで自前のコンテキストを作って同じビューに付ける、
                切り替え（前のコンテキストを glFlush、ビューの大きさが変わったら update）・削除。GL の関数は OpenGL.framework の export。AppKit はメインスレッドで触る
   objc.rs      Objective-C のランタイム（クラス、セレクタ、objc_msgSend、NSRect を返すとき、autorelease pool）。AppKit のクラスはゲームが読み込んでから名前で引く
@@ -133,7 +135,7 @@ cd installer; .\gradlew.bat build                  # インストーラーのテ
 - MSVC では CRT を静的にリンクする（`.cargo/config.toml` の `+crt-static`。Java 8 に vcruntime140 がないため）
 - Linux（Docker。手元は Docker Desktop と WSL2）：`scripts/linux/run.sh <コマンド>` で、`scripts/linux/Dockerfile` のコンテナ（Java 25、CI と同じ Rust、Xvfb、Mesa の llvmpipe）の中で動かす。
   リポジトリは `/src`、ビルドの出力は `/target`（Docker のボリューム）。`scripts/linux/run.sh cargo test -p reminedog-agent`、
-  `scripts/linux/run.sh scripts/linux/smoke.sh --agent /target/release/<.so> [--sdl --lwjgl 3.4.3] -- --seconds=5 --mc`（LWJGL の natives-linux の jar は `ci/smoke/fetch-lwjgl.sh` が `LWJGL_NATIVES=natives-linux` で取る）。
+  `scripts/linux/run.sh scripts/linux/smoke.sh --agent /target/release/<.so> [--sdl --lwjgl 3.4.3] -- --seconds=5 --mc`（作業フォルダとログは `/target/smoke-run`。コンテナが消えても残る。LWJGL の natives-linux の jar は `ci/smoke/fetch-lwjgl.sh` が `LWJGL_NATIVES=natives-linux` で取る）。
   Docker Desktop が止まっていると動かない（利用者に起動してもらう）。シェルスクリプトと Dockerfile は `.gitattributes` で LF。
   Linux のエージェントは `scripts/linux/run.sh cargo build --release -p reminedog-hook-linux`（`/target/release/libreminedog_linux.so`）。
   キーは `smoke.sh --xdotool "key j sleep 2 keydown z sleep 1.5 keyup z" -- --seconds=10 --mc --capture --world=test` のように送る（ウィンドウマネージャがないので、GLFW のウィンドウは名前で探してフォーカスを移す。

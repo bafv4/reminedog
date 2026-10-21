@@ -41,6 +41,31 @@ pub fn path(library: usize) -> Option<String> {
     None
 }
 
+/// Whether a loaded image other than this library exports `symbol` (another copy of the agent,
+/// from another folder: dyld loads each path as its own image).
+pub fn loaded_elsewhere(symbol: &CStr, ours: *const c_void) -> bool {
+    // SAFETY: dyld's image list; RTLD_NOLOAD only looks an image up, and the reference it takes
+    // is dropped again.
+    unsafe {
+        for i in 0.._dyld_image_count() {
+            let name = _dyld_get_image_name(i);
+            if name.is_null() {
+                continue;
+            }
+            let handle = libc::dlopen(name, libc::RTLD_LAZY | libc::RTLD_NOLOAD);
+            if handle.is_null() {
+                continue;
+            }
+            let found = libc::dlsym(handle, symbol.as_ptr());
+            libc::dlclose(handle);
+            if !found.is_null() && found.cast_const() != ours {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// A library the process has already loaded (never loads one), as a handle.
 pub fn loaded(name: &CStr) -> Option<usize> {
     // SAFETY: RTLD_NOLOAD only looks the library up; the handle stays valid for the process

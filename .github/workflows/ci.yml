@@ -99,12 +99,16 @@ jobs:
           SMOKE_CACHE: ${{ runner.temp }}/smoke-cache
           SMOKE_RUN: ${{ runner.temp }}/smoke-run
           SMOKE_TIMEOUT: "90"
+        # bash with pipefail: the harness's exit status (a crash or hang at exit) survives tee.
+        shell: bash
         run: |
+          status=0
           bash scripts/linux/smoke.sh ${{ matrix.sdl }} --lwjgl ${{ matrix.lwjgl }} \
             --agent "$PWD/dist/linux/libreminedog_linux.so" --agent-options log=debug \
             --xdotool "key j sleep 2 keydown z sleep 1.5 keyup z sleep 0.5" \
-            -- --seconds=10 --mc --capture --world=citest | tee "$RUNNER_TEMP/smoke.txt"
+            -- --seconds=10 --mc --capture --world=citest | tee "$RUNNER_TEMP/smoke.txt" || status=$?
           fail=0
+          [ "$status" -eq 0 ] || { echo "::error::the harness exited with $status"; fail=1; }
           grep -qF "SMOKE OK" "$RUNNER_TEMP/smoke.txt" || { echo "::error::the harness did not print 'SMOKE OK'"; fail=1; }
           log=$SMOKE_RUN/reminedog/reminedog.log
           IFS='|' read -ra markers <<<"agent loaded|hooks installed|handed the agent's hook|LWJGL's glBindFramebuffer native goes through the agent|overlay: first frame rendered|F3+C: clipboard hooks ready|waypoint 1 recorded|zoom: game renders at"
@@ -118,7 +122,13 @@ jobs:
           exit "$fail"
       - name: Show the agent log
         if: always()
-        run: cat "$RUNNER_TEMP/smoke-run/reminedog/reminedog.log" 2>/dev/null || true
+        run: |
+          cat "$RUNNER_TEMP/smoke-run/reminedog/reminedog.log" 2>/dev/null || true
+          # A JVM crash (e.g. in the agent) leaves hs_err_pid*.log in the working directory.
+          for crash in "$RUNNER_TEMP"/smoke-run/hs_err_pid*.log; do
+            [ -f "$crash" ] && { echo "== $crash"; cat "$crash"; }
+          done
+          true
 
   # The macOS agent (hook-macos, a prototype): clippy and the tests on macOS, then the LWJGL
   # smoke harness in the runner's session (Apple silicon: LWJGL 3.3 and later). Only SDL3: the
@@ -164,11 +174,15 @@ jobs:
           SMOKE_CACHE: ${{ runner.temp }}/smoke-cache
           SMOKE_RUN: ${{ runner.temp }}/smoke-run
           SMOKE_TIMEOUT: "90"
+        # bash with pipefail: the harness's exit status (a crash or hang at exit) survives tee.
+        shell: bash
         run: |
+          status=0
           bash scripts/macos/smoke.sh ${{ matrix.sdl }} --lwjgl ${{ matrix.lwjgl }} \
             --agent "$PWD/dist/macos/libreminedog_macos.dylib" --agent-options log=debug \
-            --grab 4 -- --seconds=6 --mc --world=citest --screenshot | tee "$RUNNER_TEMP/smoke.txt"
+            --grab 4 -- --seconds=6 --mc --world=citest --screenshot | tee "$RUNNER_TEMP/smoke.txt" || status=$?
           fail=0
+          [ "$status" -eq 0 ] || { echo "::error::the harness exited with $status"; fail=1; }
           grep -qF "SMOKE OK" "$RUNNER_TEMP/smoke.txt" || { echo "::error::the harness did not print 'SMOKE OK'"; fail=1; }
           log=$SMOKE_RUN/reminedog/reminedog.log
           IFS='|' read -ra markers <<<"agent loaded|hooks installed|handed the agent's hook|LWJGL's glBindFramebuffer native goes through the agent|overlay: first frame rendered|F3+C: clipboard hooks ready"
@@ -182,7 +196,12 @@ jobs:
           exit "$fail"
       - name: Show the agent log
         if: always()
-        run: cat "$RUNNER_TEMP/smoke-run/reminedog/reminedog.log" 2>/dev/null || true
+        run: |
+          cat "$RUNNER_TEMP/smoke-run/reminedog/reminedog.log" 2>/dev/null || true
+          for crash in "$RUNNER_TEMP"/smoke-run/hs_err_pid*.log; do
+            [ -f "$crash" ] && { echo "== $crash"; cat "$crash"; }
+          done
+          true
       # The screen while the harness ran (the overlay's hint should show) and the back buffer
       # after its last swap.
       - name: Upload the screen and the log
@@ -194,6 +213,7 @@ jobs:
             ${{ runner.temp }}/smoke-run/*.png
             ${{ runner.temp }}/smoke-run/reminedog/
             ${{ runner.temp }}/smoke-run/*.txt
+            ${{ runner.temp }}/smoke-run/hs_err_pid*.log
           if-no-files-found: warn
           retention-days: 14
 

@@ -91,4 +91,11 @@ impl Os for Linux {
     fn browser(&self) -> Option<&dyn Browser> {
         None
     }
+
+    fn another_copy_runs(&self) -> bool {
+        dl::loaded_elsewhere(
+            c"REMINEDOG_AGENT_MARKER",
+            (&raw const crate::REMINEDOG_AGENT_MARKER).cast(),
+        )
+    }
 }

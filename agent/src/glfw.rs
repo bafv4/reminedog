@@ -5,7 +5,8 @@
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use reminedog_core::{
     InputId, Naming, glfw_button_of, glfw_key_of, input_from_glfw_button, input_from_glfw_key,
@@ -68,9 +69,23 @@ impl WindowSystem for Glfw {
         (native != 0).then_some(native)
     }
 
+    /// Asked on every swap where the OS cannot tell; GLFW asks the X server on X11 (a round
+    /// trip), so the answer is kept for a moment.
     fn minimized(&self, window: *mut c_void) -> bool {
+        static LAST: Mutex<Option<(usize, Instant, bool)>> = Mutex::new(None);
+        const KEPT: Duration = Duration::from_millis(250);
+        let now = Instant::now();
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((of, at, minimized)) = *last
+            && of == window as usize
+            && now.duration_since(at) < KEPT
+        {
+            return minimized;
+        }
         // SAFETY: as above.
-        unsafe { (self.get_window_attrib)(window, GLFW_ICONIFIED) != 0 }
+        let minimized = unsafe { (self.get_window_attrib)(window, GLFW_ICONIFIED) != 0 };
+        *last = Some((window as usize, now, minimized));
+        minimized
     }
 
     fn is_visible(&self, window: *mut c_void) -> bool {
@@ -168,8 +183,10 @@ pub fn attach(module: usize, path: &str) {
     }
     match install(module, path) {
         Ok(glfw) => {
-            log::info!("GLFW hooks installed: {path}");
             let _ = GLFW.set(glfw);
+            // Hooked only now, all set up: other threads hand out the hooks from here on.
+            MODULE.store(module, Ordering::Release);
+            log::info!("GLFW hooks installed: {path}");
         }
         Err(e) => log::error!("cannot hook GLFW ({path}): {e}"),
     }
@@ -200,7 +217,6 @@ fn install(module: usize, path: &str) -> Result<Glfw, String> {
         }
     };
 
-    MODULE.store(module, Ordering::Release);
     crate::glfw_input::install(module);
     Ok(glfw)
 }

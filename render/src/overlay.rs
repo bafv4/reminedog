@@ -1093,6 +1093,16 @@ pub fn gl_summary(gl: &glow::Context) -> String {
 fn font_definitions(fonts: Vec<FontSource>) -> FontDefinitions {
     let mut defs = FontDefinitions::default();
     for font in fonts {
+        // egui panics on a font it cannot parse (on the first frame, which turns the overlay
+        // off for the process): a wrong face index, a format it does not read.
+        if let Err(e) = skrifa::FontRef::from_index(&font.data, font.index) {
+            log::warn!(
+                "font {} (face {}) cannot be read ({e}); egui's fonts only",
+                font.name,
+                font.index
+            );
+            continue;
+        }
         // Japanese fonts sit high in egui's rows (above the check boxes) without this.
         let tweak = font_metrics::centering_tweak(&font.data, font.index);
         log::debug!(
@@ -1483,20 +1493,45 @@ mod tests {
         assert!((fps.value - 120.0).abs() < 1.0, "{}", fps.value);
     }
 
+    /// A font egui reads: one of its own.
+    fn readable_font() -> Cow<'static, [u8]> {
+        let defs = FontDefinitions::default();
+        let data = defs.font_data.values().next().expect("egui has fonts");
+        Cow::Owned(data.font.to_vec())
+    }
+
     #[test]
     fn japanese_font_leads_proportional_and_backs_up_monospace() {
         let defs = font_definitions(vec![FontSource {
             name: "jp".into(),
-            data: Cow::Borrowed(&[]),
-            index: 1,
+            data: readable_font(),
+            index: 0,
         }]);
-        assert_eq!(defs.font_data["jp"].index, 1);
+        assert_eq!(defs.font_data["jp"].index, 0);
         let proportional = &defs.families[&FontFamily::Proportional];
         assert_eq!(proportional.first().map(String::as_str), Some("jp"));
         assert!(proportional.len() > 1, "egui's fonts remain as fallbacks");
         let monospace = &defs.families[&FontFamily::Monospace];
         assert_eq!(monospace.last().map(String::as_str), Some("jp"));
         assert!(monospace.len() > 1, "egui's monospace font stays first");
+    }
+
+    #[test]
+    fn unreadable_fonts_are_left_out() {
+        let defaults = FontDefinitions::default();
+        for (data, index) in [
+            (Cow::Borrowed(&b"not a font"[..]), 0),
+            // A plain font has face 0 only (fontconfig's named instances carry more bits).
+            (readable_font(), 0x10000),
+        ] {
+            let defs = font_definitions(vec![FontSource {
+                name: "jp".into(),
+                data,
+                index,
+            }]);
+            assert!(!defs.font_data.contains_key("jp"));
+            assert_eq!(defs.families, defaults.families);
+        }
     }
 
     fn state() -> UiState {

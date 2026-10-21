@@ -295,7 +295,16 @@ pub fn install(module: usize) {
         let _ = GET_KEY_SCANCODE
             .set(unsafe { std::mem::transmute::<*const c_void, GetKeyScancodeFn>(f) });
     }
-    f3c::set_hooks_ready(real_get_key().is_some());
+    f3c::set_hooks(f3c_hooks_ready);
+}
+
+/// What F3+C needs: the game's key callback and clipboard writes through the hooks (LWJGL
+/// looks every GLFW function up at once), and the real key state.
+fn f3c_hooks_ready() -> bool {
+    SET_KEY.get().is_some()
+        && SET_CLIPBOARD_STRING.get().is_some()
+        && GET_KEY.get().is_some()
+        && real_get_key().is_some()
 }
 
 fn modifiers(mods: c_int) -> reminedog_render::Modifiers {
@@ -763,6 +772,11 @@ fn send_f3c(window: *mut c_void, purpose: Purpose, modifier: c_int, copy: c_int)
         Injected::Captured => {}
         // The game handled the keys; only its text was not a location.
         Injected::Written => f3c::fail(purpose, Failure::Unreadable),
+        // The game's copy did not come through a hook: whatever it wrote, it did not refuse
+        // (and the debug overlay was not toggled).
+        Injected::Nothing if SET_CLIPBOARD_STRING.get().is_none() => {
+            f3c::fail(purpose, Failure::NoHooks);
+        }
         Injected::Nothing => {
             if burst.press_modifier() {
                 burst.release_modifier();
