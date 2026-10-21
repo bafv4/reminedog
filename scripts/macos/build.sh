@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# On a Mac: builds the macOS agent (libreminedog_macos.dylib, a prototype) in release, as one
-# library for both Apple silicon and Intel (lipo), optionally with the installer's jar, into
-# dist/macos. Needs Rust with both targets (rustup target add aarch64-apple-darwin
-# x86_64-apple-darwin) and the Xcode command line tools; the installer needs a JDK 17 or later.
+# Mac で：macOS のエージェント（libreminedog_macos.dylib。試作）を、Apple silicon と Intel の両方の
+# 1 つのライブラリ（lipo）としてリリースでビルドし、必要ならインストーラーの jar と一緒に
+# dist/macos に出す。両方のターゲットのある Rust（rustup target add aarch64-apple-darwin
+# x86_64-apple-darwin）と Xcode のコマンドラインツールが要る。インストーラーには JDK 17 以降が要る。
 #
-# Usage: build.sh [--check] [--installer] [--native] [--out DIR]
-#   --check      first fmt (check only), clippy (warnings are errors) and the tests, as the CI
-#   --installer  also build the installer (its tests and reminedog-installer.jar)
-#   --native     only for this Mac's architecture (no lipo, no second target needed)
-#   --out DIR    where the files go (default: dist/macos in the repository)
-# REMINEDOG_VERSION, when set, is the version in the library and the jar (as the release
-# workflow sets it); the library keeps its plain name, the jar is reminedog-installer-<version>.jar.
+# 使い方：build.sh [--check] [--installer] [--native] [--out DIR]
+#   --check      CI と同じく、先に fmt（確認だけ）、clippy（警告はエラー）、テスト
+#   --installer  インストーラーもビルドする（そのテストと reminedog-installer.jar）
+#   --native     この Mac のアーキテクチャだけ（lipo なし、2 つ目のターゲットは要らない）
+#   --out DIR    ファイルの出力先（既定：リポジトリの dist/macos）
+# REMINEDOG_VERSION を設定すれば、それがライブラリと jar の版になる（リリースのワークフローと
+# 同じ）。ライブラリの名前はそのまま、jar は reminedog-installer-<version>.jar。
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -24,11 +24,11 @@ while [ "$#" -gt 0 ]; do
     *) echo "build.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
-# Relative to where the script was run, not the repository it changes to.
+# 移った先のリポジトリではなく、スクリプトを動かした場所からの相対。
 case $out in /*) ;; *) out=$PWD/$out ;; esac
 
 cd "$repo"
-# Cargo's output folder, wherever its settings put it (CARGO_TARGET_DIR, build.target-dir).
+# Cargo の出力のフォルダ（設定がどこに置いていても。CARGO_TARGET_DIR、build.target-dir）。
 target=$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 [ -n "$target" ] || { echo "build.sh: cargo metadata gave no target directory" >&2; exit 1; }
 name=libreminedog_macos.dylib
@@ -61,7 +61,7 @@ else
   lipo -create -output "$lib" "${slices[@]}"
   lipo -info "$lib"
 fi
-# The JVM looks the entry point up by name.
+# JVM は入口を名前で引く。
 if ! nm -gU "$lib" | grep -qw _Agent_OnLoad; then
   echo "build.sh: $lib does not export Agent_OnLoad" >&2
   exit 1

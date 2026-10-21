@@ -1,16 +1,15 @@
-//! Magnifies the centre of the game's frame.
+//! ゲームのフレームの中央を拡大する。
 //!
-//! Blitting a region of the default framebuffer onto itself with overlapping rectangles is
-//! undefined in GL, so this copies the centre into its own texture at the same size (which
-//! also resolves a driver-forced MSAA back buffer) and then stretches that over the screen.
+//! 既定のフレームバッファの一部を、重なる四角で自分自身に blit するのは GL では未定義なので、
+//! 中央を同じ大きさの自前のテクスチャに写し（ドライバが強制する MSAA の後ろのバッファも解決
+//! される）、それを画面いっぱいに引き伸ばす。
 
 use glow::HasContext as _;
 
-/// For the high-resolution zoom: the size the game should render at so that the middle
-/// `real`-sized part of its frame shows the view enlarged `factor` times, and the factor
-/// actually reached. Minecraft's field of view is vertical, so a frame `factor` times
-/// taller at the same width packs `factor` times more pixels into every degree, in both
-/// directions. `max_dim` is the largest texture the GPU takes.
+/// 高精細のズームのため：フレームの中央の `real` の大きさの部分が `factor` 倍に拡大した眺めを
+/// 見せるように、ゲームが描くべき大きさと、実際に届いた倍率。Minecraft の視野は縦で決まるので、
+/// 同じ幅で `factor` 倍高いフレームは、1 度あたり縦横とも `factor` 倍のピクセルを詰め込む。
+/// `max_dim` は GPU が受け付けるいちばん大きいテクスチャ。
 pub fn tall_size(real: [u32; 2], factor: f32, max_dim: u32) -> Option<([u32; 2], f32)> {
     let [w, h] = real;
     if w == 0
@@ -26,7 +25,7 @@ pub fn tall_size(real: [u32; 2], factor: f32, max_dim: u32) -> Option<([u32; 2],
     (tall > h).then(|| ([w, tall], tall as f32 / h as f32))
 }
 
-/// First row of the middle `real_h` rows of a `tall_h`-row frame.
+/// `tall_h` 行のフレームの、中央の `real_h` 行の最初の行。
 pub fn middle_row(tall_h: u32, real_h: u32) -> u32 {
     tall_h.saturating_sub(real_h) / 2
 }
@@ -45,7 +44,7 @@ struct Target {
 
 impl Zoom {
     pub fn new(gl: &glow::Context) -> Self {
-        // glBlitFramebuffer needs GL 3.0.
+        // glBlitFramebuffer には GL 3.0 が要る。
         let supported = gl.version().major >= 3;
         Self {
             target: None,
@@ -54,15 +53,15 @@ impl Zoom {
         }
     }
 
-    /// Whether the GL version has what the zoom needs (3.0, for `glBlitFramebuffer`).
+    /// GL の版に、ズームが要るものがあるか（`glBlitFramebuffer` のための 3.0）。
     pub fn supported(&self) -> bool {
         self.supported
     }
 
-    /// Replaces the frame with its centre enlarged `factor` times.
+    /// フレームを、中央を `factor` 倍に拡大したものに置き換える。
     ///
     /// # Safety
-    /// The overlay's GL context must be current on the game's drawable.
+    /// オーバーレイの GL のコンテキストが、ゲームの描画先で今のものであること。
     pub unsafe fn draw(&mut self, gl: &glow::Context, screen: [u32; 2], factor: f32, smooth: bool) {
         if !self.supported {
             if !self.reported {
@@ -72,20 +71,20 @@ impl Zoom {
             return;
         }
         let (w, h) = (screen[0] as i32, screen[1] as i32);
-        // Also rejects NaN.
+        // NaN も断る。
         if w <= 0 || h <= 0 || factor.partial_cmp(&1.0) != Some(std::cmp::Ordering::Greater) {
             return;
         }
         let rw = ((w as f32 / factor).round() as i32).clamp(1, w);
         let rh = ((h as f32 / factor).round() as i32).clamp(1, h);
         let (x0, y0) = ((w - rw) / 2, (h - rh) / 2);
-        // SAFETY: guaranteed by the caller.
+        // SAFETY: 呼び出し側が保証する。
         unsafe {
             let Some(framebuffer) = self.ensure_target(gl, [rw, rh]) else {
                 return;
             };
-            // Blits are clipped by the scissor box; it must be off (egui switches it off after
-            // painting, but this runs before).
+            // blit はシザーの箱で切られる。オフでなければならない（egui は描いた後にオフにするが、これは
+            // その前に動く）。
             gl.disable(glow::SCISSOR_TEST);
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(framebuffer));
@@ -120,7 +119,7 @@ impl Zoom {
     }
 
     /// # Safety
-    /// As for [`Zoom::draw`].
+    /// [`Zoom::draw`] と同じ。
     unsafe fn ensure_target(
         &mut self,
         gl: &glow::Context,
@@ -131,7 +130,7 @@ impl Zoom {
         {
             return Some(target.framebuffer);
         }
-        // SAFETY: guaranteed by the caller.
+        // SAFETY: 呼び出し側が保証する。
         unsafe {
             self.destroy(gl);
             let texture = gl.create_texture().ok()?;
@@ -190,13 +189,13 @@ impl Zoom {
         }
     }
 
-    /// Frees the GL objects.
+    /// GL の物を解放する。
     ///
     /// # Safety
-    /// As for [`Zoom::draw`].
+    /// [`Zoom::draw`] と同じ。
     pub unsafe fn destroy(&mut self, gl: &glow::Context) {
         if let Some(target) = self.target.take() {
-            // SAFETY: guaranteed by the caller.
+            // SAFETY: 呼び出し側が保証する。
             unsafe {
                 gl.delete_framebuffer(target.framebuffer);
                 gl.delete_texture(target.texture);

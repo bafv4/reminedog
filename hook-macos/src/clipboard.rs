@@ -1,11 +1,11 @@
-//! The general pasteboard (`NSPasteboard`) for the menu's paste and copy. GLFW's and SDL3's
-//! clipboard functions are not used: the agent hooks them for F3+C.
+//! メニューの貼り付けとコピーのための一般のペーストボード（`NSPasteboard`）。GLFW と SDL3 の
+//! クリップボードの関数は使わない：エージェントが F3+C のためにフックしている。
 
 use std::ffi::{CStr, c_char, c_void};
 
 use crate::objc::{self, Id, Selector};
 
-/// `NSUTF8StringEncoding`.
+/// `NSUTF8StringEncoding`。
 const UTF8: usize = 4;
 
 static GENERAL_PASTEBOARD: Selector = Selector::new(c"generalPasteboard");
@@ -17,15 +17,14 @@ static ALLOC: Selector = Selector::new(c"alloc");
 static INIT_WITH_BYTES: Selector = Selector::new(c"initWithBytes:length:encoding:");
 static RELEASE: Selector = Selector::new(c"release");
 
-/// The general pasteboard and the plain text type (`NSPasteboardTypeString`), once AppKit is
-/// loaded.
+/// 一般のペーストボードと、ただの文字の型（`NSPasteboardTypeString`）。AppKit が読み込まれてから。
 fn pasteboard() -> Option<(Id, Id)> {
     let class = objc::class(c"NSPasteboard");
     if class.is_null() {
         return None;
     }
-    // SAFETY: AppKit's exported NSString constant (a pointer to it), looked up in the loaded
-    // images.
+    // SAFETY: AppKit が export する NSString の定数（へのポインタ）。読み込み済みのイメージから
+    // 引く。
     let kind = unsafe {
         let p = libc::dlsym(libc::RTLD_DEFAULT, c"NSPasteboardTypeString".as_ptr());
         if p.is_null() {
@@ -33,16 +32,16 @@ fn pasteboard() -> Option<(Id, Id)> {
         }
         *p.cast::<Id>()
     };
-    // SAFETY: a class method answering the shared pasteboard.
+    // SAFETY: 共有のペーストボードを答えるクラスメソッド。
     let board = unsafe { objc::send::<Id>(class, &GENERAL_PASTEBOARD) };
     (!board.is_null() && !kind.is_null()).then_some((board, kind))
 }
 
-/// The pasteboard's plain text.
+/// ペーストボードのただの文字。
 pub fn read() -> Option<String> {
     objc::autoreleased(|| {
         let (board, kind) = pasteboard()?;
-        // SAFETY: NSPasteboard and NSString methods; the UTF-8 copy lives as long as the pool.
+        // SAFETY: NSPasteboard と NSString のメソッド。UTF-8 の写しはプールと同じだけ生きる。
         unsafe {
             let text = objc::send1::<Id, Id>(board, &STRING_FOR_TYPE, kind);
             if text.is_null() {
@@ -54,7 +53,7 @@ pub fn read() -> Option<String> {
     })
 }
 
-/// Puts `text` on the pasteboard as plain text.
+/// `text` をただの文字としてペーストボードに置く。
 pub fn write(text: &str) -> bool {
     objc::autoreleased(|| {
         let Some((board, kind)) = pasteboard() else {
@@ -64,8 +63,8 @@ pub fn write(text: &str) -> bool {
         if class.is_null() {
             return false;
         }
-        // SAFETY: NSString and NSPasteboard methods; the string is released after the
-        // pasteboard took it.
+        // SAFETY: NSString と NSPasteboard のメソッド。文字列はペーストボードが受け取った後で
+        // 解放する。
         unsafe {
             let allocated = objc::send::<Id>(class, &ALLOC);
             let string = objc::send3::<*const c_void, usize, usize, Id>(

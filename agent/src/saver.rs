@@ -1,10 +1,10 @@
-//! Writes files on a thread of its own, so the game's thread never waits for the disk: the
-//! settings, the waypoints and the servers' labels are each written to a temporary file,
-//! synced and renamed over the old one ([`write_file`]), which can take tens of
-//! milliseconds while a virus scanner or a sync client looks at the folder.
+//! ファイルを専用のスレッドで書く。ゲームのスレッドがディスクを待たないように：設定、
+//! ウェイポイント、サーバーのラベルは、それぞれ一時ファイルに書いて同期してから、古いものの上に
+//! 名前を変えて置く（[`write_file`]）。ウイルス対策や同期のアプリがフォルダを見ていると、
+//! これに数十ミリ秒かかることがある。
 //!
-//! Writes run in the order they were handed over. The caller polls each write's outcome on
-//! later frames. A write handed over just before the game exits may not happen.
+//! 渡した順に書く。呼び出し側は、それぞれの書き込みの結果を後のフレームで確かめる。
+//! ゲームが終わる直前に渡した書き込みは、行われないことがある。
 
 use std::io;
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ struct Write {
     done: Sender<io::Result<()>>,
 }
 
-/// The saving thread's queue; `None` when the thread could not be started.
+/// 保存のスレッドのキュー。スレッドを始められなかったときは `None`。
 static QUEUE: OnceLock<Option<Mutex<Sender<Write>>>> = OnceLock::new();
 
 fn queue() -> Option<&'static Mutex<Sender<Write>>> {
@@ -48,11 +48,11 @@ fn queue() -> Option<&'static Mutex<Sender<Write>>> {
         .as_ref()
 }
 
-/// The outcome of a write handed to [`write`].
+/// [`write`] に渡した書き込みの結果。
 pub struct Pending(Receiver<io::Result<()>>);
 
 impl Pending {
-    /// The outcome, once the write is done.
+    /// 書き終わっていれば、その結果。
     pub fn poll(&self) -> Option<io::Result<()>> {
         match self.0.try_recv() {
             Ok(result) => Some(result),
@@ -63,7 +63,7 @@ impl Pending {
         }
     }
 
-    /// Waits up to `timeout` for the outcome (when the caller cannot come back later).
+    /// 結果を最大 `timeout` まで待つ（呼び出し側が後で確かめられないとき）。
     pub fn wait(&self, timeout: Duration) -> Option<io::Result<()>> {
         match self.0.recv_timeout(timeout) {
             Ok(result) => Some(result),
@@ -75,8 +75,8 @@ impl Pending {
     }
 }
 
-/// Writes `bytes` to `path` atomically on the saving thread (on this one if it could not
-/// be started).
+/// `bytes` を `path` に、保存のスレッドでアトミックに書く（スレッドを始められなかったときは
+/// このスレッドで）。
 pub fn write(path: PathBuf, bytes: Vec<u8>) -> Pending {
     let (done, outcome) = mpsc::channel();
     let write = Write { path, bytes, done };
@@ -108,7 +108,7 @@ mod tests {
         assert!(second.wait(Duration::from_secs(10)).unwrap().is_ok());
         assert!(first.poll().unwrap().is_ok());
         assert_eq!(std::fs::read(&path).unwrap(), b"2");
-        // A folder in the way of the file.
+        // ファイルの場所にフォルダがある。
         let blocked = write(dir.path().to_owned(), b"x".to_vec());
         assert!(blocked.wait(Duration::from_secs(10)).unwrap().is_err());
     }

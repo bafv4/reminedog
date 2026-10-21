@@ -1,58 +1,58 @@
 #!/usr/bin/env bash
-# Run the LWJGL smoke program (ci/smoke/Smoke.java) on a Windows JVM under Wine + Xvfb
-# (Mesa llvmpipe through GLX), optionally with an agent DLL loaded via -agentpath:.
+# Wine＋Xvfb（GLX を通した Mesa の llvmpipe）の Windows の JVM で LWJGL のスモークのプログラム
+# （ci/smoke/Smoke.java）を動かす。必要ならエージェントの DLL を -agentpath: で読み込む。
 #
-# Usage: scripts/wine-smoke.sh [--agent DLL] [--agent-options STR] [--lwjgl VERSION]
+# 使い方：scripts/wine-smoke.sh [--agent DLL] [--agent-options STR] [--lwjgl VERSION]
 #                              [--frames N] [--legacy] [--readback] [--natives MODE]
 #                              [--jvm-arg ARG]... [--screenshot PNG] [--sdl] [--keep]
 #                              [--seconds N] [--capture] [--mc] [--xdotool CMDS]
 #                              [--xdotool-delay S] [--grab PNG]
-#   --agent DLL          load DLL with -agentpath: (reminedog.dll)
-#   --agent-options STR  options string passed to Agent_OnLoad (-agentpath:DLL=STR)
-#   --lwjgl VERSION      LWJGL version (default 3.3.3; 3.2.2 = Minecraft 1.14-1.18)
-#   --natives MODE       where LWJGL loads glfw.dll etc. from, as different launchers do:
-#                          extract       natives jars on the classpath, extracted to
-#                                        <gamedir>/natives (vanilla launcher 1.19+; default)
-#                          temp          natives jars on the classpath, extracted to LWJGL's
-#                                        default %TEMP%\lwjgl_<user>\... folder
-#                          library-path  DLLs pre-extracted to <gamedir>/natives and found via
-#                                        -Djava.library.path (vanilla <= 1.18, Prism, MultiMC)
-#   --frames N           frames to render (default 120)
-#   --legacy             default GLFW window hints (Minecraft 1.13-1.16) instead of 3.2 core
-#   --readback           print pixels read back after the last frame
-#   --jvm-arg ARG        extra JVM argument, e.g. -Dorg.lwjgl.util.Debug=true (repeatable)
-#   --screenshot PNG     save the last frame (back buffer after the swap) to PNG
-#   --sdl                run ci/smoke/SmokeSdl.java (an SDL3 window, like Minecraft 26.x)
-#                        instead of the GLFW one; needs --lwjgl 3.4.0 or later
-#   --seconds N          run the harness for N seconds (~60 fps) instead of --frames
-#   --capture            grab the cursor as Minecraft does in game
-#   --mc                 render like Minecraft: into an own framebuffer at the size the
-#                        window system reports, then copied into the window
-#   --xdotool CMDS       once the window is up (after --xdotool-delay seconds, default 4),
-#                        focus it and run "xdotool CMDS", e.g. "key ctrl+i sleep 0.5 type abc"
-#   --grab PNG           after the xdotool commands, save what the X screen shows (keys held
-#                        with "keydown" are still down); needs Pillow for python3
-#   --keep               keep the run directory (game dir, output) instead of deleting it
-# Environment:
-#   REMINEDOG_WINE_CACHE  cache for the JRE, LWJGL, classes and WINEPREFIX
-#                         (default <repo>/target/wine-cache)
-#   SMOKE_TIMEOUT         seconds before the JVM is killed (default 300)
-#   WINEDEBUG             Wine debug channels (default -all)
-# Exit code: the smoke program's (0 = "SMOKE OK"), 124 on timeout, 2 on bad usage.
+#   --agent DLL          DLL を -agentpath: で読み込む（reminedog.dll）
+#   --agent-options STR  Agent_OnLoad に渡すオプションの文字列（-agentpath:DLL=STR）
+#   --lwjgl VERSION      LWJGL の版（既定は 3.3.3。3.2.2 = Minecraft 1.14〜1.18）
+#   --natives MODE       ランチャーによって違う、LWJGL が glfw.dll などを読み込む場所：
+#                          extract       クラスパスのネイティブの jar を <gamedir>/natives に
+#                                        展開する（公式ランチャーの 1.19 以降。既定）
+#                          temp          クラスパスのネイティブの jar を、LWJGL の既定の
+#                                        %TEMP%\lwjgl_<user>\... のフォルダに展開する
+#                          library-path  DLL を前もって <gamedir>/natives に展開し、
+#                                        -Djava.library.path で見つける（公式の 1.18 以前、Prism、MultiMC）
+#   --frames N           描くフレームの数（既定は 120）
+#   --legacy             3.2 core の代わりに GLFW の既定のウィンドウのヒント（Minecraft 1.13〜1.16）
+#   --readback           最後のフレームの後に読み戻したピクセルを出す
+#   --jvm-arg ARG        追加の JVM 引数。例：-Dorg.lwjgl.util.Debug=true（繰り返せる）
+#   --screenshot PNG     最後のフレーム（スワップの後のバックバッファ）を PNG に保存する
+#   --sdl                GLFW のものの代わりに ci/smoke/SmokeSdl.java（Minecraft 26.x と同じく
+#                        SDL3 のウィンドウ）を動かす。--lwjgl 3.4.0 以降が要る
+#   --seconds N          --frames の代わりに、テスト用プログラムを N 秒（約 60 fps）動かす
+#   --capture            ゲーム中の Minecraft と同じくカーソルを捕まえる
+#   --mc                 Minecraft と同じく描く：ウィンドウシステムが報告する大きさで自前の
+#                        フレームバッファに描き、ウィンドウに写す
+#   --xdotool CMDS       ウィンドウが出たら（--xdotool-delay 秒後。既定は 4）、そこにフォーカスを
+#                        移して "xdotool CMDS" を動かす。例："key ctrl+i sleep 0.5 type abc"
+#   --grab PNG           xdotool のコマンドの後、X の画面が見せているものを保存する（"keydown" で
+#                        押したキーはまだ押したまま）。python3 の Pillow が要る
+#   --keep               実行のフォルダ（ゲームのフォルダ、出力）を消さずに残す
+# 環境変数：
+#   REMINEDOG_WINE_CACHE  JRE、LWJGL、クラス、WINEPREFIX のキャッシュ
+#                         （既定は <repo>/target/wine-cache）
+#   SMOKE_TIMEOUT         JVM を止めるまでの秒数（既定は 300）
+#   WINEDEBUG             Wine のデバッグのチャンネル（既定は -all）
+# 終了コード：スモークのプログラムのもの（0 = "SMOKE OK"）、時間切れなら 124、使い方の誤りなら 2。
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 self=$repo/scripts/wine-smoke.sh
 
-# Everything that talks to Wine runs inside one xvfb-run session (this script re-executed
-# with --wine-session): a wineserver started without $DISPLAY (even by winepath) leaves a
-# driver-less desktop behind, and GLFW then fails to create its helper window.
+# Wine と話すものはすべて 1 つの xvfb-run のセッション（--wine-session でこのスクリプトを動かし
+# 直したもの）の中で動かす：$DISPLAY なしで起動した wineserver（winepath によるものでも）は
+# ドライバのないデスクトップを残し、GLFW が補助のウィンドウを作れなくなる。
 wine_session() {
   # shellcheck source=/dev/null
   source "$1"
   if [ ! -f "$WINEPREFIX/system.reg" ]; then
     echo "wine-smoke: initializing WINEPREFIX $WINEPREFIX" >&2
-    # 64-bit only: wineboot complains about the missing syswow64 half, which is harmless.
+    # 64 ビットだけ：wineboot は syswow64 の半分がないと文句を言うが、害はない。
     wineboot --init >/dev/null 2>&1 || true
     wineserver -w
     [ -f "$WINEPREFIX/system.reg" ] || { echo "wine-smoke: wineboot failed" >&2; return 1; }
@@ -70,9 +70,8 @@ wine_session() {
     [ -n "$agent_options" ] && agent_arg+="=$agent_options"
     args+=("$agent_arg")
   fi
-  # HotSpot asks Wine for the process group affinity (a stub) whenever it counts CPUs and
-  # prints a warning each time, even in the middle of the program's lines; a fixed count
-  # skips the query.
+  # HotSpot は CPU を数えるたびに Wine にプロセスグループのアフィニティ（スタブ）を聞き、毎回、
+  # プログラムの行の途中にでも警告を出す。数を決めておけば問い合わせを省く。
   args+=("-XX:ActiveProcessorCount=$(nproc)")
   case $natives in
     extract) args+=("-Dorg.lwjgl.system.SharedLibraryExtractPath=$(winepath -w "$gamedir/natives")") ;;
@@ -81,13 +80,13 @@ wine_session() {
   esac
   args+=("${jvm_args[@]}" -cp "$cp_win" "$main_class" "${smoke_args[@]}")
 
-  # Keep the host's JVM settings (proxy trust store etc.) away from the Windows JVM.
+  # ホストの JVM の設定（プロキシのトラストストアなど）を Windows の JVM に渡さない。
   unset JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS
   local status=0
   cd "$gamedir"
   echo "wine-smoke: wine $java_win ${args[*]}" >"$output"
   if [ -n "$xdotool_cmds" ]; then
-    # Simulated input once the harness window is up (xdotool talks to this Xvfb).
+    # テスト用プログラムのウィンドウが出たら入力を真似る（xdotool はこの Xvfb と話す）。
     (
       sleep "$xdotool_delay"
       xdotool search --sync --name "reminedog smoke" windowfocus --sync >/dev/null 2>&1 || true
@@ -96,7 +95,7 @@ wine_session() {
       echo "wine-smoke: xdotool ${cmds[*]}" >>"$output"
       xdotool "${cmds[@]}" >>"$output" 2>&1 || echo "wine-smoke: xdotool failed" >>"$output"
       if [ -n "$grab" ]; then
-        # What the X server shows right now (keys may still be held down).
+        # X サーバーが今見せているもの（キーはまだ押したままかもしれない）。
         python3 -c 'import sys; from PIL import ImageGrab; ImageGrab.grab(xdisplay=None).save(sys.argv[1])' \
           "$grab" >>"$output" 2>&1 || echo "wine-smoke: grab failed (needs python3-pil)" >>"$output"
       fi
@@ -176,8 +175,8 @@ cache=${REMINEDOG_WINE_CACHE:-$repo/target/wine-cache}
 mkdir -p "$cache"
 cache=$(cd "$cache" && pwd)
 
-# One run per cache at a time: concurrent runs would share a wineserver whose desktop lives
-# on the other run's Xvfb display.
+# キャッシュごとに一度に 1 回だけ動かす：同時に動かすと、もう一方の Xvfb のディスプレイに
+# デスクトップがある wineserver を共有してしまう。
 exec 9>"$cache/.lock"
 if ! flock -n 9; then
   echo "wine-smoke: waiting for another run using $cache" >&2
@@ -188,7 +187,7 @@ java_exe=$("$repo/scripts/fetch-wine-jre.sh" "$cache")
 jar_list=$(LWJGL_EXTRA_MODULES=$extra_modules "$repo/ci/smoke/fetch-lwjgl.sh" "$lwjgl" "$cache/lwjgl/$lwjgl")
 mapfile -t jars <<<"$jar_list"
 
-# Compile with the host JDK; the class files run on any Java 8+ JVM.
+# ホストの JDK でコンパイルする。クラスファイルは Java 8 以降のどの JVM でも動く。
 classes=$cache/smoke-classes/$lwjgl-$main_class
 smoke_src=$repo/ci/smoke/$main_class.java
 if [ ! -f "$classes/$main_class.class" ] || [ "$smoke_src" -nt "$classes/$main_class.class" ] ||
@@ -219,7 +218,7 @@ for jar in "${jars[@]}"; do
   esac
 done
 if [ "$natives" = library-path ]; then
-  # Unpack the 64-bit DLLs flat, as launchers do (3.2.x jars also carry *32.dll).
+  # ランチャーと同じく、64 ビットの DLL を平らに展開する（3.2.x の jar は *32.dll も持つ）。
   python3 - "$gamedir/natives" "${natives_jars[@]}" <<'EOF'
 import os, sys, zipfile
 dest = sys.argv[1]
@@ -236,12 +235,12 @@ else
   classpath+=("${natives_jars[@]}")
 fi
 
-# Hand the settings to the --wine-session half through a sourced file (arrays included).
+# 設定を、source するファイル（配列も含む）で --wine-session の側に渡す。
 [ -n "$screenshot" ] && smoke_flags+=(--screenshot)
 smoke_args=("$frames" "${smoke_flags[@]}")
 timeout=${SMOKE_TIMEOUT:-300}
 export WINEPREFIX=$cache/prefix WINEARCH=win64 WINEDEBUG=${WINEDEBUG:--all}
-# No Mono/Gecko install prompts, no menu entries on the host.
+# Mono・Gecko のインストールの確認を出さず、ホストにメニューの項目を作らない。
 export WINEDLLOVERRIDES="mscoree,mshtml=;winemenubuilder.exe=d${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
 declare -p java_exe classpath agent agent_options natives jvm_args main_class smoke_args gamedir output timeout \
   xdotool_cmds xdotool_delay grab \
@@ -249,18 +248,18 @@ declare -p java_exe classpath agent agent_options natives jvm_args main_class sm
 
 start=$(date +%s)
 status=0
-# (fd 9, the lock, is closed so that no lingering Wine process keeps holding it.)
+# （ロックの fd 9 は閉じる。残った Wine のプロセスがそれを持ち続けないように。）
 xvfb-run -a -s "-screen 0 1280x1024x24 +extension GLX" "$BASH" "$self" --wine-session "$run/session.sh" \
   9>&- || status=$?
 echo "=== smoke output (LWJGL $lwjgl, exit $status, $(($(date +%s) - start))s) ==="
-# The Windows JVM writes CRLF line ends.
+# Windows の JVM は行末に CRLF を書く。
 tr -d '\r' <"$output" 2>/dev/null || echo "(no output)"
 log=$gamedir/reminedog/reminedog.log
 if [ -f "$log" ]; then
   echo "=== $log ==="
   cat "$log"
 fi
-# A JVM crash (e.g. in the agent) leaves hs_err_pid*.log in the working directory.
+# JVM のクラッシュ（エージェントの中など）は、作業フォルダに hs_err_pid*.log を残す。
 for crash in "$gamedir"/hs_err_pid*.log; do
   [ -f "$crash" ] || continue
   echo "=== $crash (first 60 lines) ==="

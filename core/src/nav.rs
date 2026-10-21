@@ -1,14 +1,14 @@
-//! Distance and direction to a waypoint, and overworld/nether coordinate conversion.
+//! ウェイポイントへの距離と方角、オーバーワールドとネザーの座標の変換。
 //!
-//! Minecraft's yaw convention: 0 faces +Z (south), 90 faces -X (west), 180/-180 faces -Z
-//! (north) and -90 faces +X (east). Turning right increases yaw.
+//! Minecraft の yaw の決まり：0 は +Z（南）、90 は -X（西）、180/-180 は -Z（北）、-90 は
+//! +X（東）を向く。右に回ると yaw が増える。
 
 use std::borrow::Cow;
 use std::fmt;
 
 use crate::location::{Location, OVERWORLD, THE_NETHER};
 
-/// Eight-point compass direction.
+/// 8 方位の方角。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Cardinal {
     N,
@@ -33,9 +33,9 @@ impl Cardinal {
         Cardinal::NW,
     ];
 
-    /// The direction a Minecraft yaw points to.
+    /// Minecraft の yaw が指す方角。
     pub fn from_yaw(yaw: f32) -> Cardinal {
-        // Compass bearing: 0 = north, clockwise, which is yaw shifted by half a turn.
+        // 方位角：0 = 北、時計回り。yaw を半回転ずらしたもの。
         let compass = (f64::from(yaw) + 180.0).rem_euclid(360.0);
         let sector = ((compass + 22.5) / 45.0).floor() as usize % 8;
         Self::CLOCKWISE_FROM_NORTH[sector]
@@ -61,24 +61,24 @@ impl fmt::Display for Cardinal {
     }
 }
 
-/// Where a target lies relative to the player.
+/// プレイヤーから見た目標の位置。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Bearing {
     pub horizontal_distance: f64,
     pub distance_3d: f64,
-    /// Target height minus player height.
+    /// 目標の高さからプレイヤーの高さを引いたもの。
     pub dy: f64,
-    /// Yaw the player would need to face the target, in (-180, 180].
+    /// 目標を向くのに要る yaw。(-180, 180] の中。
     pub target_yaw: f32,
-    /// `target_yaw` minus the player's yaw, wrapped to (-180, 180]; positive = turn right.
+    /// `target_yaw` からプレイヤーの yaw を引き、(-180, 180] に収めたもの。正なら右に回る。
     pub relative_yaw: f32,
     pub cardinal: Cardinal,
 }
 
-/// Computes distance and direction from the player's location to `to` (`[x, y, z]`).
+/// プレイヤーの位置から `to`（`[x, y, z]`）への距離と方角を求める。
 ///
-/// When the target is straight above or below, the direction is undefined and the
-/// player's own yaw is used (so `relative_yaw` is 0).
+/// 目標が真上か真下にあると方角は決まらないので、プレイヤー自身の yaw を使う
+/// （`relative_yaw` は 0 になる）。
 pub fn bearing(from: &Location, to: [f64; 3]) -> Bearing {
     let dx = to[0] - from.x;
     let dy = to[1] - from.y;
@@ -91,7 +91,7 @@ pub fn bearing(from: &Location, to: [f64; 3]) -> Bearing {
     } else {
         player_yaw
     };
-    // Narrowing can round e.g. -179.99999999 to -180.0, so wrap again in f32.
+    // 狭めると -179.99999999 などが -180.0 に丸まりうるので、f32 でもう一度収める。
     let relative_yaw = wrap_degrees(wrap_degrees_f64(target_yaw - player_yaw) as f32);
     let target_yaw = wrap_degrees(target_yaw as f32);
     Bearing {
@@ -104,10 +104,10 @@ pub fn bearing(from: &Location, to: [f64; 3]) -> Bearing {
     }
 }
 
-/// Converts horizontal coordinates between the overworld and the nether (1:8).
+/// 水平の座標を、オーバーワールドとネザーの間で変換する（1:8）。
 ///
-/// Returns them unchanged for the same dimension and `None` for any other pair.
-/// Dimension ids without a namespace are taken as `minecraft:`.
+/// 同じディメンションならそのまま返し、ほかの組なら `None`。namespace のないディメンションの id
+/// は `minecraft:` とみなす。
 pub fn convert_xz(x: f64, z: f64, from_dim: &str, to_dim: &str) -> Option<(f64, f64)> {
     let from = with_namespace(from_dim);
     let to = with_namespace(to_dim);
@@ -121,22 +121,22 @@ pub fn convert_xz(x: f64, z: f64, from_dim: &str, to_dim: &str) -> Option<(f64, 
     }
 }
 
-/// How to reach a waypoint from the player's location.
+/// プレイヤーの位置からウェイポイントへの行き方。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Guide {
-    /// Same dimension, or converted between the overworld and the nether (`converted` = the
-    /// target's x,z in the player's dimension).
+    /// 同じディメンションか、オーバーワールドとネザーの間で変換したもの（`converted` = プレイヤーの
+    /// ディメンションでの目標の x,z）。
     Bearing {
         bearing: Bearing,
         converted: Option<(f64, f64)>,
     },
-    /// The waypoint is in a dimension that has no coordinate conversion to the player's.
+    /// ウェイポイントが、プレイヤーのものへの座標の変換がないディメンションにある。
     OtherDimension,
 }
 
-/// Where the waypoint at `to` (`[x, y, z]` in `to_dimension`) lies from the player. A waypoint
-/// in the other of the overworld and the nether is converted into the player's dimension
-/// ([`convert_xz`]); Y is not converted.
+/// `to`（`to_dimension` の `[x, y, z]`）のウェイポイントが、プレイヤーから見てどこにあるか。
+/// オーバーワールドとネザーのもう一方にあるウェイポイントは、プレイヤーのディメンションに変換
+/// する（[`convert_xz`]）。Y は変換しない。
 pub fn guide(from: &Location, to_dimension: &str, to: [f64; 3]) -> Guide {
     let here = from.dimension_or_overworld();
     match convert_xz(to[0], to[2], to_dimension, here) {
@@ -156,16 +156,16 @@ fn with_namespace(id: &str) -> Cow<'_, str> {
     }
 }
 
-/// Wraps an angle in degrees to (-180, 180]. Non-finite input yields NaN; `-0.0` becomes `0.0`.
+/// 度の角度を (-180, 180] に収める。有限でない値は NaN。`-0.0` は `0.0` になる。
 pub fn wrap_degrees(a: f32) -> f32 {
     let r = a % 360.0;
-    // Both adjustments are exact (Sterbenz), so the result never lands on -180.
+    // どちらの調整も正確（Sterbenz の補題）なので、結果が -180 になることはない。
     if r > 180.0 {
         r - 360.0
     } else if r <= -180.0 {
         r + 360.0
     } else {
-        // Adding +0.0 turns -0.0 into 0.0, which would otherwise be displayed as "-0".
+        // +0.0 を足すと -0.0 が 0.0 になる。そうしないと "-0" と表示される。
         r + 0.0
     }
 }
@@ -247,11 +247,11 @@ mod tests {
 
     #[test]
     fn no_negative_zero_angles() {
-        // `-0` would be shown as "-0°" in the overlay.
+        // `-0` はオーバーレイで "-0°" と表示されてしまう。
         for a in [-0.0, 0.0, 360.0, -360.0, -720.0] {
             assert!(wrap_degrees(a).is_sign_positive(), "{a}");
         }
-        // Due south on the same x: atan2(-0.0, dz) is -0.0.
+        // 同じ x で真南：atan2(-0.0, dz) は -0.0。
         let b = bearing(&at(0.0, 64.0, 0.0, 0.0), [0.0, 64.0, 10.0]);
         assert!(b.target_yaw.is_sign_positive());
         assert!(b.relative_yaw.is_sign_positive());
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn relative_yaw_turn_direction() {
-        // Facing south; a target to the west (yaw 90) needs a right turn.
+        // 南を向いている。西（yaw 90）の目標には右に回る。
         let facing_south = at(0.0, 64.0, 0.0, 0.0);
         assert_close(
             bearing(&facing_south, [-10.0, 64.0, 0.0]).relative_yaw,
@@ -304,20 +304,20 @@ mod tests {
             bearing(&facing_south, [10.0, 64.0, 0.0]).relative_yaw,
             -90.0,
         );
-        // Straight behind is +180, never -180.
+        // 真後ろは +180。-180 にはならない。
         assert_eq!(
             bearing(&facing_south, [0.0, 64.0, -10.0]).relative_yaw,
             180.0
         );
-        // Facing east, target south: turn right 90.
+        // 東を向いて目標は南：右に 90 回る。
         let facing_east = at(0.0, 64.0, 0.0, -90.0);
         assert_close(bearing(&facing_east, [0.0, 64.0, 10.0]).relative_yaw, 90.0);
     }
 
     #[test]
     fn relative_yaw_across_the_wrap_boundary() {
-        // Target just east of north (yaw -179), player just west of north (yaw 179).
-        let target = [0.017_452_406, 64.0, -1.0]; // tan(1 degree)
+        // 目標は北の少し東（yaw -179）、プレイヤーは北の少し西（yaw 179）。
+        let target = [0.017_452_406, 64.0, -1.0]; // tan(1 度)
         let player = at(0.0, 64.0, 0.0, 179.0);
         let b = bearing(&player, target);
         assert_close(b.target_yaw, -179.0);
@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn unwrapped_player_yaw() {
-        // Older versions report accumulated yaw such as 720 + 90.
+        // 古い版は、720 + 90 のように積み重なった yaw を報告する。
         let player = at(0.0, 64.0, 0.0, 810.0);
         let b = bearing(&player, [-10.0, 64.0, 0.0]);
         assert_close(b.relative_yaw, 0.0);
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(b.distance_3d, 16.0);
         assert_close(b.target_yaw, 33.0);
         assert_eq!(b.relative_yaw, 0.0);
-        // Negative zeros must not flip the direction to -180.
+        // 負のゼロで、方角が -180 に裏返ってはならない。
         let player = at(0.0, 64.0, 0.0, -180.0);
         let b = bearing(&player, [-0.0, 64.0, -0.0]);
         assert_eq!(b.target_yaw, 180.0);
@@ -425,7 +425,7 @@ mod tests {
                 converted: None,
             }
         );
-        // Ids without a namespace, and F3+C's old form without a dimension (the overworld).
+        // namespace のない id と、ディメンションのない F3+C の古い形（オーバーワールド）。
         let old_form = in_dimension(None, 0.0, 64.0, 0.0, 0.0);
         assert_eq!(
             guide(&old_form, "overworld", [3.0, 64.0, 4.0]),
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn guide_converts_between_overworld_and_nether() {
-        // In the nether, a waypoint at overworld (800, 64, -80) is at (100, -10).
+        // ネザーでは、オーバーワールドの (800, 64, -80) のウェイポイントは (100, -10)。
         let player = in_dimension(Some(THE_NETHER), 100.0, 40.0, 0.0, 0.0);
         let Guide::Bearing {
             bearing: b,
@@ -459,10 +459,10 @@ mod tests {
         assert_eq!(b, bearing(&player, [100.0, 64.0, -10.0]));
         assert_eq!(b.horizontal_distance, 10.0);
         assert_eq!(b.cardinal, Cardinal::N);
-        // Y is not converted.
+        // Y は変換しない。
         assert_eq!(b.dy, 24.0);
 
-        // In the overworld, a nether waypoint is multiplied by 8.
+        // オーバーワールドでは、ネザーのウェイポイントを 8 倍する。
         let player = at(0.0, 64.0, 0.0, 0.0);
         let Guide::Bearing {
             bearing: b,

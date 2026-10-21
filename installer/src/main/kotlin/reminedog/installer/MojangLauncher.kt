@@ -4,9 +4,9 @@ import java.io.IOException
 import java.nio.file.Path
 
 /**
- * The official Minecraft Launcher: the profiles ("installations") in launcher_profiles.json
- * (launcher_profiles_microsoft_store.json for the Microsoft Store / Xbox app launcher) in the
- * .minecraft folder. A profile's JVM arguments are its "javaArgs".
+ * 公式の Minecraft Launcher：.minecraft のフォルダの launcher_profiles.json（Microsoft Store・
+ * Xbox アプリのランチャーは launcher_profiles_microsoft_store.json）のプロファイル（「起動構成」）。
+ * プロファイルの JVM 引数は "javaArgs"。
  */
 class MojangLauncher(minecraftDir: Path, fileName: String) : Launcher(
     if (fileName == STORE_FILE) "Minecraft Launcher（Microsoft Store）" else "Minecraft Launcher",
@@ -63,9 +63,9 @@ class MojangLauncher(minecraftDir: Path, fileName: String) : Launcher(
         const val STORE_FILE = "launcher_profiles_microsoft_store.json"
 
         /**
-         * What the launcher starts a profile with when it has no "javaArgs" (the text the launcher
-         * shows when its "JVM arguments" switch is turned on). Kept when reminedog is added, so
-         * the profile still gets its 2 GB of memory.
+         * "javaArgs" のないプロファイルをランチャーが起動するときのもの（「JVM 引数」のスイッチを
+         * オンにしたときにランチャーが出す文字）。プロファイルが 2 GB のメモリを使い続けるように、
+         * reminedog を足すときに残す。
          */
         const val DEFAULT_ARGS = "-Xmx2G -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC" +
             " -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50 -XX:G1HeapRegionSize=32M"

@@ -24,7 +24,7 @@ class DownloadTest {
 
     private val dll = byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 1, 2, 3)
 
-    /** A local HTTP server with the files a download asks for, counting the requests. */
+    /** ダウンロードが求めるファイルを持ち、要求を数えるローカルの HTTP サーバー。 */
     private class Server(files: Map<String, ByteArray>) : AutoCloseable {
         private val server = HttpServer.create(InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0)
         val requests = AtomicInteger()
@@ -145,13 +145,13 @@ class DownloadTest {
             for (file in listOf(stale, same, missing)) assertContentEquals(dll, Files.readAllBytes(file))
             assertEquals(listOf("reminedog.dll"), Files.list(stale.parent).use { files -> files.map { it.fileName.toString() }.toList() })
 
-            // Every file is the same as GitHub's hash: nothing is downloaded.
+            // どのファイルも GitHub のハッシュと同じ：何もダウンロードしない。
             val again = Download.replaceAll(release, listOf(stale, same, missing)) { downloads++ }
             assertTrue(again.all { it is Download.Replaced.AlreadyLatest })
             assertEquals(1, downloads)
             assertEquals(1, server.requests.get())
 
-            // Another file there is told apart from the release's.
+            // そこにある別のファイルは、リリースのものと見分ける。
             assertFalse(Download.differs(release, stale))
             val test = write("d/reminedog.dll", byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 7))
             assertTrue(Download.differs(release, test))
@@ -163,7 +163,7 @@ class DownloadTest {
     fun `a file that cannot be replaced fails alone`() {
         Server(mapOf("/dll" to dll)).use { server ->
             val release = Download.Release("v2", server.url("/dll"), dll.size.toLong(), sha256(dll))
-            // The folder of this target is a file, so nothing can be written there.
+            // この置き先のフォルダはファイルなので、そこには何も書けない。
             val blocked = write("blocked", byteArrayOf(0)).resolve("reminedog.dll")
             val fine = dir.resolve("fine/reminedog.dll")
 

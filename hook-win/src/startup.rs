@@ -1,4 +1,4 @@
-//! What only Windows does at startup and for panics ([`crate::windows`]).
+//! Windows だけが起動時とパニックのときにすること（[`crate::windows`]）。
 
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HMODULE};
 use windows_sys::Win32::System::Diagnostics::Debug::{
@@ -12,36 +12,36 @@ use windows_sys::Win32::System::Threading::CreateMutexW;
 
 use crate::ffi;
 
-/// Return addresses written for a panic.
+/// パニックのときに書く戻り先のアドレスの数。
 const MAX_FRAMES: usize = 32;
 
-/// Writes `message` to the debugger's output (DebugView), where no log can be written.
+/// ログを書けないときに、`message` をデバッガーの出力（DebugView）に書く。
 pub fn debug_output(message: &str) {
-    // SAFETY: NUL-terminated wide string.
+    // SAFETY: NUL で終わるワイド文字列。
     unsafe { OutputDebugStringW(ffi::wide(&format!("reminedog: {message}\n")).as_ptr()) };
 }
 
-/// Whether another copy of the agent (a reminedog DLL from another folder, with statics of
-/// its own) runs in this process: a mutex named after the process, kept open by the first.
+/// 別の場所のエージェント（自分の static を持つ、別のフォルダの reminedog の DLL）がこの
+/// プロセスで動いているか：最初のものが開いたままにする、プロセスにちなんで名付けたミューテックス。
 pub fn another_copy_runs() -> bool {
     let name = ffi::wide(&format!("Local\\reminedog-agent-{}", std::process::id()));
-    // SAFETY: a NUL-terminated name. The first copy's handle stays open for the process.
+    // SAFETY: NUL で終わる名前。最初のコピーのハンドルはプロセスの間開いたまま。
     let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
-    // SAFETY: plain call, right after the one whose error it reads.
+    // SAFETY: ただの呼び出し。エラーを読む呼び出しのすぐ後。
     let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
     if exists && !handle.is_null() {
-        // SAFETY: the handle just opened.
+        // SAFETY: いま開いたハンドル。
         unsafe { CloseHandle(handle) };
     }
     exists
 }
 
-/// Where a panic happened: the return addresses on the stack as `module+0xoffset`, which the
-/// release's `.pdb` resolves. No symbols are looked up (they are not on the user's PC, and
-/// that would load dbghelp, maybe under the loader lock).
+/// パニックが起きた場所：スタックの戻り先のアドレスを `module+0xoffset` として。リリースの
+/// `.pdb` で解決できる。シンボルは引かない（利用者の PC にはなく、引くと dbghelp を読み込み、
+/// ローダーロックの中かもしれない）。
 pub fn return_addresses() -> String {
     let mut frames = [std::ptr::null_mut(); MAX_FRAMES];
-    // SAFETY: the buffer holds MAX_FRAMES pointers.
+    // SAFETY: バッファは MAX_FRAMES 個のポインタを持つ。
     let count = unsafe {
         RtlCaptureStackBackTrace(
             1,
@@ -53,7 +53,7 @@ pub fn return_addresses() -> String {
     let mut text = String::from("return addresses:");
     for &address in &frames[..usize::from(count)] {
         let mut module: HMODULE = std::ptr::null_mut();
-        // SAFETY: looks the address up among the loaded modules, taking no reference.
+        // SAFETY: 読み込んだモジュールの中でアドレスを引く。参照は取らない。
         let found = unsafe {
             GetModuleHandleExW(
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS

@@ -1,7 +1,7 @@
 name: CI
 
-# Actions are pinned to full commit hashes (the tag in the comment); Dependabot proposes
-# updates (.github/dependabot.yml).
+# アクションはコミットのハッシュで固定する（タグはコメントに）。更新は Dependabot が提案する
+# （.github/dependabot.yml）。
 on:
   push:
     branches: [main]
@@ -16,10 +16,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # The Rust toolchain of the CI and the release (a new stable can bring new lints).
+  # CI とリリースの Rust のツールチェーン（新しい stable は新しい lint を連れてくることがある）。
   RUST_TOOLCHAIN: "1.99.0"
-  # Mesa release (pal1000/mesa-dist-win) for the smoke test, and the SHA-256 of its
-  # mesa3d-<tag>-release-msvc.7z (from the release's assets).
+  # スモークテストの Mesa のリリース（pal1000/mesa-dist-win）と、その
+  # mesa3d-<tag>-release-msvc.7z の SHA-256（リリースのアセットから）。
   MESA_TAG: "26.2.4"
   MESA_SHA256: "351fc8c8b695878ffb3eaa044b3ead08672a48b1a045e3c3e3975811df0f6695"
 
@@ -47,7 +47,7 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace
 
-      # hook-win is empty off Windows; lint its real code for the GNU Windows target too.
+      # hook-win は Windows 以外では空。GNU の Windows のターゲットでも本物のコードを lint する。
       - name: Install MinGW-w64
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
       - name: Add Windows GNU target
@@ -55,9 +55,9 @@ jobs:
       - name: Clippy (hook-win, x86_64-pc-windows-gnu)
         run: cargo clippy --locked -p reminedog-hook-win --target x86_64-pc-windows-gnu -- -D warnings
 
-  # The Linux agent (hook-linux) in the LWJGL smoke harness on Xvfb with Mesa llvmpipe, as in
-  # the development container (scripts/linux): GLFW and SDL3, with J (a waypoint) and Z (the
-  # high-resolution zoom) sent by xdotool.
+  # 開発用のコンテナ（scripts/linux）と同じく、Mesa の llvmpipe の Xvfb で、LWJGL のスモークの
+  # テスト用プログラムに Linux のエージェント（hook-linux）を読み込む：GLFW と SDL3。xdotool で
+  # J（ウェイポイント）と Z（高精細のズーム）を送る。
   smoke-linux:
     name: Smoke Linux (LWJGL ${{ matrix.lwjgl }}${{ matrix.sdl && ', SDL3' || '' }})
     runs-on: ubuntu-24.04
@@ -99,7 +99,7 @@ jobs:
           SMOKE_CACHE: ${{ runner.temp }}/smoke-cache
           SMOKE_RUN: ${{ runner.temp }}/smoke-run
           SMOKE_TIMEOUT: "90"
-        # bash with pipefail: the harness's exit status (a crash or hang at exit) survives tee.
+        # pipefail の bash：テスト用プログラムの終了の状態（終了時のクラッシュや止まり）が tee を越えて残る。
         shell: bash
         run: |
           status=0
@@ -124,18 +124,18 @@ jobs:
         if: always()
         run: |
           cat "$RUNNER_TEMP/smoke-run/reminedog/reminedog.log" 2>/dev/null || true
-          # A JVM crash (e.g. in the agent) leaves hs_err_pid*.log in the working directory.
+          # JVM のクラッシュ（エージェントの中など）は、作業フォルダに hs_err_pid*.log を残す。
           for crash in "$RUNNER_TEMP"/smoke-run/hs_err_pid*.log; do
             [ -f "$crash" ] && { echo "== $crash"; cat "$crash"; }
           done
           true
 
-  # The macOS agent (hook-macos, a prototype): clippy and the tests on macOS, then the LWJGL
-  # smoke harness in the runner's session (Apple silicon: LWJGL 3.3 and later). Only SDL3: the
-  # runners have no GPU, only Apple's software renderer, and GLFW always asks for an
-  # accelerated pixel format (glfwCreateWindow fails). No keys are sent yet (posting key events
-  # needs the Accessibility permission), so this checks that the hooks are handed out and that
-  # the overlay draws (the screen grab is uploaded).
+  # macOS のエージェント（hook-macos。試作）：macOS で clippy とテスト、それからランナーの
+  # セッションで LWJGL のスモークのテスト用プログラム（Apple silicon：LWJGL 3.3 以降）。SDL3 だけ：
+  # ランナーには GPU がなく Apple のソフトウェアレンダラーだけで、GLFW は必ず Accelerated の
+  # ピクセルフォーマットを求める（glfwCreateWindow が失敗する）。キーはまだ送らない（キーの
+  # イベントを送るにはアクセシビリティの許可が要る）ので、確かめるのはフックを渡せることと
+  # オーバーレイが描けること（画面を撮ってアップロードする）。
   macos:
     name: macOS (clippy, test, smoke LWJGL ${{ matrix.lwjgl }}${{ matrix.sdl && ', SDL3' || '' }})
     runs-on: macos-15
@@ -166,7 +166,7 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked --workspace
-      # As on a Mac: Apple silicon and Intel in one library (dist/macos).
+      # Mac と同じく、Apple silicon と Intel を 1 つのライブラリに（dist/macos）。
       - name: Build the agent
         run: bash scripts/macos/build.sh
       - name: Smoke
@@ -174,7 +174,7 @@ jobs:
           SMOKE_CACHE: ${{ runner.temp }}/smoke-cache
           SMOKE_RUN: ${{ runner.temp }}/smoke-run
           SMOKE_TIMEOUT: "90"
-        # bash with pipefail: the harness's exit status (a crash or hang at exit) survives tee.
+        # pipefail の bash：テスト用プログラムの終了の状態（終了時のクラッシュや止まり）が tee を越えて残る。
         shell: bash
         run: |
           status=0
@@ -202,8 +202,8 @@ jobs:
             [ -f "$crash" ] && { echo "== $crash"; cat "$crash"; }
           done
           true
-      # The screen while the harness ran (the overlay's hint should show) and the back buffer
-      # after its last swap.
+      # テスト用プログラムが動いている間の画面（オーバーレイの案内が出ているはず）と、最後のスワップの
+      # 後のバックバッファ。
       - name: Upload the screen and the log
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -217,7 +217,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # The installer (Kotlin, Swing + FlatLaf): its tests and the jar to double-click.
+  # インストーラー（Kotlin、Swing＋FlatLaf）：そのテストと、ダブルクリックで動かす jar。
   installer:
     name: Installer (Kotlin, test, jar)
     runs-on: ubuntu-latest
@@ -236,7 +236,7 @@ jobs:
           java-version: "21"
           cache: gradle
       - name: Build and test
-        # Through sh: a commit from Windows may not carry gradlew's executable bit.
+        # sh を通す：Windows からのコミットには gradlew の実行のビットがないことがある。
         run: sh ./gradlew build --no-daemon
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -269,7 +269,7 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace
 
-  # The DLL alone, so the smoke tests need not wait for clippy and the tests.
+  # スモークテストが clippy とテストを待たなくてよいように、DLL だけ。
   windows-dll:
     name: Windows (MSVC build)
     runs-on: windows-latest
@@ -300,7 +300,7 @@ jobs:
         run: |
           $dist = Join-Path $env:RUNNER_TEMP dist
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
-          Copy-Item target\release\reminedog.dll $dist  # required; fails the step if missing
+          Copy-Item target\release\reminedog.dll $dist  # 必須。なければステップが失敗する
           foreach ($optional in 'target\release\reminedog.pdb', 'README.md', 'docs') {
             if (Test-Path $optional) { Copy-Item $optional $dist -Recurse }
           }
@@ -312,8 +312,8 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # Load the DLL into real Windows JVMs running an LWJGL/GLFW window like Minecraft's,
-  # rendered by Mesa llvmpipe (the runners have no GPU).
+  # Minecraft と同じように LWJGL／GLFW のウィンドウを動かす本物の Windows の JVM に DLL を
+  # 読み込む。描くのは Mesa の llvmpipe（ランナーには GPU がない）。
   smoke-windows:
     name: Smoke (LWJGL ${{ matrix.lwjgl }}, Java ${{ matrix.java }})
     needs: windows-dll
@@ -323,7 +323,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Minecraft 1.14-1.16: Java 8, default window hints (compatibility context).
+          # Minecraft 1.14〜1.16：Java 8、既定のウィンドウのヒント（互換のコンテキスト）。
           - lwjgl: "3.2.2"
             java: "8"
             hints: --legacy
@@ -331,9 +331,8 @@ jobs:
             harness: Smoke
             modules: ""
             markers: "GLFW hooks installed|handed the agent's hook|overlay: first frame rendered|F3+C: clipboard hooks ready"
-          # Minecraft 1.20.5+: Java 21, OpenGL 3.2 core context; rendering into its own
-          # framebuffer and copying it to the window, as Minecraft does (--mc), through the
-          # agent's OpenGL wrappers.
+          # Minecraft 1.20.5 以降：Java 21、OpenGL 3.2 core のコンテキスト。Minecraft と同じく自前の
+          # フレームバッファに描いてウィンドウに写し（--mc）、エージェントの OpenGL のラッパーを通る。
           - lwjgl: "3.3.3"
             java: "21"
             hints: --mc
@@ -341,8 +340,8 @@ jobs:
             harness: Smoke
             modules: ""
             markers: "GLFW hooks installed|handed the agent's hook|LWJGL's glBindFramebuffer native goes through the agent|overlay: first frame rendered|F3+C: clipboard hooks ready"
-          # Minecraft 26.x: Java 25, window opened with SDL3 instead of GLFW; the context is
-          # created on a hidden utility window and used on the game window, as 26.3 does.
+          # Minecraft 26.x：Java 25、GLFW の代わりに SDL3 で開くウィンドウ。26.3 と同じく、コンテキストは
+          # 表示しない補助のウィンドウで作り、ゲームのウィンドウで使う。
           - lwjgl: "3.4.3"
             java: "25"
             hints: --mc
@@ -360,7 +359,7 @@ jobs:
       LWJGL_MODULES: ${{ matrix.modules }}
       SMOKE_MARKERS: ${{ matrix.markers }}
     steps:
-      # No token in the working copy: the JVMs below run third-party code (Mesa, LWJGL).
+      # 作業コピーにトークンを残さない：下の JVM はほかの人のコード（Mesa、LWJGL）を動かす。
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
@@ -381,8 +380,8 @@ jobs:
             ${{ runner.temp }}/downloads/lwjgl
           key: smoke-mesa${{ env.MESA_TAG }}-lwjgl${{ matrix.lwjgl }}-${{ hashFiles('ci/smoke/lwjgl.sha256') }}
 
-      # GLFW (and the agent) load "opengl32.dll" by name, so a copy next to java.exe wins
-      # over the system's GDI software renderer.
+      # GLFW（とエージェント）は "opengl32.dll" を名前で読み込むので、java.exe の隣の写しが
+      # システムの GDI のソフトウェアレンダラーより先に使われる。
       - name: Install Mesa llvmpipe next to java.exe
         run: |
           downloads=$(cygpath -u "$RUNNER_TEMP")/downloads/mesa
@@ -427,12 +426,12 @@ jobs:
           jar_cp=$(cygpath -w "${jars[@]}" | paste -sd ';' -)
           classes=$(cygpath -w "$tmp/classes")
 
-          # JDK 8's javac has no --release; its own class library is Java 8's anyway.
+          # JDK 8 の javac には --release がない。そのクラスライブラリはどのみち Java 8 のもの。
           if [ "$JAVA_MAJOR" = 8 ]; then release=(-source 8 -target 8); else release=(--release 8); fi
           mkdir -p "$tmp/classes"
           "$java_bin/javac" "${release[@]}" -Xlint:-options -encoding UTF-8 -cp "$jar_cp" -d "$classes" "ci/smoke/$SMOKE_HARNESS.java" ci/smoke/SmokeImage.java
 
-          # Paths handed to java.exe are Windows paths; SMOKE_ROOT is only used by bash.
+          # java.exe に渡すパスは Windows のパス。SMOKE_ROOT は bash だけが使う。
           {
             printf 'JAVA=%s\n' "$java_bin/java"
             printf 'AGENT=%s\n' "$(cygpath -w "$tmp/agent/reminedog.dll")"
@@ -456,7 +455,7 @@ jobs:
             exit 1
           fi
 
-      # Same run without the agent, so a failure below can be told apart from a runner problem.
+      # 下の失敗をランナーの問題と見分けられるように、エージェントなしで同じものを動かす。
       - name: "Step B (baseline): harness without the agent"
         timeout-minutes: 5
         env:
@@ -485,8 +484,8 @@ jobs:
           mkdir -p "$dir" && cd "$dir"
           natives=$(cygpath -w "$dir/natives")
           status=0
-          # --screenshot saves the back buffer after the last swap (smoke-screenshot.png, uploaded
-          # below); whether it still shows the overlay depends on the driver's swap method.
+          # --screenshot は最後のスワップの後のバックバッファを保存する（smoke-screenshot.png。下で
+          # アップロードする）。まだオーバーレイが見えるかはドライバのスワップの方式による。
           "$JAVA" "-agentpath:$AGENT" "-Dorg.lwjgl.system.SharedLibraryExtractPath=$natives" -cp "$SMOKE_CP" \
             "$SMOKE_HARNESS" "$SMOKE_FRAMES" ${SMOKE_READBACK:+"$SMOKE_READBACK"} --screenshot ${SMOKE_HINTS:+"$SMOKE_HINTS"} 2>&1 | tee smoke.txt || status=$?
           fail=0
@@ -512,7 +511,7 @@ jobs:
             echo "===== $log"
             cat "$log"
           done
-          # A JVM crash (e.g. in the agent) leaves hs_err_pid*.log in the working directory.
+          # JVM のクラッシュ（エージェントの中など）は、作業フォルダに hs_err_pid*.log を残す。
           for crash in "$SMOKE_ROOT"/*/hs_err_pid*.log; do
             echo "===== $crash (first 80 lines)"
             head -n 80 "$crash"

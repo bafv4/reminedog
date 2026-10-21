@@ -1,18 +1,17 @@
-//! How far the overlay's own cursor moves for relative mouse motion.
+//! 相対的なマウスの動きで、オーバーレイの自前のカーソルがどれだけ動くか。
 //!
-//! With the cursor captured, games read raw mouse counts, which the system's pointer speed
-//! and acceleration never touch. The overlay's cursor would then move at a different speed
-//! than the real pointer does everywhere else, so it applies the system's settings itself.
-//! The Windows rules follow SDL3's `SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE` (zlib licence),
-//! which approximates Windows' own ballistics per motion event.
+//! カーソルを捕まえている間、ゲームは生のマウスの数を読み、システムのポインターの速度と
+//! 加速はそれに効かない。そのままでは、オーバーレイのカーソルはほかのところでの本物の
+//! ポインターと違う速さで動くので、システムの設定を自分で掛ける。Windows の決まりは SDL3 の
+//! `SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE`（zlib ライセンス）に従う。これは動きのイベントごとに
+//! Windows 自身の動き方を近似する。
 
-/// Gain from mouse counts to pixels.
+/// マウスの数からピクセルへの倍率。
 #[derive(Debug, Clone, PartialEq)]
 pub enum PointerSpeed {
-    /// Every count moves the pointer this many pixels.
+    /// 1 つの数でポインターがこのピクセルだけ動く。
     Linear(f32),
-    /// Gain depending on the size of each motion, interpolated between `[size, gain]`
-    /// points with increasing sizes (acceleration).
+    /// 動きの大きさごとに変わる倍率。大きさが増えていく `[size, gain]` の点の間を補う（加速）。
     Curve(Vec<[f32; 2]>),
 }
 
@@ -22,8 +21,8 @@ impl Default for PointerSpeed {
     }
 }
 
-/// Multipliers for Windows' pointer speed setting 1–20 (the slider has 11 steps, 1–20 in
-/// twos; 10 is the default), when "enhance pointer precision" is off.
+/// 「ポインターの精度を高める」がオフのときの、Windows のポインターの速度の設定 1〜20 の倍率
+/// （スライダーは 11 段で、1〜20 を 2 ずつ。既定は 10）。
 const WINDOWS_LINEAR: [f32; 20] = [
     1.0 / 32.0,
     1.0 / 16.0,
@@ -47,26 +46,25 @@ const WINDOWS_LINEAR: [f32; 20] = [
     3.5,
 ];
 
-/// Windows' default acceleration curve (`SmoothMouseXCurve` / `SmoothMouseYCurve` under
-/// `HKCU\Control Panel\Mouse`), for when the registry cannot be read.
+/// Windows の既定の加速の曲線（`HKCU\Control Panel\Mouse` の `SmoothMouseXCurve` /
+/// `SmoothMouseYCurve`）。レジストリを読めないとき用。
 pub const WINDOWS_DEFAULT_CURVE: ([f32; 5], [f32; 5]) = (
     [0.0, 0.43, 1.25, 3.86, 40.0],
     [0.0, 1.07, 4.14, 18.98, 443.75],
 );
 
 impl PointerSpeed {
-    /// One pixel per count.
+    /// 1 つの数で 1 ピクセル。
     pub const RAW: Self = Self::Linear(1.0);
 
-    /// The speed Windows gives its pointer: `speed` is `SPI_GETMOUSESPEED` (1–20),
-    /// `enhance` whether "enhance pointer precision" is on, and `curve` its acceleration
-    /// curve (x: motion, y: pointer movement).
+    /// Windows がポインターに与える速度：`speed` は `SPI_GETMOUSESPEED`（1〜20）、`enhance` は
+    /// 「ポインターの精度を高める」がオンか、`curve` はその加速の曲線（x：動き、y：ポインターの移動）。
     pub fn windows(speed: u32, enhance: bool, curve: ([f32; 5], [f32; 5])) -> Self {
         let speed = speed.clamp(1, 20);
         if !enhance {
             return Self::Linear(WINDOWS_LINEAR[speed as usize - 1]);
         }
-        // SDL3's scaling of the curve to screen pixels at 96 dpi.
+        // SDL3 の、96 dpi の画面のピクセルへの曲線の拡大。
         const DISPLAY_FACTOR: f32 = 3.5 * (150.0 / 96.0);
         let scale = speed as f32 / 10.0;
         let (xs, ys) = curve;
@@ -87,7 +85,7 @@ impl PointerSpeed {
         }
     }
 
-    /// The pixels to move for a motion of `(dx, dy)` counts.
+    /// `(dx, dy)` の数の動きで動かすピクセル。
     pub fn apply(&self, dx: f32, dy: f32) -> (f32, f32) {
         let gain = self.gain((dx * dx + dy * dy).sqrt());
         if gain.is_finite() && gain >= 0.0 {
@@ -105,8 +103,7 @@ impl PointerSpeed {
         let (Some(first), Some(last)) = (points.first(), points.last()) else {
             return 1.0;
         };
-        // Not a number: no point of the curve to look between (it would index before the
-        // first one).
+        // 数ではない：その間を見る曲線の点がない（最初の点の前を指してしまう）。
         if size.is_nan() {
             return 1.0;
         }
@@ -122,8 +119,7 @@ impl PointerSpeed {
     }
 }
 
-/// One of Windows' `SmoothMouse?Curve` registry values: five 8-byte 16.16 fixed-point
-/// numbers.
+/// Windows の `SmoothMouse?Curve` のレジストリの値の 1 つ：8 バイトの 16.16 の固定小数点の数が 5 つ。
 pub fn parse_windows_curve(bytes: &[u8]) -> Option<[f32; 5]> {
     if bytes.len() < 40 {
         return None;
@@ -170,7 +166,7 @@ mod tests {
             PointerSpeed::windows(20, false, WINDOWS_DEFAULT_CURVE),
             PointerSpeed::Linear(3.5)
         );
-        // Out of range values from a broken setting stay usable.
+        // 壊れた設定の範囲外の値でも使える。
         assert_eq!(
             PointerSpeed::windows(0, false, WINDOWS_DEFAULT_CURVE),
             PointerSpeed::Linear(1.0 / 32.0)
@@ -188,10 +184,10 @@ mod tests {
         let (fast, _) = speed.apply(20.0, 0.0);
         assert!(slow > 0.3 && slow < 1.0, "{slow}");
         assert!(fast / 20.0 > slow, "{fast}");
-        // Direction is kept.
+        // 向きは保つ。
         let (x, y) = speed.apply(-3.0, 4.0);
         assert!(x < 0.0 && y > 0.0 && close(x / y, -0.75));
-        // The pointer speed setting scales the whole curve.
+        // ポインターの速度の設定は、曲線全体を拡大する。
         let (faster, _) = PointerSpeed::windows(20, true, WINDOWS_DEFAULT_CURVE).apply(1.0, 0.0);
         assert!(close(faster, slow * 2.0), "{faster} {slow}");
     }
@@ -217,7 +213,7 @@ mod tests {
 
     #[test]
     fn parses_the_registry_format() {
-        // Windows' default SmoothMouseXCurve.
+        // Windows の既定の SmoothMouseXCurve。
         let bytes = [
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
             0x15, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //

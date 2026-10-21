@@ -1,4 +1,4 @@
-# The workflows pin their actions to commit hashes; Dependabot proposes the updates.
+# ワークフローはアクションをコミットのハッシュで固定する。更新は Dependabot が提案する。
 version: 2
 updates:
   - package-ecosystem: github-actions

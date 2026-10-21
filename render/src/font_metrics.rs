@@ -1,27 +1,26 @@
-//! Vertical placement of the Japanese font's glyphs.
+//! 日本語フォントの字形の縦の位置。
 //!
-//! egui places each glyph at the font's ascent below the top of a row that is
-//! `ascent - descent + line gap` tall, and centres rows on widgets such as check boxes. Fonts
-//! whose ascent and descent are not balanced around the glyphs' middle (Yu Gothic and
-//! Meiryo have a deep descent and a large line gap for Japanese typesetting) therefore draw
-//! their text higher than the check box or radio button beside it. A [`FontTweak`] shifting
-//! the glyphs by the difference puts them back in the middle of the row.
+//! egui は、高さが `ascent - descent + line gap` の行の上から、フォントの ascent だけ下に各字形を
+//! 置き、チェックボックスなどの部品では行を中央に置く。ascent と descent が字形の中央の周りで
+//! つり合っていないフォント（游ゴシックとメイリオは、日本語の組版のために descent が深く、
+//! line gap が大きい）は、そのため、隣のチェックボックスやラジオボタンより高く文字を描く。
+//! 差の分だけ字形をずらす [`FontTweak`] で、行の中央に戻す。
 
 use egui::FontTweak;
 use skrifa::MetadataProvider as _;
 use skrifa::instance::{LocationRef, Size};
 
-/// Height of the middle of the glyphs above the baseline, as a fraction of the font size.
-/// Kana and kanji fill most of the em square, which sits about 0.12 em below the baseline
-/// (0.88 em above it), so their middle is 0.38 em up; digits and capitals are close to that.
+/// ベースラインからの字形の中央の高さ（フォントの大きさに対する割合）。かなと漢字は em の
+/// 四角のほとんどを埋め、その四角はベースラインの約 0.12 em 下にある（上に 0.88 em）ので、
+/// 中央は 0.38 em 上。数字と大文字もそれに近い。
 const GLYPH_MIDDLE: f32 = 0.38;
 
-/// Largest shift applied, as a fraction of the font size; a font with metrics this odd is
-/// more likely broken than misaligned. Yu Gothic needs about a third of this.
+/// ずらす最大の量（フォントの大きさに対する割合）。これほど変な値のフォントは、ずれているより
+/// 壊れている見込みが高い。游ゴシックはこれの約 3 分の 1 が要る。
 const MAX_SHIFT: f32 = 0.5;
 
-/// A tweak that moves the glyphs of font `index` in `data` to the middle of egui's rows,
-/// or the default tweak if the font cannot be read.
+/// `data` のフォント `index` の字形を egui の行の中央に動かす調整。フォントを読めなければ
+/// 既定の調整。
 pub(crate) fn centering_tweak(data: &[u8], index: u32) -> FontTweak {
     FontTweak {
         y_offset_factor: centering_shift(data, index).unwrap_or(0.0),
@@ -29,8 +28,8 @@ pub(crate) fn centering_tweak(data: &[u8], index: u32) -> FontTweak {
     }
 }
 
-/// How far down (as a fraction of the font size) the glyphs must move to be centred in a
-/// row, from the font's vertical metrics.
+/// フォントの縦の値から求めた、字形を行の中央に置くために下へ動かす量（フォントの大きさに
+/// 対する割合）。
 pub(crate) fn centering_shift(data: &[u8], index: u32) -> Option<f32> {
     let font = skrifa::FontRef::from_index(data, index).ok()?;
     let metrics = font.metrics(Size::unscaled(), LocationRef::default());
@@ -38,7 +37,7 @@ pub(crate) fn centering_shift(data: &[u8], index: u32) -> Option<f32> {
     if em <= 0.0 {
         return None;
     }
-    // Same metrics egui uses (skrifa, unscaled; descent is negative).
+    // egui と同じ値（skrifa、拡大なし。descent は負）。
     shift_for(
         metrics.ascent / em,
         metrics.descent / em,
@@ -46,10 +45,10 @@ pub(crate) fn centering_shift(data: &[u8], index: u32) -> Option<f32> {
     )
 }
 
-/// The shift for vertical metrics in ems.
+/// em での縦の値についてのずらす量。
 fn shift_for(ascent: f32, descent: f32, line_gap: f32) -> Option<f32> {
     let row_height = ascent - descent + line_gap;
-    // Row middle minus glyph middle, both measured from the top of the row.
+    // 行の中央から字形の中央を引いたもの（どちらも行の上から測る）。
     let shift = row_height / 2.0 - (ascent - GLYPH_MIDDLE);
     shift
         .is_finite()
@@ -69,16 +68,16 @@ mod tests {
     #[test]
     fn balanced_metrics_need_no_shift() {
         let shift = shift_for(0.88, -0.12, 0.0).unwrap();
-        // Row 1.0 em, middle at 0.5; glyph middle at 0.88 - 0.38 = 0.5.
+        // 行は 1.0 em、中央は 0.5。字形の中央は 0.88 - 0.38 = 0.5。
         assert!(shift.abs() < 1e-6, "{shift}");
     }
 
     #[test]
     fn deep_descent_and_line_gap_move_glyphs_down() {
-        // Text sits at the top of a row padded below it: shift down.
+        // 文字が、下に余白のある行の上の方にある：下にずらす。
         let shift = shift_for(0.88, -0.3, 0.5).unwrap();
         assert!((shift - 0.34).abs() < 1e-6, "{shift}");
-        // A tall ascent puts the glyphs low: shift up.
+        // 高い ascent は字形を低く置く：上にずらす。
         assert!(shift_for(1.3, -0.12, 0.0).unwrap() < 0.0);
     }
 
@@ -90,7 +89,7 @@ mod tests {
 
     #[test]
     fn egui_default_font_is_already_centred() {
-        // egui's own font looks aligned with its check boxes; the rule agrees.
+        // egui 自身のフォントはチェックボックスとそろって見える。決まりもそれと合う。
         let defs = egui::FontDefinitions::default();
         let font = &defs.font_data["Ubuntu-Light"];
         let shift = centering_shift(font.font.as_ref(), font.index).unwrap();

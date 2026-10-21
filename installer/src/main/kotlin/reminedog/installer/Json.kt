@@ -3,16 +3,16 @@ package reminedog.installer
 import java.io.IOException
 import java.nio.file.Path
 
-/** A JSON number, kept as it was written so that rewriting a file does not change it. */
+/** JSON の数。ファイルを書き直しても変わらないように、書かれたままに持つ。 */
 class JsonNumber(val text: String) {
     override fun toString() = text
 }
 
 /**
- * A small JSON reader and writer for the launchers' settings files.
+ * ランチャーの設定ファイルのための小さな JSON の読み書き。
  *
- * Objects are LinkedHashMaps (the order of the keys is kept), arrays are ArrayLists, numbers are
- * [JsonNumber]s and null is Kotlin's null.
+ * オブジェクトは LinkedHashMap（キーの順序を保つ）、配列は ArrayList、数は [JsonNumber]、
+ * null は Kotlin の null。
  */
 object Json {
     fun parse(text: String): Any? {
@@ -24,10 +24,10 @@ object Json {
         return value
     }
 
-    /** The JSON text of a parsed value, one member per line with the given indent. */
+    /** 読んだ値の JSON の文字。1 行に 1 つのメンバーで、与えた字下げで。 */
     fun write(value: Any?, indent: String): String = buildString { writeValue(value, indent, "") }
 
-    /** The indent of the first indented line of a JSON text (four spaces when there is none). */
+    /** JSON の文字の、最初の字下げした行の字下げ（なければ空白 4 つ）。 */
     fun indentOf(text: String): String {
         val line = text.substringAfter('\n', "")
         val indent = line.takeWhile { it == ' ' || it == '\t' }
@@ -91,7 +91,7 @@ object Json {
     }
 
     private class Reader(private val text: String) {
-        // A byte order mark is not JSON, but some editors write one.
+        // バイトオーダーマークは JSON ではないが、書くエディタがある。
         var pos = if (text.startsWith('﻿')) 1 else 0
 
         fun error(message: String) = IllegalArgumentException("JSON: $message at $pos")
@@ -213,15 +213,15 @@ object Json {
     }
 }
 
-/** This value as a JSON object, or null when it is something else. */
+/** この値を JSON のオブジェクトとして。ほかのものなら null。 */
 @Suppress("UNCHECKED_CAST")
 fun Any?.asJsonObject(): MutableMap<String, Any?>? = this as? MutableMap<String, Any?>
 
-/** This value as a JSON array, or null when it is something else. */
+/** この値を JSON の配列として。ほかのものなら null。 */
 @Suppress("UNCHECKED_CAST")
 fun Any?.asJsonArray(): MutableList<Any?>? = this as? MutableList<Any?>
 
-/** A JSON file whose top level is an object, written back with the file's indent and newlines. */
+/** 一番上がオブジェクトの JSON のファイル。ファイルの字下げと改行で書き戻す。 */
 class JsonDoc private constructor(val file: Path, text: String) {
     val root: MutableMap<String, Any?> =
         Json.parse(text).asJsonObject() ?: throw IllegalArgumentException("JSON: the top level is not an object")

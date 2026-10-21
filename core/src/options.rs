@@ -1,8 +1,8 @@
-//! Agent options: the text after `=` in `-agentpath:C:\x\reminedog.dll=<options>`.
+//! エージェントのオプション：`-agentpath:C:\x\reminedog.dll=<options>` の `=` の後の文字。
 //!
-//! Comma-separated `key=value` items with case-insensitive keys:
-//! `gamedir=<path>`, `log=off|error|warn|info|debug|trace`, `overlay=on|off|true|false|1|0`
-//! and `scale=<0.5..=4>`. Problems produce warnings and leave the default in place.
+//! カンマで区切った `key=value` の項目（キーは大文字と小文字を区別しない）：
+//! `gamedir=<path>`、`log=off|error|warn|info|debug|trace`、`overlay=on|off|true|false|1|0`、
+//! `scale=<0.5..=4>`。問題があれば警告を出し、既定のままにする。
 
 use std::path::PathBuf;
 
@@ -10,10 +10,10 @@ use log::LevelFilter;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentOptions {
-    /// Overrides game directory detection.
+    /// ゲームフォルダの判定を上書きする。
     pub game_dir: Option<PathBuf>,
     pub log_level: Option<LevelFilter>,
-    /// Draw the in-game overlay (default `true`).
+    /// ゲーム内のオーバーレイを描く（既定は `true`）。
     pub overlay: bool,
     pub ui_scale: Option<f32>,
 }
@@ -30,7 +30,7 @@ impl Default for AgentOptions {
 }
 
 impl AgentOptions {
-    /// Same as [`parse`].
+    /// [`parse`] と同じ。
     pub fn parse(s: &str) -> (Self, Vec<String>) {
         parse(s)
     }
@@ -39,11 +39,10 @@ impl AgentOptions {
 pub const MIN_UI_SCALE: f32 = 0.5;
 pub const MAX_UI_SCALE: f32 = 4.0;
 
-/// Parses the agent option string, returning the options and human-readable warnings.
+/// エージェントのオプションの文字列を解析し、オプションと、人が読む警告を返す。
 ///
-/// The `gamedir` value is everything after the first `=` of its item, so it may contain
-/// `:`, `\`, `=` and spaces. Since Windows paths may also contain commas, an item without
-/// `=` that directly follows `gamedir` is taken as part of the path.
+/// `gamedir` の値はその項目の最初の `=` の後の全部なので、`:`、`\`、`=`、空白を含んでよい。
+/// Windows のパスはカンマも含みうるので、`gamedir` のすぐ後の `=` のない項目はパスの一部とみなす。
 pub fn parse(s: &str) -> (AgentOptions, Vec<String>) {
     let mut options = AgentOptions::default();
     let mut warnings = Vec::new();
@@ -213,7 +212,7 @@ mod tests {
             Some(PathBuf::from(r"C:\Games\Smith, John\mc"))
         );
         assert_eq!(options.log_level, Some(LevelFilter::Warn));
-        // After another key, a bare item is an error again.
+        // ほかのキーの後なら、`=` のない項目はまたエラー。
         let (options, warnings) = parse(r"gamedir=C:\a,log=warn,stray");
         assert_eq!(options.game_dir, Some(PathBuf::from(r"C:\a")));
         assert_eq!(warnings.len(), 1, "{warnings:?}");

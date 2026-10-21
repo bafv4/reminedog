@@ -1,15 +1,14 @@
-//! macOS agent loaded with `-agentpath:<path>/libreminedog_macos.dylib[=<options>]`.
+//! `-agentpath:<path>/libreminedog_macos.dylib[=<options>]` で読み込む macOS のエージェント。
 //!
-//! The agent itself is OS-independent ([`reminedog_agent`]); this library adds what it needs
-//! from macOS ([`macos`]: symbol lookup with `dlsym`, OpenGL contexts with `NSOpenGLContext`
-//! ([`nsgl`]), the pasteboard ([`clipboard`]), a Japanese font ([`fonts`])) and the JVMTI entry
-//! point.
+//! エージェント本体は OS に依存しない（[`reminedog_agent`]）。このライブラリは、それが macOS に
+//! 頼ること（[`macos`]：`dlsym` での関数の引き当て、`NSOpenGLContext` の OpenGL のコンテキスト
+//! （[`nsgl`]）、ペーストボード（[`clipboard`]）、日本語フォント（[`fonts`]））と、JVMTI の入口を
+//! 足す。
 //!
-//! A prototype: the key state and the pointer's speed are not read yet, and there is no
-//! in-game browser.
+//! 試作：キーの状態とポインターの速度はまだ読まず、ゲーム内ブラウザはない。
 //!
-//! Everything is macOS-only; on other platforms this crate builds as an empty library so the
-//! workspace still builds.
+//! すべて macOS だけのもの。ほかの OS では、ワークスペースがビルドできるように、この crate は
+//! 空のライブラリとしてビルドする。
 #![cfg(target_os = "macos")]
 
 mod clipboard;
@@ -23,16 +22,16 @@ use std::ffi::{CStr, c_char, c_void};
 
 const JNI_OK: i32 = 0;
 
-/// Marks this library among the process's loaded ones, for another copy to find
-/// ([`dl::loaded_elsewhere`]).
+/// プロセスの読み込み済みのライブラリの中でこのライブラリに印を付ける。別のコピーが見つけるため
+/// （[`dl::loaded_elsewhere`]）。
 #[unsafe(no_mangle)]
 pub static REMINEDOG_AGENT_MARKER: u8 = 0;
 
-/// JVMTI entry point. The JVM calls it very early during startup, before any Java code
-/// runs and before LWJGL loads GLFW.
+/// JVMTI の入口。JVM は起動のとても早い時期、Java のコードが動く前、LWJGL が GLFW を読み込む前に
+/// これを呼ぶ。
 ///
 /// # Safety
-/// Called by the JVM with its `JavaVM*`; `options` is null or a NUL-terminated string.
+/// JVM が自分の `JavaVM*` で呼ぶ。`options` は null か NUL で終わる文字列。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Agent_OnLoad(
     vm: *mut c_void,
@@ -43,22 +42,22 @@ pub unsafe extern "C" fn Agent_OnLoad(
         let options = if options.is_null() {
             String::new()
         } else {
-            // SAFETY: the JVM passes a NUL-terminated string.
+            // SAFETY: JVM は NUL で終わる文字列を渡す。
             unsafe { CStr::from_ptr(options) }
                 .to_string_lossy()
                 .into_owned()
         };
-        // SAFETY: the JVM's JavaVM.
+        // SAFETY: JVM の JavaVM。
         unsafe { reminedog_agent::start(&options, vm, &macos::MACOS) };
     });
-    // Whatever happened, never keep the game from starting.
+    // 何が起きても、ゲームの起動を止めない。
     JNI_OK
 }
 
-/// Called by the JVM at shutdown.
+/// 終了時に JVM が呼ぶ。
 ///
 /// # Safety
-/// Called by the JVM.
+/// JVM が呼ぶ。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Agent_OnUnload(_vm: *mut c_void) {
     reminedog_agent::catch("Agent_OnUnload", || log::info!("JVM shutting down"));

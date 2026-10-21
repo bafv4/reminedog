@@ -1,4 +1,4 @@
-//! Windows' pointer settings, for the overlay's own cursor over a captured mouse.
+//! 捕まえたマウスの上のオーバーレイの自前のカーソルのための、Windows のポインターの設定。
 
 use std::ffi::c_void;
 use std::ptr;
@@ -12,13 +12,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::ffi::wide;
 
-/// The pointer speed and acceleration set in Windows' mouse settings, read anew on every
-/// call so changes made while the game runs apply.
+/// Windows のマウスの設定のポインターの速度と加速。ゲームが動いている間の変更も効くように、
+/// 呼ぶたびに読み直す。
 pub fn system_speed() -> PointerSpeed {
     let mut speed: i32 = 10;
-    // Threshold 1, threshold 2, acceleration ("enhance pointer precision").
+    // しきい値 1、しきい値 2、加速（「ポインターの精度を高める」）。
     let mut mouse = [0i32; 3];
-    // SAFETY: both actions write the documented types through the pointer.
+    // SAFETY: どちらの操作も、文書どおりの型をポインタを通して書く。
     unsafe {
         if SystemParametersInfoW(SPI_GETMOUSESPEED, 0, (&raw mut speed).cast::<c_void>(), 0) == 0 {
             speed = 10;
@@ -44,13 +44,13 @@ pub fn system_speed() -> PointerSpeed {
     result
 }
 
-/// An acceleration curve from `HKCU\Control Panel\Mouse`.
+/// `HKCU\Control Panel\Mouse` の加速の曲線。
 fn curve(name: &str) -> Option<[f32; 5]> {
     let key = wide("Control Panel\\Mouse");
     let value = wide(name);
     let mut data = [0u8; 64];
     let mut len = data.len() as u32;
-    // SAFETY: NUL-terminated names; `len` holds the buffer's size and receives the data's.
+    // SAFETY: NUL で終わる名前。`len` はバッファの大きさを持ち、データの大きさを受け取る。
     let status = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,

@@ -1,4 +1,4 @@
-//! What the agent needs from macOS ([`reminedog_agent::os::Os`]). OpenGL with NSOpenGLContext.
+//! エージェントが macOS に頼ること（[`reminedog_agent::os::Os`]）。NSOpenGLContext の OpenGL。
 
 use std::ffi::{CStr, c_void};
 
@@ -21,7 +21,7 @@ impl Os for MacOs {
         dl::path(library).unwrap_or_else(|| format!("0x{library:x}"))
     }
 
-    /// An `NSWindow`.
+    /// `NSWindow`。
     fn glfw_native_window(&self) -> Option<&'static CStr> {
         Some(c"glfwGetCocoaWindow")
     }
@@ -30,7 +30,7 @@ impl Os for MacOs {
         Some(SdlProperty::Pointer(c"SDL.window.cocoa.window"))
     }
 
-    /// The view the game's current `NSOpenGLContext` draws on.
+    /// ゲームの今の `NSOpenGLContext` が描くビュー。
     fn window_surface(&self, native_window: Option<usize>) -> usize {
         nsgl::window_view(native_window)
     }
@@ -63,18 +63,18 @@ impl Os for MacOs {
         nsgl::delete_context(context)
     }
 
-    /// AppKit attaches the context to the view on the main thread only.
+    /// AppKit はメインスレッドでだけコンテキストをビューに付ける。
     fn can_create_context_here(&self) -> bool {
         nsgl::on_main_thread()
     }
 
-    /// Not read yet: the safety net never releases a key. (`CGEventSourceKeyState` may need the
-    /// Input Monitoring permission; without it every key would look up.)
+    /// まだ読まない：安全網はキーを離さない。（`CGEventSourceKeyState` には入力監視の許可が要る
+    /// かもしれない。許可がないと、どのキーも離しているように見える。）
     fn input_up(&self, _id: InputId) -> bool {
         false
     }
 
-    /// Not read yet: relative motion moves the overlay's cursor as it comes.
+    /// まだ読まない：相対移動はそのままオーバーレイのカーソルを動かす。
     fn pointer_speed(&self) -> PointerSpeed {
         PointerSpeed::RAW
     }

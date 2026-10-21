@@ -1,18 +1,17 @@
-//! SDL3 input (Minecraft 26.x): events are filtered in `SDL_PollEvent`.
+//! SDL3 の入力（Minecraft 26.x）：`SDL_PollEvent` でイベントを選り分ける。
 //!
-//! SDL3 queues input and the game drains the queue with `SDL_PollEvent`; the hook hands
-//! each event to the router and drops the ones the overlay takes, so the game never sees
-//! them. The game might read input some other way (event watchers, `SDL_PeepEvents`); those
-//! functions are only logged the first time they are used, so a log shows whether the filter
-//! covers the game.
+//! SDL3 は入力をキューに溜め、ゲームは `SDL_PollEvent` でキューを空にする。フックは各イベントを
+//! router に渡し、オーバーレイが取るものは捨てるので、ゲームには見えない。ゲームがほかの方法
+//! （イベントの監視、`SDL_PeepEvents`）で入力を読むかもしれない。それらの関数は最初に使われた
+//! ときにログに出すだけなので、選り分けがゲームを覆っているかはログで分かる。
 //!
-//! The key rebinding rewrites the caller's event in place into the router's output, key or
-//! mouse button alike; `SDL_GetKeyboardState` and the modifier bits of key events report what
-//! the game got ([`rebind_state`]).
+//! キーの置き換えは、キーでもマウスのボタンでも、呼び出し側のイベントをその場で router の出力に
+//! 書き換える。`SDL_GetKeyboardState` とキーのイベントの修飾キーのビットは、ゲームが受け取った
+//! ものを答える（[`rebind_state`]）。
 //!
-//! F3+C for waypoints ([`f3c`]) is made-up key events handed out before SDL's own; the
-//! game handles each one before it polls again, so a `SDL_SetClipboardText` between two
-//! polls belongs to the event handed out in between.
+//! ウェイポイントのための F3+C（[`f3c`]）は、SDL 自身のイベントより先に渡す作ったキーのイベント。
+//! ゲームは次にポーリングする前に 1 つずつ処理するので、2 回のポーリングの間の
+//! `SDL_SetClipboardText` は、その間に渡したイベントによるもの。
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -36,7 +35,7 @@ type GetWindowIdFn = unsafe extern "C" fn(window: *mut c_void) -> u32;
 type SetClipboardTextFn = unsafe extern "C" fn(text: *const c_char) -> bool;
 type GetModStateFn = unsafe extern "C" fn() -> u16;
 
-// Probes.
+// 様子を見るためのフック。
 type PeepEventsFn = unsafe extern "C" fn(*mut u8, c_int, c_int, u32, u32) -> c_int;
 type WaitEventTimeoutFn = unsafe extern "C" fn(*mut u8, i32) -> bool;
 type WaitEventFn = unsafe extern "C" fn(*mut u8) -> bool;
@@ -46,7 +45,7 @@ type GetMouseStateFn = unsafe extern "C" fn(*mut f32, *mut f32) -> u32;
 type AddEventWatchFn = unsafe extern "C" fn(*const c_void, *mut c_void) -> bool;
 type SetEventFilterFn = unsafe extern "C" fn(*const c_void, *mut c_void);
 
-// Event types and SDL_Event field offsets (SDL 3.4, checked against LWJGL 3.4.3's layouts).
+// イベントの種類と SDL_Event のフィールドの位置（SDL 3.4。LWJGL 3.4.3 の並びと照らし合わせた）。
 const EVENT_WINDOW_RESIZED: u32 = 0x206;
 const EVENT_WINDOW_PIXEL_SIZE_CHANGED: u32 = 0x207;
 const EVENT_WINDOW_FOCUS_LOST: u32 = 0x20F;
@@ -61,9 +60,9 @@ const EVENT_MOUSE_WHEEL: u32 = 0x403;
 const OFF_WINDOW_ID: usize = 16;
 const OFF_WINDOW_DATA1: usize = 20;
 const OFF_WINDOW_DATA2: usize = 24;
-/// The keyboard or mouse of key and button events.
+/// キーとボタンのイベントのキーボードかマウス。
 const OFF_WHICH: usize = 20;
-/// sizeof(SDL_Event).
+/// sizeof(SDL_Event)。
 const EVENT_SIZE: usize = 128;
 const OFF_KEY_SCANCODE: usize = 24;
 const OFF_KEY: usize = 28;
@@ -85,16 +84,16 @@ const OFF_WHEEL_DIRECTION: usize = 32;
 const KMOD_SHIFT: u16 = 0x0003;
 const KMOD_CTRL: u16 = 0x00C0;
 const KMOD_ALT: u16 = 0x0300;
-/// The modifier keys' scancodes and bits (SDL3 has one bit per key).
+/// 修飾キーのスキャンコードとビット（SDL3 はキーごとに 1 ビット）。
 const MODIFIER_BITS: [(u16, u16); 8] = [
-    (224, 0x0040), // left Ctrl
-    (225, 0x0001), // left Shift
-    (226, 0x0100), // left Alt
-    (227, 0x0400), // left GUI
-    (228, 0x0080), // right Ctrl
-    (229, 0x0002), // right Shift
-    (230, 0x0200), // right Alt
-    (231, 0x0800), // right GUI
+    (224, 0x0040), // 左の Ctrl
+    (225, 0x0001), // 左の Shift
+    (226, 0x0100), // 左の Alt
+    (227, 0x0400), // 左の GUI
+    (228, 0x0080), // 右の Ctrl
+    (229, 0x0002), // 右の Shift
+    (230, 0x0200), // 右の Alt
+    (231, 0x0800), // 右の GUI
 ];
 
 const SCANCODE_LCTRL: u32 = 224;
@@ -102,13 +101,13 @@ const SCANCODE_RCTRL: u32 = 228;
 
 type Event = [u8; EVENT_SIZE];
 
-/// What handing out a made-up event means for F3+C.
+/// 作ったイベントを渡すことが、F3+C にとって何を意味するか。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tag {
     Plain,
-    /// The copy key's press: the game copies the location while handling it.
+    /// コピーのキーの押下：ゲームはこれを処理する間に座標をコピーする。
     CopyDown(Purpose),
-    /// The modifier's release: whether the game copied is known by then.
+    /// 修飾キーの解放：そのときには、ゲームがコピーしたかが分かっている。
     ModifierUp(Purpose),
 }
 
@@ -120,29 +119,29 @@ struct Api {
     stop_text_input: WindowBoolFn,
     text_input_active: WindowBoolFn,
     get_window_id: Option<GetWindowIdFn>,
-    /// The real modifier state, for mouse buttons rebound to keys (not hooked: Minecraft reads
-    /// a click's modifiers with it, which stay physical).
+    /// キーに置き換えたマウスのボタンのための、本当の修飾キーの状態（フックしない：Minecraft は
+    /// これでクリックの修飾キーを読み、それは物理のまま）。
     get_mod_state: Option<GetModStateFn>,
 }
 
 static API: OnceLock<Api> = OnceLock::new();
 static POLL_EVENT: Original<PollEventFn> = Original::new();
-/// The window of the last input event, for switching text input when the UI toggles.
+/// 最後の入力のイベントのウィンドウ（UI の開閉で文字の入力を切り替えるため）。
 static LAST_WINDOW: AtomicUsize = AtomicUsize::new(0);
-/// We switched SDL text input on for the UI and must switch it off again (when the game's
-/// own switching is not followed).
+/// UI のために SDL の文字の入力をオンにしたので、またオフに戻す必要がある（ゲーム自身の
+/// 切り替えを追えていないとき）。
 static TEXT_INPUT_OURS: AtomicBool = AtomicBool::new(false);
-/// The real SDL_StartTextInput and SDL_StopTextInput: the game's own switching is followed,
-/// so closing the UI leaves text input as the game last wanted it.
+/// 本物の SDL_StartTextInput と SDL_StopTextInput：ゲーム自身の切り替えを追うので、UI を
+/// 閉じると、文字の入力はゲームが最後に望んだ状態になる。
 static START_TEXT_INPUT: Original<WindowBoolFn> = Original::new();
 static STOP_TEXT_INPUT: Original<WindowBoolFn> = Original::new();
-/// Text input as the game (or SDL) last switched it.
+/// ゲーム（か SDL）が最後に切り替えた文字の入力の状態。
 static GAME_TEXT_INPUT: AtomicBool = AtomicBool::new(false);
-/// The UI is open and keeps text input on.
+/// UI が開いていて、文字の入力をオンにしている。
 static UI_TEXT_INPUT: AtomicBool = AtomicBool::new(false);
-/// The game window's pixel density (pixels per window unit), found once a frame.
+/// ゲームのウィンドウのピクセルの密度（ウィンドウの単位あたりのピクセル）。フレームごとに求める。
 static DENSITY: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
-/// Events made up by the agent (the zoom's resizes, F3+C), handed out before SDL's own.
+/// エージェントが作ったイベント（ズームの大きさの変更、F3+C）。SDL 自身のものより先に渡す。
 static INJECTED: Mutex<VecDeque<(Event, Tag)>> = Mutex::new(VecDeque::new());
 static SET_CLIPBOARD_TEXT: Original<SetClipboardTextFn> = Original::new();
 
@@ -150,13 +149,13 @@ static PEEP_EVENTS: Original<PeepEventsFn> = Original::new();
 static WAIT_EVENT: Original<WaitEventFn> = Original::new();
 static WAIT_EVENT_TIMEOUT: Original<WaitEventTimeoutFn> = Original::new();
 static SET_RELATIVE_MOUSE_MODE: Original<SetRelativeMouseModeFn> = Original::new();
-/// The game's SDL_GetKeyboardState, behind the hook that gives it the rebinding's key state.
+/// ゲームの SDL_GetKeyboardState（置き換えのキーの状態を渡すフックの裏の本物）。
 static GET_KEYBOARD_STATE: Original<GetKeyboardStateFn> = Original::new();
-/// SDL_GetKeyboardState itself: the real key state, for the agent (F3+C, the rebinding), which
-/// made-up events never change.
+/// SDL_GetKeyboardState そのもの：エージェント（F3+C、置き換え）のための本当のキーの状態。
+/// 作ったイベントでは変わらない。
 static GET_KEYBOARD_STATE_EXPORT: OnceLock<GetKeyboardStateFn> = OnceLock::new();
-/// What SDL_GetKeyboardState returns while the rebinding has a say on some key: SDL's array with
-/// that applied (a C bool per scancode, as SDL's).
+/// 置き換えがどれかのキーについて判断を持つ間に SDL_GetKeyboardState が返すもの：それを
+/// 当てはめた SDL の配列（SDL と同じく、スキャンコードごとの C の bool）。
 static SPOOFED_KEYS: [AtomicU8; SCANCODE_COUNT] = [const { AtomicU8::new(0) }; SCANCODE_COUNT];
 static GET_MOUSE_STATE: Original<GetMouseStateFn> = Original::new();
 static GET_RELATIVE_MOUSE_STATE: Original<GetMouseStateFn> = Original::new();
@@ -233,7 +232,7 @@ static HOOKS: LazyLock<[Hook; 13]> = LazyLock::new(|| {
     ]
 });
 
-/// The hooks of SDL3's input functions.
+/// SDL3 の入力の関数のフック。
 pub fn hooks() -> &'static [Hook] {
     &*HOOKS
 }
@@ -241,7 +240,7 @@ pub fn hooks() -> &'static [Hook] {
 pub fn install(module: usize) {
     let api = (|| {
         let get = |name: &CStr| export(module, name);
-        // SAFETY: SDL3 exports with these C signatures.
+        // SAFETY: この C のシグネチャの SDL3 の export。
         unsafe {
             Some(Api {
                 get_window_from_id: std::mem::transmute::<*const c_void, GetWindowFromIdFn>(get(
@@ -277,20 +276,20 @@ pub fn install(module: usize) {
     let _ = API.set(api);
 
     if let Some(f) = export(module, c"SDL_GetKeyboardState") {
-        // SAFETY: SDL_GetKeyboardState has this signature.
+        // SAFETY: SDL_GetKeyboardState はこのシグネチャ。
         let _ = GET_KEYBOARD_STATE_EXPORT
             .set(unsafe { std::mem::transmute::<*const c_void, GetKeyboardStateFn>(f) });
     }
-    // F3+C needs the game window's id for its key events and the real key state.
+    // F3+C は、キーのイベントのためのゲームのウィンドウの番号と、本当のキーの状態が要る。
     if !has_window_id {
         log::warn!("SDL3 does not export SDL_GetWindowID");
     }
     f3c::set_hooks(f3c_hooks_ready);
 }
 
-/// What F3+C needs: the game's window id, the real key state and the events through the hook.
-/// Not the clipboard hook: LWJGL looks SDL_SetClipboardText up only when the game first copies
-/// (its class is initialized then), which our F3+C itself may cause.
+/// F3+C が要るもの：ゲームのウィンドウの番号、本当のキーの状態、フックを通るイベント。
+/// クリップボードのフックは入れない：LWJGL は SDL_SetClipboardText を、ゲームが最初に
+/// コピーするとき（そのクラスが初期化されるとき）に引く。それは自前の F3+C そのものかもしれない。
 fn f3c_hooks_ready() -> bool {
     API.get().is_some_and(|api| api.get_window_id.is_some())
         && real_keyboard_state().is_some()
@@ -311,27 +310,27 @@ unsafe extern "C" fn poll_event_hook(event: *mut u8) -> bool {
                 if tag != Tag::Plain {
                     crate::catch("SDL F3+C", || on_injected(&mut injected, &made_up, tag));
                 }
-                // SAFETY: the caller's buffer holds a whole SDL_Event.
+                // SAFETY: 呼び出し側のバッファは SDL_Event 1 つ分を持つ。
                 unsafe { std::ptr::copy_nonoverlapping(made_up.as_ptr(), event, EVENT_SIZE) };
             }
             return true;
         }
     }
     loop {
-        // SAFETY: the caller's event buffer (or null to only peek).
+        // SAFETY: 呼び出し側のイベントのバッファ（覗くだけなら null）。
         let has_event = unsafe { original(event) };
         if !has_event || event.is_null() {
             return has_event;
         }
-        // SAFETY: SDL just filled a whole SDL_Event.
+        // SAFETY: SDL がいま SDL_Event 1 つ分を埋めた。
         let route = crate::catch("SDL_PollEvent hook", || unsafe { route_event(event) });
         if log::log_enabled!(log::Level::Trace) {
-            // SAFETY: as above.
+            // SAFETY: 上と同じ。
             let kind = unsafe { event.cast::<u32>().read_unaligned() };
             log::trace!("SDL event 0x{kind:X} -> {route:?}");
         }
-        // The UI opens and closes with a key (else the frame finds the change).
-        // SAFETY: as above.
+        // UI はキーで開閉する（そうでなければ、フレームが変化に気づく）。
+        // SAFETY: 上と同じ。
         if matches!(
             unsafe { event.cast::<u32>().read_unaligned() },
             EVENT_KEY_DOWN | EVENT_KEY_UP
@@ -339,20 +338,20 @@ unsafe extern "C" fn poll_event_hook(event: *mut u8) -> bool {
             crate::catch("SDL text input", update_text_input);
         }
         if route != Some(Route::Consume) {
-            // SAFETY: as above.
+            // SAFETY: 上と同じ。
             crate::catch("SDL F3+C", || unsafe { mark_passive(event) });
             return true;
         }
     }
 }
 
-/// The user's own F3+C: when their copy key's press goes to the game, a location it copies
-/// before the next poll is theirs.
+/// 利用者自身の F3+C：利用者のコピーのキーの押下がゲームに行ったら、次のポーリングまでに
+/// ゲームがコピーする座標は利用者のもの。
 ///
 /// # Safety
-/// `event` must point to a complete SDL_Event.
+/// `event` は、完全な SDL_Event を指していなければならない。
 unsafe fn mark_passive(event: *const u8) {
-    // SAFETY: fields inside the 128-byte SDL_Event.
+    // SAFETY: 128 バイトの SDL_Event の中のフィールド。
     let (kind, repeat, scancode) = unsafe {
         (
             event.cast::<u32>().read_unaligned(),
@@ -360,8 +359,8 @@ unsafe fn mark_passive(event: *const u8) {
             event.add(OFF_KEY_SCANCODE).cast::<u32>().read_unaligned(),
         )
     };
-    // Only with the debug modifier down as the game sees it: Ctrl+C in a text field may copy
-    // text that reads as a location (a /tp command).
+    // ゲームから見てデバッグの修飾キーを押しているときだけ：入力欄の Ctrl+C は、座標に読める
+    // 文字（/tp のコマンド）をコピーするかもしれない。
     if kind == EVENT_KEY_DOWN
         && !repeat
         && f3c::passive_key_sdl(scancode)
@@ -371,11 +370,11 @@ unsafe fn mark_passive(event: *const u8) {
     }
 }
 
-/// At every SDL_PollEvent: the game handled the previous event, which ends the user's own
-/// F3+C; a waypoint request becomes key events handed out from now on.
+/// SDL_PollEvent のたびに：ゲームは前のイベントを処理したので、利用者自身の F3+C は終わる。
+/// ウェイポイントの要求は、ここから渡すキーのイベントになる。
 fn start_f3c() {
     f3c::end_passive();
-    // Before INJECTED is locked (lock order).
+    // INJECTED をロックする前に（ロックの順序）。
     let Some(job) = f3c::take_job(None) else {
         return;
     };
@@ -391,18 +390,18 @@ fn start_f3c() {
     }
 }
 
-/// F3+C for `job` as SDL key events, if it can be sent now.
+/// いま送れるなら、`job` の F3+C を SDL のキーのイベントとして。
 fn f3c_events(job: &Job) -> Result<[(Event, Tag); 4], Failure> {
     let codes = f3c::key_codes(&job.keys, |name| sdl_scancode(name).zip(sdl_keycode(name)))?;
     let window = job.window as *mut c_void;
     if !captured(window) {
         return Err(Failure::NotPlaying);
     }
-    // A held crash key would arm Minecraft's debug crash once the modifier is down, the real
-    // release of a held modifier would come after ours (and toggle the debug overlay), and,
-    // where the copy key also drops items, Ctrl would make a refused C drop a whole stack
-    // (only then: Ctrl is often held to sprint). Held as the game reads them: a key rebound
-    // to one of them counts, one rebound to another key does not.
+    // 押しているクラッシュのキーは、修飾キーが下りると Minecraft のデバッグのクラッシュを始めて
+    // しまう。押している修飾キーの本当の解放は自分のものの後に来る（デバッグの画面を切り替える）。
+    // コピーのキーがアイテムを捨てるキーでもあるときは、Ctrl があると断られた C がスタックごと
+    // 捨ててしまう（そのときだけ：Ctrl はダッシュでよく押している）。ゲームが読むとおりに押して
+    // いるか：それらに置き換えたキーは数え、別のキーに置き換えたものは数えない。
     let ctrl = job.keys.copy_drops_items();
     let crash = match f3c::crash_key(&job.keys, Naming::Modern) {
         Some(InputId::Key(scancode)) => Some(u32::from(scancode)),
@@ -434,7 +433,7 @@ fn f3c_events(job: &Job) -> Result<[(Event, Tag); 4], Failure> {
     let id = API
         .get()
         .and_then(|api| api.get_window_id)
-        // SAFETY: the window SDL passed to SDL_GL_SwapWindow, on its thread.
+        // SAFETY: SDL が SDL_GL_SwapWindow に渡したウィンドウを、そのスレッドで。
         .map_or(0, |get| unsafe { get(window) });
     if id == 0 {
         return Err(Failure::NoCallback);
@@ -446,25 +445,24 @@ fn real_keyboard_state() -> Option<GetKeyboardStateFn> {
     GET_KEYBOARD_STATE_EXPORT.get().copied()
 }
 
-/// SDL's own key state, one C bool per scancode (what is physically held); `None` if SDL cannot
-/// tell. Read it right away: SDL updates it as it pumps events.
+/// SDL 自身のキーの状態（スキャンコードごとに C の bool 1 つ。物理的に押しているもの）。SDL が
+/// 答えられなければ `None`。すぐに読むこと：SDL はイベントを汲み上げるたびに更新する。
 fn real_keys() -> Option<&'static [u8]> {
     let get = real_keyboard_state()?;
     let mut count: c_int = 0;
-    // SAFETY: SDL writes the array's length and returns its own array. Called directly, the
-    // rebinding's hook does not see it.
+    // SAFETY: SDL は配列の長さを書き、自分の配列を返す。直接呼ぶので、置き換えのフックには見えない。
     let state = unsafe { get(&mut count) };
     if state.is_null() {
         return None;
     }
     let count = usize::try_from(count).unwrap_or(0);
-    // SAFETY: SDL's array of `count` one-byte bools, which lives as long as SDL.
+    // SAFETY: `count` 個の 1 バイトの bool の SDL の配列。SDL と同じだけ生きる。
     Some(unsafe { std::slice::from_raw_parts(state.cast::<u8>(), count) })
 }
 
-/// The game's view of the key state: SDL's array, with the rebinding's say on the keys it
-/// holds down or hides ([`rebind_state`]). Minecraft asks for the array afresh every time it
-/// reads a key, so a copy patched now is what it reads.
+/// ゲームから見たキーの状態：SDL の配列に、置き換えが押さえているか隠しているキーの判断を
+/// 当てはめたもの（[`rebind_state`]）。Minecraft はキーを読むたびに配列を聞き直すので、
+/// いま直した写しがゲームの読むもの。
 unsafe extern "C" fn get_keyboard_state_hook(numkeys: *mut c_int) -> *const bool {
     static USED: AtomicBool = AtomicBool::new(false);
     first_use(&USED, "SDL_GetKeyboardState");
@@ -472,23 +470,23 @@ unsafe extern "C" fn get_keyboard_state_hook(numkeys: *mut c_int) -> *const bool
         return std::ptr::null();
     };
     let mut count: c_int = 0;
-    // SAFETY: SDL writes the length to our local and returns its own array.
+    // SAFETY: SDL は長さをこちらの変数に書き、自分の配列を返す。
     let state = unsafe { original(&mut count) };
     if !numkeys.is_null() {
-        // SAFETY: the caller's pointer, which SDL allows to be null.
+        // SAFETY: 呼び出し側のポインタ（SDL は null でもよいとする）。
         unsafe { *numkeys = count };
     }
     if state.is_null() || !rebind_state::any_forced() {
         return state;
     }
-    // A longer array than ours is left alone (the game must not read past what it is told).
+    // こちらより長い配列には触れない（ゲームは伝えられた長さを超えて読んではならない）。
     let Some(count) = usize::try_from(count)
         .ok()
         .filter(|&n| n > 0 && n <= SCANCODE_COUNT)
     else {
         return state;
     };
-    // SAFETY: SDL's array of `count` one-byte bools.
+    // SAFETY: `count` 個の 1 バイトの bool の SDL の配列。
     let real = unsafe { std::slice::from_raw_parts(state.cast::<u8>(), count) };
     let out = &SPOOFED_KEYS[..count];
     if !rebind_state::patch_forced(real, out) {
@@ -497,7 +495,7 @@ unsafe extern "C" fn get_keyboard_state_hook(numkeys: *mut c_int) -> *const bool
     SPOOFED_KEYS.as_ptr().cast()
 }
 
-/// Copies the key state `real` into `out`, with what `forced` says about each key.
+/// キーの状態 `real` を `out` に写し、各キーについて `forced` の判断を当てはめる。
 fn spoof_keys(real: &[u8], out: &[AtomicU8], forced: impl Fn(InputId) -> Option<bool>) {
     for (scancode, (entry, &down)) in out.iter().zip(real).enumerate() {
         let down = match u16::try_from(scancode)
@@ -511,8 +509,8 @@ fn spoof_keys(real: &[u8], out: &[AtomicU8], forced: impl Fn(InputId) -> Option<
     }
 }
 
-/// Modifier down, copy down, copy up, modifier up, for the window with `window_id`. Keys are
-/// (scancode, keycode); Minecraft matches its bindings on the scancode.
+/// `window_id` のウィンドウへの、修飾キーを下ろす、コピーを下ろす、コピーを上げる、修飾キーを
+/// 上げる。キーは (スキャンコード, キーコード)。Minecraft はスキャンコードで割り当てを照らし合わせる。
 fn burst_events(
     window_id: u32,
     modifier: (u32, u32),
@@ -530,9 +528,9 @@ fn burst_events(
     ]
 }
 
-/// A key event as SDL reports one, without modifiers (a held Ctrl must not turn it into
-/// Ctrl+C), not repeated, from no particular keyboard (`which` 0) and with no timestamp
-/// (Minecraft reads neither).
+/// SDL が報告するのと同じキーのイベント。修飾キーなし（押している Ctrl で Ctrl+C にしては
+/// いけない）、リピートでない、特定のキーボードからでない（`which` 0）、時刻なし（Minecraft は
+/// どちらも読まない）。
 fn key_event(down: bool, window_id: u32, (scancode, keycode): (u32, u32)) -> Event {
     let mut e = [0u8; EVENT_SIZE];
     let kind = if down { EVENT_KEY_DOWN } else { EVENT_KEY_UP };
@@ -544,8 +542,8 @@ fn key_event(down: bool, window_id: u32, (scancode, keycode): (u32, u32)) -> Eve
     e
 }
 
-/// Handing out a tagged event: the copy key's press opens the window in which the game's
-/// clipboard write is ours; the modifier's release closes it. Runs with INJECTED locked.
+/// 印の付いたイベントを渡す：コピーのキーの押下で、ゲームのクリップボードへの書き込みが
+/// 自分のものになる窓を開き、修飾キーの解放で閉じる。INJECTED をロックしたまま動く。
 fn on_injected(queue: &mut VecDeque<(Event, Tag)>, event: &Event, tag: Tag) {
     match tag {
         Tag::Plain => {}
@@ -559,10 +557,11 @@ fn on_injected(queue: &mut VecDeque<(Event, Tag)>, event: &Event, tag: Tag) {
     }
 }
 
-/// What the game copied settles the burst as its modifier release (`up`) goes out. Refused,
-/// that release toggles the debug overlay: the modifier is pressed and released once more
-/// right after it, in the same poll loop, so no frame shows the toggle. Nothing through a
-/// clipboard hook LWJGL never got (`clipboard_hooked` false) is no refusal.
+/// 修飾キーの解放（`up`）を出すときに、ゲームがコピーしたもので一連の送信を終わらせる。
+/// 断られた場合、その解放がデバッグの画面を切り替える：同じポーリングのループの中で、すぐ後に
+/// 修飾キーをもう 1 回押して離すので、切り替えが見えるフレームはない。LWJGL がまだ受け取って
+/// いないクリップボードのフック（`clipboard_hooked` が false）を通って何も来なかったのは、
+/// 断られたのではない。
 fn after_modifier_up(
     queue: &mut VecDeque<(Event, Tag)>,
     up: &Event,
@@ -571,14 +570,14 @@ fn after_modifier_up(
 ) -> Option<Failure> {
     match copied {
         Injected::Captured => None,
-        // The game handled the keys; only its text was not a location.
+        // ゲームはキーを処理した。その文字が座標でなかっただけ。
         Injected::Written => Some(Failure::Unreadable),
         Injected::Nothing if !clipboard_hooked => Some(Failure::NoHooks),
         Injected::Nothing => {
             let mut down = *up;
             down[..4].copy_from_slice(&EVENT_KEY_DOWN.to_ne_bytes());
             down[OFF_KEY_DOWN] = 1;
-            // In reverse, so they come out DOWN, then UP.
+            // 逆の順に入れるので、DOWN、UP の順に出る。
             queue.push_front((*up, Tag::Plain));
             queue.push_front((down, Tag::Plain));
             Some(Failure::Refused)
@@ -586,37 +585,37 @@ fn after_modifier_up(
     }
 }
 
-/// Keeps the location Minecraft copies for our F3+C off the clipboard (reporting success, or
-/// the game logs an error), and sees the user's own F3+C.
+/// 自前の F3+C で Minecraft がコピーする座標をクリップボードに入れず（成功と答える。そうしないと
+/// ゲームがエラーをログに出す）、利用者自身の F3+C を見る。
 unsafe extern "C" fn set_clipboard_text_hook(text: *const c_char) -> bool {
     let Some(original) = SET_CLIPBOARD_TEXT.get() else {
         return false;
     };
-    // Other writes (the game's own copying) are passed on unread.
+    // ほかの書き込み（ゲーム自身のコピー）は読まずに通す。
     let ours = !text.is_null()
         && f3c::watching()
         && crate::catch("SDL_SetClipboardText hook", || {
-            // SAFETY: NUL-terminated UTF-8, valid only during this call (LWJGL passes a stack
-            // buffer); it is read here, before returning.
+            // SAFETY: NUL で終わる UTF-8 で、この呼び出しの間だけ有効（LWJGL はスタックのバッファを
+            // 渡す）。戻る前にここで読む。
             f3c::on_clipboard(&unsafe { CStr::from_ptr(text) }.to_string_lossy())
         })
         .unwrap_or(false);
     if ours {
         return true;
     }
-    // SAFETY: the caller's argument.
+    // SAFETY: 呼び出し側の引数。
     unsafe { original(text) }
 }
 
-/// Hands the event to the router; the key rebinding rewrites it in place.
+/// イベントを router に渡す。キーの置き換えはそれをその場で書き換える。
 ///
 /// # Safety
-/// `event` must point to a complete SDL_Event the caller lets us write.
+/// `event` は、呼び出し側が書いてよい完全な SDL_Event を指していなければならない。
 unsafe fn route_event(event: *mut u8) -> Route {
     let Some(api) = API.get() else {
         return Route::Forward;
     };
-    // SAFETY: every field read lies inside the 128-byte SDL_Event.
+    // SAFETY: 読むフィールドはどれも 128 バイトの SDL_Event の中。
     unsafe {
         let read_u32 = |off: usize| event.add(off).cast::<u32>().read_unaligned();
         let read_f32 = |off: usize| event.add(off).cast::<f32>().read_unaligned();
@@ -667,7 +666,7 @@ unsafe fn route_event(event: *mut u8) -> Route {
                         captured,
                         false,
                     );
-                    // Before the game gets the event (and may read the key state).
+                    // ゲームがイベントを受け取る（キーの状態を読むかもしれない）前に。
                     rebind_state::apply(window as usize, &router.rebind_state());
                     delivery
                 };
@@ -680,7 +679,7 @@ unsafe fn route_event(event: *mut u8) -> Route {
                 }
                 router().text(&CStr::from_ptr(text).to_string_lossy())
             }
-            // IME composition is not shown yet; keep it away from the game while typing.
+            // IME の変換中の文字はまだ見せない。入力している間はゲームに渡さない。
             EVENT_TEXT_EDITING => {
                 if router().ui_open() {
                     Route::Consume
@@ -713,15 +712,15 @@ unsafe fn route_event(event: *mut u8) -> Route {
                     rebind_state::apply(window as usize, &router.rebind_state());
                     delivery
                 };
-                // A key made of a click gets the modifiers held now, as the click would (SAFETY:
-                // SDL_GetModState takes no arguments).
+                // クリックから作ったキーは、クリックと同じく今押している修飾キーを受け取る（SAFETY:
+                // SDL_GetModState は引数を取らない）。
                 let real_mods = || api.get_mod_state.map_or(0, |get| get());
                 deliver(&mut *event.cast::<Event>(), delivery, || {
                     adjust_mod(real_mods())
                 })
             }
             EVENT_MOUSE_WHEEL => {
-                // Direction 1 = flipped (natural scrolling).
+                // direction 1 = 反転（ナチュラルスクロール）。
                 let sign = if read_u32(OFF_WHEEL_DIRECTION) == 1 {
                     -1.0
                 } else {
@@ -730,10 +729,9 @@ unsafe fn route_event(event: *mut u8) -> Route {
                 router().scroll(read_f32(OFF_WHEEL_X) * sign, read_f32(OFF_WHEEL_Y) * sign)
             }
             EVENT_WINDOW_FOCUS_LOST => {
-                // SDL3 sends the releases of held keys around this event (the smoke test saw
-                // them before it), not of buttons, and the router drops those of rebound sources
-                // after this: their outputs are released here, at the next poll. Either order
-                // ends with everything released.
+                // SDL3 は、押しているキーの解放をこのイベントの前後に送り（スモークではその前に見えた）、
+                // ボタンのものは送らない。router はこの後で、置き換えた元のキーのものを捨てる：その出力は
+                // ここで、次のポーリングで離す。どちらの順でも、最後には全部離れる。
                 let releases = {
                     let mut router = router();
                     let releases = router.focus_lost(|id| matches!(id, InputId::Key(_)));
@@ -754,8 +752,8 @@ unsafe fn route_event(event: *mut u8) -> Route {
     }
 }
 
-/// Acts on the router's decision about the key or button event the game is about to get:
-/// `Send` rewrites it into the output. Key events get `key_mod()` as their modifier bits.
+/// ゲームがこれから受け取るキーかボタンのイベントについての router の判断を行う：`Send` なら
+/// 出力に書き換える。キーのイベントは、修飾キーのビットとして `key_mod()` を受け取る。
 fn deliver(event: &mut Event, delivery: Delivery, key_mod: impl FnOnce() -> u16) -> Route {
     match delivery {
         Delivery::Consume => Route::Consume,
@@ -775,10 +773,10 @@ fn deliver(event: &mut Event, delivery: Delivery, key_mod: impl FnOnce() -> u16)
     }
 }
 
-/// Rewrites a key or mouse button event into `output` in place, keeping its window and
-/// timestamp; false if the game must not get it (a mouse button never repeats: the game would
-/// take a repeat for a press). A key gets `key_mod()`; a key made of a key keeps its keyboard
-/// and raw code, a button made of a button its mouse and clicks.
+/// キーかマウスのボタンのイベントを、ウィンドウと時刻を残したまま、その場で `output` に
+/// 書き換える。ゲームに渡してはいけなければ false（マウスのボタンはリピートしない：ゲームは
+/// リピートを押下と受け取ってしまう）。キーは `key_mod()` を受け取る。キーから作ったキーは
+/// キーボードと生のコードを、ボタンから作ったボタンはマウスとクリックの数を残す。
 fn rewrite(event: &mut Event, output: Output, key_mod: impl FnOnce() -> u16) -> bool {
     let from_key = matches!(u32_at(event, 0), EVENT_KEY_DOWN | EVENT_KEY_UP);
     let down = output.phase != Phase::Release;
@@ -826,9 +824,9 @@ fn put(event: &mut Event, offset: usize, bytes: &[u8]) {
     event[offset..offset + bytes.len()].copy_from_slice(bytes);
 }
 
-/// The modifier bits of a key event for the game: while the rebinding has a say on a modifier
-/// key, its bit follows the key state the game reads (a key rebound to Ctrl sets Ctrl's bit,
-/// Ctrl rebound to F3 clears it, so F3+B does not turn into Ctrl+B).
+/// ゲームに渡すキーのイベントの修飾キーのビット：置き換えが修飾キーについて判断を持つ間は、
+/// そのビットはゲームが読むキーの状態に従う（Ctrl に置き換えたキーは Ctrl のビットを立て、
+/// F3 に置き換えた Ctrl はそれを消すので、F3+B が Ctrl+B にならない）。
 fn adjust_mod(mods: u16) -> u16 {
     if !rebind_state::modifiers_forced() {
         return mods;
@@ -836,7 +834,7 @@ fn adjust_mod(mods: u16) -> u16 {
     patch_mod(mods, rebind_state::forced)
 }
 
-/// `mods` with each modifier key's bit set or cleared as `forced` says.
+/// `mods` の各修飾キーのビットを、`forced` の判断どおりに立てるか消したもの。
 fn patch_mod(mods: u16, forced: impl Fn(InputId) -> Option<bool>) -> u16 {
     MODIFIER_BITS.iter().fold(mods, |mods, &(scancode, bit)| {
         match forced(InputId::Key(scancode)) {
@@ -847,8 +845,8 @@ fn patch_mod(mods: u16, forced: impl Fn(InputId) -> Option<bool>) -> u16 {
     })
 }
 
-/// An event that gives the game `output` on its own (a release on focus loss or from the
-/// safety net), for the window with `window_id`; `None` for a mouse button's repeat.
+/// `window_id` のウィンドウで、それだけでゲームに `output` を渡すイベント（フォーカスを
+/// 失ったときか安全網からの解放）。マウスのボタンのリピートなら `None`。
 fn output_event(window_id: u32, output: Output) -> Option<Event> {
     let down = output.phase != Phase::Release;
     match output.id {
@@ -863,8 +861,8 @@ fn output_event(window_id: u32, output: Output) -> Option<Event> {
     }
 }
 
-/// A mouse button event as SDL reports one, from no particular mouse (`which` 0), with no
-/// timestamp or position (Minecraft reads none of them).
+/// SDL が報告するのと同じマウスのボタンのイベント。特定のマウスからでなく（`which` 0）、
+/// 時刻も位置もない（Minecraft はどれも読まない）。
 fn button_event(down: bool, window_id: u32, button: u8) -> Event {
     let mut e = [0u8; EVENT_SIZE];
     let kind = if down {
@@ -880,7 +878,7 @@ fn button_event(down: bool, window_id: u32, button: u8) -> Event {
     e
 }
 
-/// Hands out `events` before anything queued. Takes INJECTED: call without the router.
+/// `events` を、キューにあるものより先に渡す。INJECTED を取る：router を持たずに呼ぶこと。
 fn inject_first(events: Vec<Event>) {
     if events.is_empty() {
         return;
@@ -891,8 +889,8 @@ fn inject_first(events: Vec<Event>) {
     }
 }
 
-/// The safety net's releases ([`rebind_state::lost_releases`]), after a swap of `window`: the
-/// game gets them at its next poll.
+/// `window` のスワップの後の、安全網の解放（[`rebind_state::lost_releases`]）：ゲームは
+/// 次のポーリングでそれを受け取る。
 pub fn release_lost_keys(window: *mut c_void) {
     let Some(get_id) = API.get().and_then(|api| api.get_window_id) else {
         return;
@@ -901,7 +899,7 @@ pub fn release_lost_keys(window: *mut c_void) {
     if releases.is_empty() {
         return;
     }
-    // SAFETY: the window SDL passed to SDL_GL_SwapWindow, on its thread.
+    // SAFETY: SDL が SDL_GL_SwapWindow に渡したウィンドウを、そのスレッドで。
     let window_id = unsafe { get_id(window) };
     let events = releases
         .into_iter()
@@ -913,7 +911,7 @@ pub fn release_lost_keys(window: *mut c_void) {
         .extend(events);
 }
 
-/// The key of an SDL3 scancode; `None` outside the key ids (SDL3 has no key below 4).
+/// SDL3 のスキャンコードのキー。キーの id の外なら `None`（SDL3 に 4 より下のキーはない）。
 fn input_key(scancode: u32) -> Option<InputId> {
     u16::try_from(scancode)
         .ok()
@@ -921,9 +919,9 @@ fn input_key(scancode: u32) -> Option<InputId> {
         .map(InputId::Key)
 }
 
-/// Tells the game the size the zoom wants, the way SDL reports a resize: the new size in
-/// pixels, then the window size (the same on displays without scaling; Minecraft may read
-/// either).
+/// SDL が大きさの変更を報告するのと同じ形で、ズームが望む大きさをゲームに伝える：新しい
+/// ピクセルの大きさ、次にウィンドウの大きさ（拡大のない画面では同じ。Minecraft はどちらを
+/// 読むこともある）。
 fn queue_zoom_resize() {
     let Some((window, [w, h])) = crate::tall::take_pending() else {
         return;
@@ -934,7 +932,7 @@ fn queue_zoom_resize() {
     let Some(get_id) = api.get_window_id else {
         return;
     };
-    // SAFETY: a window SDL passed to SDL_GL_SwapWindow.
+    // SAFETY: SDL が SDL_GL_SwapWindow に渡したウィンドウ。
     let id = unsafe { get_id(window) };
     let (window_w, window_h) = window_size_for(api, window, [w, h]);
     let event = |kind: u32, w: i32, h: i32| {
@@ -951,10 +949,10 @@ fn queue_zoom_resize() {
     injected.push_back((event(EVENT_WINDOW_RESIZED, window_w, window_h), Tag::Plain));
 }
 
-/// The window size (in SDL's window coordinates) matching `pixels`, scaled like the real
-/// window's size is to its pixel size.
+/// `pixels` に合うウィンドウの大きさ（SDL のウィンドウの座標で）。本当のウィンドウの大きさと
+/// ピクセルの大きさの比と同じ割合で縮める。
 fn window_size_for(api: &Api, window: *mut c_void, [w, h]: [i32; 2]) -> (i32, i32) {
-    // SAFETY: as above.
+    // SAFETY: 上と同じ。
     let density = crate::tall::own_query(|| unsafe { (api.get_pixel_density)(window) });
     let density = if density.is_finite() && density > 0.0 {
         density
@@ -967,21 +965,21 @@ fn window_size_for(api: &Api, window: *mut c_void, [w, h]: [i32; 2]) -> (i32, i3
     )
 }
 
-/// Whether the game has the mouse in relative mode on `window` (it is being played).
+/// ゲームが `window` でマウスを相対モードにしているか（プレイ中か）。
 pub fn captured(window: *mut c_void) -> bool {
     API.get().is_some_and(|api| {
-        // SAFETY: a window SDL passed us, on its thread.
+        // SAFETY: SDL が渡したウィンドウを、そのスレッドで。
         unsafe { (api.get_relative_mouse_mode)(window) }
     })
 }
 
-/// Once a frame, after the swap of `window` (on the thread that polls its events): its pixel
-/// density, and text input if the UI opened or closed.
+/// フレームに 1 回、`window` のスワップの後に（そのイベントをポーリングするスレッドで）：
+/// ピクセルの密度と、UI が開いたか閉じたなら文字の入力。
 pub fn after_swap(window: *mut c_void) {
     if let Some(api) = API.get()
         && !window.is_null()
     {
-        // SAFETY: the window SDL passed to SDL_GL_SwapWindow, on its thread.
+        // SAFETY: SDL が SDL_GL_SwapWindow に渡したウィンドウを、そのスレッドで。
         let density = crate::tall::own_query(|| unsafe { (api.get_pixel_density)(window) });
         let density = if density.is_finite() && density > 0.0 {
             density
@@ -993,9 +991,8 @@ pub fn after_swap(window: *mut c_void) {
     update_text_input();
 }
 
-/// SDL3 only sends text (and runs the IME) while text input is on; switch it on for the
-/// UI, and when the UI closes back to what the game last asked for (or, without that
-/// followed, off if the game had it off).
+/// SDL3 は、文字の入力がオンの間だけ文字を送る（IME も動かす）。UI のためにオンにし、UI を
+/// 閉じたらゲームが最後に頼んだ状態に戻す（追えていなければ、ゲームがオフにしていたならオフ）。
 fn update_text_input() {
     let Some(open) = router().take_ui_changed() else {
         return;
@@ -1011,8 +1008,8 @@ fn update_text_input() {
         return;
     }
     let followed = START_TEXT_INPUT.get().zip(STOP_TEXT_INPUT.get());
-    // SAFETY: a window SDL reported for an event on this (the event) thread; the real
-    // functions have the exports' signature.
+    // SAFETY: このスレッド（イベントのスレッド）のイベントで SDL が報告したウィンドウ。本物の
+    // 関数は export のシグネチャを持つ。
     unsafe {
         match followed {
             Some((start, stop)) => {
@@ -1039,18 +1036,18 @@ fn update_text_input() {
     }
 }
 
-/// The game (or SDL) switches text input on: remembered for when the UI closes.
+/// ゲーム（か SDL）が文字の入力をオンにする：UI を閉じたときのために覚える。
 unsafe extern "C" fn start_text_input_hook(window: *mut c_void) -> bool {
     GAME_TEXT_INPUT.store(true, Ordering::Relaxed);
     let Some(original) = START_TEXT_INPUT.get() else {
         return false;
     };
-    // SAFETY: the caller's argument.
+    // SAFETY: 呼び出し側の引数。
     unsafe { original(window) }
 }
 
-/// The game switches text input off: remembered, and while the UI is open put off until it
-/// closes (the UI's text fields need it).
+/// ゲームが文字の入力をオフにする：覚えておき、UI が開いている間は閉じるまで延ばす（UI の
+/// 入力欄にはそれが要る）。
 unsafe extern "C" fn stop_text_input_hook(window: *mut c_void) -> bool {
     GAME_TEXT_INPUT.store(false, Ordering::Relaxed);
     if UI_TEXT_INPUT.load(Ordering::Relaxed) {
@@ -1059,7 +1056,7 @@ unsafe extern "C" fn stop_text_input_hook(window: *mut c_void) -> bool {
     let Some(original) = STOP_TEXT_INPUT.get() else {
         return false;
     };
-    // SAFETY: the caller's argument.
+    // SAFETY: 呼び出し側の引数。
     unsafe { original(window) }
 }
 
@@ -1071,8 +1068,8 @@ fn modifiers(mods: u16) -> Modifiers {
     )
 }
 
-/// egui's name for an SDL3 keycode (the keys a text field or a hotkey can use). Keycodes
-/// follow the keyboard layout.
+/// SDL3 のキーコードの egui の名前（入力欄とホットキーが使えるキー）。キーコードはキーボードの
+/// 配列に従う。
 fn egui_key(key: u32) -> Option<Key> {
     const LETTERS: [Key; 26] = [
         Key::A,
@@ -1119,7 +1116,7 @@ fn egui_key(key: u32) -> Option<Key> {
         0x30..=0x39 => DIGITS[(key - 0x30) as usize],
         0x20 => Key::Space,
         0x1B => Key::Escape,
-        0x0D | 0x4000_0058 => Key::Enter, // Return, keypad Enter
+        0x0D | 0x4000_0058 => Key::Enter, // Return、テンキーの Enter
         0x09 => Key::Tab,
         0x08 => Key::Backspace,
         0x7F => Key::Delete,
@@ -1136,9 +1133,9 @@ fn egui_key(key: u32) -> Option<Key> {
         0x4000_0068..=0x4000_0073 => FUNCTION_KEYS[(key - 0x4000_0068 + 12) as usize], // F13-F24
         0x27 => Key::Quote,
         0x2C => Key::Comma,
-        0x2D | 0x4000_0056 => Key::Minus,  // keypad -
-        0x2E | 0x4000_0063 => Key::Period, // keypad .
-        0x2F | 0x4000_0054 => Key::Slash,  // keypad /
+        0x2D | 0x4000_0056 => Key::Minus,  // テンキーの -
+        0x2E | 0x4000_0063 => Key::Period, // テンキーの .
+        0x2F | 0x4000_0054 => Key::Slash,  // テンキーの /
         0x3A => Key::Colon,
         0x3B => Key::Semicolon,
         0x3D => Key::Equals,
@@ -1146,14 +1143,14 @@ fn egui_key(key: u32) -> Option<Key> {
         0x5C => Key::Backslash,
         0x5D => Key::CloseBracket,
         0x60 => Key::Backtick,
-        0x4000_0057 => Key::Plus, // keypad +
-        0x4000_0059..=0x4000_0061 => DIGITS[(key - 0x4000_0059 + 1) as usize], // keypad 1-9
-        0x4000_0062 => Key::Num0, // keypad 0
+        0x4000_0057 => Key::Plus, // テンキーの +
+        0x4000_0059..=0x4000_0061 => DIGITS[(key - 0x4000_0059 + 1) as usize], // テンキーの 1〜9
+        0x4000_0062 => Key::Num0, // テンキーの 0
         _ => return None,
     })
 }
 
-/// Logs the first use of an input function the filter above does not cover.
+/// 上の選り分けが覆わない入力の関数が最初に使われたら、ログに出す。
 fn first_use(flag: &AtomicBool, name: &str) {
     if !flag.swap(true, Ordering::Relaxed) {
         log::info!("SDL3 input: the game uses {name}");
@@ -1166,7 +1163,7 @@ macro_rules! probe {
             static USED: AtomicBool = AtomicBool::new(false);
             first_use(&USED, $name);
             match $original.get() {
-                // SAFETY: the caller's arguments, unchanged.
+                // SAFETY: 呼び出し側の引数をそのまま。
                 Some(original) => unsafe { original($($arg),*) },
                 None => $default,
             }
@@ -1188,14 +1185,14 @@ probe!(add_event_watch_probe, ADD_EVENT_WATCH, "SDL_AddEventWatch",
 probe!(set_event_filter_probe, SET_EVENT_FILTER, "SDL_SetEventFilter",
     (filter: *const c_void, data: *mut c_void) -> (), ());
 
-/// Logs every change, since this is how the game grabs the mouse.
+/// ゲームがマウスを捕まえる方法なので、変わるたびにログに出す。
 unsafe extern "C" fn set_relative_mouse_mode_probe(window: *mut c_void, enabled: bool) -> bool {
     static COUNT: AtomicUsize = AtomicUsize::new(0);
     if COUNT.fetch_add(1, Ordering::Relaxed) < 20 {
         log::info!("SDL3 input: SDL_SetWindowRelativeMouseMode({enabled})");
     }
     match SET_RELATIVE_MOUSE_MODE.get() {
-        // SAFETY: the caller's arguments, unchanged.
+        // SAFETY: 呼び出し側の引数をそのまま。
         Some(original) => unsafe { original(window, enabled) },
         None => false,
     }
@@ -1209,7 +1206,7 @@ mod tests {
     const C: (u32, u32) = (6, 0x63);
     const ID: u32 = 3;
 
-    /// (type, scancode, down) of each event, for comparing sequences.
+    /// 各イベントの (種類, スキャンコード, 押している)（並びを比べるため）。
     fn keys(events: impl IntoIterator<Item = Event>) -> Vec<(u32, u32, u8)> {
         events
             .into_iter()
@@ -1225,7 +1222,7 @@ mod tests {
         assert_eq!(u32_at(&e, OFF_KEY_SCANCODE), 60);
         assert_eq!(u32_at(&e, OFF_KEY), 0x4000_003C);
         assert_eq!(e[OFF_KEY_DOWN], 1);
-        // No timestamp, keyboard, modifiers or raw code, and not a repeat.
+        // 時刻、キーボード、修飾キー、生のコードなし。リピートでない。
         assert!(e[4..OFF_WINDOW_ID].iter().all(|&b| b == 0));
         assert_eq!(u32_at(&e, 20), 0);
         assert_eq!(e[OFF_KEY_MOD..OFF_KEY_DOWN], [0; 4]);
@@ -1263,7 +1260,7 @@ mod tests {
         assert!(burst.iter().all(|(e, _)| u32_at(e, OFF_WINDOW_ID) == ID));
     }
 
-    /// Hands out the queue as the poll hook does, settling the burst with `copied`.
+    /// ポーリングのフックと同じようにキューを渡し、`copied` で一連の送信を終わらせる。
     fn hand_out(mut queue: VecDeque<(Event, Tag)>, copied: Injected) -> (Vec<Event>, Vec<Failure>) {
         let (mut out, mut failures) = (Vec::new(), Vec::new());
         while let Some((event, tag)) = queue.pop_front() {
@@ -1291,7 +1288,7 @@ mod tests {
             out.push(event);
         }
         assert_eq!(failures, [Failure::NoHooks]);
-        // No undo: the debug overlay was not toggled.
+        // 戻さない：デバッグの画面は切り替わっていない。
         assert_eq!(out.len(), 4);
     }
 
@@ -1309,7 +1306,7 @@ mod tests {
                 (EVENT_KEY_DOWN, 6, 1),
                 (EVENT_KEY_UP, 6, 0),
                 (EVENT_KEY_UP, 60, 0),
-                // The undo: DOWN before UP, both before anything queued later.
+                // 戻し：DOWN が UP より先で、どちらも後でキューに入ったものより先。
                 (EVENT_KEY_DOWN, 60, 1),
                 (EVENT_KEY_UP, 60, 0),
                 (EVENT_WINDOW_PIXEL_SIZE_CHANGED, 0, 0),
@@ -1345,18 +1342,18 @@ mod tests {
         Output { id, phase }
     }
 
-    /// A key event as SDL fills one: with a timestamp, keyboard, modifiers and raw code.
+    /// SDL が埋めるのと同じキーのイベント：時刻、キーボード、修飾キー、生のコード付き。
     fn physical_key(down: bool, repeat: bool, (scancode, keycode): (u32, u32)) -> Event {
         let mut e = key_event(down, ID, (scancode, keycode));
         put(&mut e, 8, &TIMESTAMP.to_ne_bytes());
         put(&mut e, OFF_WHICH, &7u32.to_ne_bytes());
         put(&mut e, OFF_KEY_MOD, &0x1000u16.to_ne_bytes()); // Num Lock
-        put(&mut e, 34, &0x2Eu16.to_ne_bytes()); // raw
+        put(&mut e, 34, &0x2Eu16.to_ne_bytes()); // 生のコード
         e[OFF_KEY_REPEAT] = u8::from(repeat);
         e
     }
 
-    /// A button event as SDL fills one: with a timestamp, mouse, clicks and position.
+    /// SDL が埋めるのと同じボタンのイベント：時刻、マウス、クリックの数、位置付き。
     fn physical_button(down: bool, button: u8) -> Event {
         let mut e = button_event(down, ID, button);
         put(&mut e, 8, &TIMESTAMP.to_ne_bytes());
@@ -1379,7 +1376,7 @@ mod tests {
         assert_eq!(u32_at(&e, OFF_KEY), u32::from(b'w'));
         assert_eq!(u16_at(&e, OFF_KEY_MOD), 0x1040);
         assert_eq!((e[OFF_KEY_DOWN], e[OFF_KEY_REPEAT]), (1, 0));
-        // The rest stays: window, timestamp, keyboard, raw code.
+        // 残り（ウィンドウ、時刻、キーボード、生のコード）はそのまま。
         assert_eq!(u32_at(&e, OFF_WINDOW_ID), ID);
         assert_eq!(e[8..16], TIMESTAMP.to_ne_bytes());
         assert_eq!(u32_at(&e, OFF_WHICH), 7);
@@ -1405,7 +1402,7 @@ mod tests {
         let mut expected = button_event(true, ID, 4);
         put(&mut expected, 8, &TIMESTAMP.to_ne_bytes());
         assert_eq!(e, expected);
-        // A button never repeats: the repeat is dropped.
+        // ボタンはリピートしない：リピートは捨てる。
         let mut e = physical_key(true, true, C);
         assert!(!rewrite(&mut e, send(MOUSE4, Phase::Repeat), || 0));
         let mut e = physical_key(false, false, C);
@@ -1454,7 +1451,7 @@ mod tests {
 
     #[test]
     fn delivery_of_key_events() {
-        // Forwarded keys get the modifiers as the game reads them; buttons are left alone.
+        // そのまま渡すキーは、ゲームが読む修飾キーを受け取る。ボタンには触れない。
         let mut e = physical_key(true, false, C);
         assert_eq!(
             deliver(&mut e, Delivery::Forward, || 0x1001),
@@ -1480,11 +1477,11 @@ mod tests {
     #[test]
     fn modifier_bits_follow_the_rebinding() {
         let forced = |id: InputId| match id {
-            InputId::Key(224) => Some(true),  // left Ctrl held by a rule
-            InputId::Key(225) => Some(false), // left Shift taken by a rule
+            InputId::Key(224) => Some(true),  // ルールが押さえている左の Ctrl
+            InputId::Key(225) => Some(false), // ルールが取った左の Shift
             _ => None,
         };
-        // Right Shift and Num Lock stay as they are.
+        // 右の Shift と Num Lock はそのまま。
         assert_eq!(patch_mod(0x1003, forced), 0x1042);
         assert_eq!(patch_mod(0, forced), 0x40);
         assert_eq!(patch_mod(0x1003, |_| None), 0x1003);
@@ -1503,8 +1500,8 @@ mod tests {
     #[test]
     fn the_game_reads_the_spoofed_key_state() {
         let mut real = [0u8; 300];
-        real[26] = 1; // W, physically held and taken
-        real[6] = 1; // C, physically held
+        real[26] = 1; // W：物理的に押していて、取られている
+        real[6] = 1; // C：物理的に押している
         let out: Vec<AtomicU8> = (0..300).map(|_| AtomicU8::new(9)).collect();
         let forced = |id: InputId| match id {
             InputId::Key(26) => Some(false),

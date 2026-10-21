@@ -1,9 +1,8 @@
-//! Working out which world or server the player is in.
+//! プレイヤーがどのワールドかサーバーにいるかを突き止める。
 //!
-//! Multiplayer servers come from the `Connecting to <host>, <port>` line in `logs/latest.log`.
-//! For singleplayer the log only says that the integrated server started, so the world folder
-//! is the one whose `session.lock` was touched most recently. Its name in the game is in its
-//! `level.dat`.
+//! マルチプレイのサーバーは、`logs/latest.log` の `Connecting to <host>, <port>` の行から分かる。
+//! シングルプレイでは、ログは内蔵サーバーが始まったことしか言わないので、ワールドのフォルダは
+//! いちばん最近 `session.lock` が書かれたもの。ゲームの中での名前は、その `level.dat` にある。
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -18,26 +17,25 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_PORT: u16 = 25565;
 
-/// Identifies the world a waypoint file belongs to.
+/// ウェイポイントのファイルがどのワールドのものかを示す。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WorldId {
-    /// A world folder under `saves/`.
+    /// `saves/` の下のワールドのフォルダ。
     Singleplayer { folder: String },
     Multiplayer {
         host: String,
         port: u16,
-        /// The user's name for the world behind the address (a network's lobby and survival
-        /// share it), `None` for the address alone.
+        /// アドレスの裏のワールドに利用者が付けた名前（ネットワークのロビーとサバイバルは同じアドレスを
+        /// 共有する）。アドレスだけなら `None`。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
     },
 }
 
 impl WorldId {
-    /// A file name stem that is safe on Windows and Linux: `sp-<folder>`, or
-    /// `mp-<host>-<port>` with the host lowercased and `@<label>` after it for a label. A host
-    /// with `@` (no real one has it) is changed and hashed, so a label always starts at the
-    /// first `@`.
+    /// Windows と Linux で安全なファイル名の幹：`sp-<フォルダ>`、または `mp-<host>-<port>`（host は
+    /// 小文字）で、ラベルがあればその後に `@<label>`。`@` を含む host（本物にはない）は変えてハッシュを
+    /// 付けるので、ラベルは必ず最初の `@` から始まる。
     pub fn file_stem(&self) -> String {
         match self {
             WorldId::Singleplayer { folder } => format!("sp-{}", sanitize_file_component(folder)),
@@ -55,8 +53,7 @@ impl WorldId {
         }
     }
 
-    /// A name for the UI: the folder name, or `host[:port]` (IPv6 in brackets) with the label
-    /// after it.
+    /// UI のための名前：フォルダの名前、または `host[:port]`（IPv6 は角括弧の中）とその後のラベル。
     pub fn display_name(&self) -> String {
         match self {
             WorldId::Singleplayer { folder } => folder.clone(),
@@ -77,8 +74,8 @@ impl WorldId {
         }
     }
 
-    /// The same world under `label` (a server only; a singleplayer world is returned as it
-    /// is). An empty label is none.
+    /// `label` の下の同じワールド（サーバーだけ。シングルプレイのワールドはそのまま返す）。空の
+    /// ラベルはなし。
     pub fn with_label(&self, label: Option<&str>) -> WorldId {
         match self {
             WorldId::Multiplayer { host, port, .. } => WorldId::Multiplayer {
@@ -93,8 +90,8 @@ impl WorldId {
         }
     }
 
-    /// The server's address as a key for its label: `host:port` with the host lowercased.
-    /// `None` for a singleplayer world.
+    /// ラベルのキーとしてのサーバーのアドレス：host を小文字にした `host:port`。シングルプレイの
+    /// ワールドなら `None`。
     pub fn address_key(&self) -> Option<String> {
         match self {
             WorldId::Multiplayer { host, port, .. } => {
@@ -107,18 +104,17 @@ impl WorldId {
 
 const MAX_COMPONENT_LEN: usize = 80;
 
-/// Makes `s` usable as a single file name component on Windows and Linux.
+/// `s` を、Windows と Linux で 1 つのファイル名の部分として使えるようにする。
 ///
-/// Replaces `< > : " / \ | ? *` and control characters with `_`, trims trailing dots and
-/// spaces, prefixes reserved device names (`CON`, `com1.txt`, ...) with `_`, never returns an
-/// empty string and caps the
-/// result at 80 bytes (on a char boundary). If anything had to change, `-` and 8 hex digits of
-/// a stable hash of `s` are appended so that different inputs stay distinct.
+/// `< > : " / \ | ? *` と制御文字を `_` に置き換え、末尾の点と空白を取り、予約されたデバイスの名前
+/// （`CON`、`com1.txt` など）の前に `_` を付け、空の文字列は返さず、結果を 80 バイトに切る
+/// （文字の境目で）。何かを変える必要があったら、異なる入力が別のままになるように、`-` と、
+/// `s` の安定したハッシュの 16 進 8 桁を足す。
 pub fn sanitize_file_component(s: &str) -> String {
     sanitize_component(s, &[])
 }
 
-/// [`sanitize_file_component`] that also replaces the characters in `extra`.
+/// `extra` の文字も置き換える [`sanitize_file_component`]。
 fn sanitize_component(s: &str, extra: &[char]) -> String {
     let mut out: String = s
         .chars()
@@ -149,8 +145,8 @@ fn sanitize_component(s: &str, extra: &[char]) -> String {
     out
 }
 
-/// Whether Windows treats `name` as a device (`CON`, `NUL.txt`, `com1`, `LPT\u{b9}`, ...).
-/// `COM0` and `LPT0` are included because Microsoft's naming rules list them as reserved.
+/// Windows が `name` をデバイスとして扱うか（`CON`、`NUL.txt`、`com1`、`LPT\u{b9}` など）。
+/// `COM0` と `LPT0` も入れる。Microsoft の名前の決まりが予約しているため。
 fn is_reserved_name(name: &str) -> bool {
     let base = name
         .split('.')
@@ -187,7 +183,7 @@ fn truncate_on_char_boundary(s: &mut String, max_len: usize) {
     }
 }
 
-/// 64-bit FNV-1a. Stable across builds and platforms, unlike `DefaultHasher`.
+/// 64 ビットの FNV-1a。`DefaultHasher` と違い、ビルドや OS が変わっても同じ。
 pub fn fnv1a64(bytes: &[u8]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -200,7 +196,7 @@ fn fold_to_u32(hash: u64) -> u32 {
     (hash ^ (hash >> 32)) as u32
 }
 
-/// World-relevant events from `latest.log`.
+/// `latest.log` の、ワールドに関わるイベント。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogEvent {
     ConnectingToServer { host: String, port: u16 },
@@ -208,9 +204,9 @@ pub enum LogEvent {
     IntegratedServerStopping,
 }
 
-/// `[time] [thread/LEVEL]` followed by exactly one of the vanilla `: `, Forge's
-/// ` [logger/marker]: ` or Fabric's ` (category) `, then the message. Keeping the separators
-/// strict stops a message that starts with a tag (`[CHAT] ...`) from passing as a logger name.
+/// `[time] [thread/LEVEL]` の後に、バニラの `: `、Forge の ` [logger/marker]: `、Fabric の
+/// ` (category) ` のどれか 1 つだけ、その後にメッセージ。区切りを厳しく見るので、タグで始まる
+/// メッセージ（`[CHAT] ...`）がロガーの名前として通ることはない。
 static LOG_HEADER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"^\[[^\]]+\] \[(?P<thread>[^\]]+)/(?P<level>[A-Z]+)\](?:: | \[[^\]]*\]: | \([^)]*\) )(?P<msg>.*)$",
@@ -218,12 +214,12 @@ static LOG_HEADER: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid regex")
 });
 
-/// Recognizes world-related lines of Minecraft's `latest.log`.
+/// Minecraft の `latest.log` の、ワールドに関わる行を見分ける。
 ///
-/// Understands the vanilla layout (`[12:34:56] [Render thread/INFO]: msg`), Forge/NeoForge
-/// (`[29Sep2026 12:34:56.789] [Render thread/INFO] [logger/]: msg`) and Fabric
-/// (`[12:34:56] [Render thread/INFO] (Minecraft) msg`). The event text must start the message,
-/// so chat lines (`[CHAT] <bob> Connecting to ...`) never match.
+/// バニラの形（`[12:34:56] [Render thread/INFO]: msg`）、Forge・NeoForge
+/// （`[29Sep2026 12:34:56.789] [Render thread/INFO] [logger/]: msg`）、Fabric
+/// （`[12:34:56] [Render thread/INFO] (Minecraft) msg`）が分かる。イベントの文字はメッセージの
+/// 先頭でなければならないので、チャットの行（`[CHAT] <bob> Connecting to ...`）は当たらない。
 pub fn parse_log_line(line: &str) -> Option<LogEvent> {
     let line = line.trim_start_matches('\u{feff}').trim_end();
     let caps = LOG_HEADER.captures(line)?;
@@ -249,8 +245,8 @@ pub fn parse_log_line(line: &str) -> Option<LogEvent> {
             port,
         });
     }
-    // Only the game's own server thread: tools that start integrated servers in the
-    // background (SeedQueue's `Server thread #N`) would make every start a world change.
+    // ゲーム自身のサーバーのスレッドだけ：裏で内蔵サーバーを始めるツール（SeedQueue の
+    // `Server thread #N`）では、始まるたびにワールドが変わったことになってしまう。
     if msg.starts_with("Starting integrated minecraft server version")
         && &caps["thread"] == "Server thread"
     {
@@ -262,8 +258,8 @@ pub fn parse_log_line(line: &str) -> Option<LogEvent> {
     None
 }
 
-/// Whether `line` may be one [`parse_log_line`] recognizes: a cheap check on the bytes, so
-/// the other lines are never decoded.
+/// `line` が [`parse_log_line`] の見分ける行でありうるか：バイトでの安い確認なので、ほかの行は
+/// デコードしない。
 pub fn might_be_world_line(line: &[u8]) -> bool {
     const NEEDLES: [&[u8]; 3] = [
         b"Connecting to ",
@@ -276,26 +272,26 @@ pub fn might_be_world_line(line: &[u8]) -> bool {
 }
 
 const FINGERPRINT_LEN: usize = 256;
-/// The game's thread reads the log; a long file is read over several polls.
+/// ゲームのスレッドがログを読む。長いファイルは何回かの読み込みに分けて読む。
 const MAX_READ_PER_POLL: u64 = 1024 * 1024;
 const MAX_LINE_LEN: usize = 1024 * 1024;
 
-/// Incrementally reads lines appended to a log file.
+/// ログのファイルに足された行を少しずつ読む。
 ///
-/// The file is opened and closed on every [`poll`](Self::poll) so that the game can rotate it
-/// (on Windows an open handle could block that). Replacement, rotation and truncation are
-/// detected by the file shrinking or by its first bytes changing, and reading restarts at 0.
+/// ゲームがファイルを回せるように、[`poll`](Self::poll) のたびにファイルを開いて閉じる
+/// （Windows では開いたハンドルが邪魔をしうる）。置き換え、回し、切り詰めは、ファイルが縮むか
+/// 先頭のバイトが変わることで見つけ、0 から読み直す。
 #[derive(Debug)]
 pub struct LogTail {
     path: PathBuf,
-    /// Lines for which this is false are dropped undecoded.
+    /// これが false の行は、デコードせずに捨てる。
     keep: fn(&[u8]) -> bool,
     offset: u64,
-    /// The first `min(offset, FINGERPRINT_LEN)` bytes consumed so far.
+    /// ここまでに読んだ最初の `min(offset, FINGERPRINT_LEN)` バイト。
     fingerprint: Vec<u8>,
-    /// Bytes of an incomplete trailing line.
+    /// まだ終わっていない末尾の行のバイト。
     partial: Vec<u8>,
-    /// Inside a line longer than `MAX_LINE_LEN`; dropped up to the next newline.
+    /// `MAX_LINE_LEN` より長い行の中。次の改行まで捨てる。
     discarding: bool,
     restarts: u64,
     max_read: u64,
@@ -306,7 +302,7 @@ impl LogTail {
         Self::filtered(path, |_| true)
     }
 
-    /// A tail that returns only the lines `keep` accepts (given without the line terminator).
+    /// `keep` が受け入れる行（行の終わりの文字を除いて渡す）だけを返す追跡。
     pub fn filtered(path: impl Into<PathBuf>, keep: fn(&[u8]) -> bool) -> Self {
         Self {
             path: path.into(),
@@ -324,14 +320,14 @@ impl LogTail {
         &self.path
     }
 
-    /// How many times reading restarted because the file was replaced, truncated or removed.
-    /// Callers can compare it between polls to reset state derived from the old file.
+    /// ファイルが置き換えられた、切り詰められた、消されたので読み直した回数。呼び出し側は
+    /// 読み込みの間でこれを比べ、古いファイルから作った状態を戻せる。
     pub fn restarts(&self) -> u64 {
         self.restarts
     }
 
-    /// Returns the complete lines appended since the last poll, without line terminators.
-    /// A missing file yields no lines. At most 8 MiB are read per call.
+    /// 前の読み込みから足された完全な行を、行の終わりの文字なしで返す。ファイルがなければ行なし。
+    /// 1 回に読むのは多くても 8 MiB。
     pub fn poll(&mut self) -> io::Result<Vec<String>> {
         let mut file = match File::open(&self.path) {
             Ok(file) => file,
@@ -350,11 +346,11 @@ impl LogTail {
         }
         file.seek(SeekFrom::Start(self.offset))?;
         let mut data = Vec::new();
-        // Consumes and thereby closes the file.
+        // 読み切って、それでファイルを閉じる。
         file.take(self.max_read).read_to_end(&mut data)?;
 
         if self.fingerprint.len() < FINGERPRINT_LEN {
-            // The fingerprint is only short while it still ends at `offset`.
+            // 指紋が短いのは、まだ `offset` で終わっている間だけ。
             let take = (FINGERPRINT_LEN - self.fingerprint.len()).min(data.len());
             self.fingerprint.extend_from_slice(&data[..take]);
         }
@@ -370,7 +366,7 @@ impl LogTail {
         file.seek(SeekFrom::Start(0))?;
         match file.read_exact(&mut head) {
             Ok(()) => Ok(head == self.fingerprint),
-            // Shrank since the length check.
+            // 長さを確かめてから縮んだ。
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
             Err(e) => Err(e),
         }
@@ -414,7 +410,7 @@ impl LogTail {
     }
 }
 
-/// Follows [`LogEvent`]s to know which world the player is in.
+/// [`LogEvent`] を追い、プレイヤーがどのワールドにいるかを知る。
 #[derive(Debug, Clone, Default)]
 pub struct WorldTracker {
     last: Option<LogEvent>,
@@ -429,27 +425,27 @@ impl WorldTracker {
         self.last = Some(ev.clone());
     }
 
-    /// Parses `line` and applies the event, if any, returning it.
+    /// `line` を解析し、イベントがあれば当てはめて返す。
     pub fn on_log_line(&mut self, line: &str) -> Option<LogEvent> {
         let ev = parse_log_line(line)?;
         self.on_log_event(&ev);
         Some(ev)
     }
 
-    /// Forgets all events, e.g. after the log file was replaced.
+    /// イベントを全部忘れる（例：ログのファイルが置き換えられた後）。
     pub fn reset(&mut self) {
         self.last = None;
     }
 
-    /// The current world according to the last event: a server after `ConnectingToServer`,
-    /// the most recently locked world folder after `IntegratedServerStarting`, and `None`
-    /// after `IntegratedServerStopping` or before any event.
+    /// 最後のイベントによる今のワールド：`ConnectingToServer` の後はサーバー、
+    /// `IntegratedServerStarting` の後はいちばん最近ロックされたワールドのフォルダ、
+    /// `IntegratedServerStopping` の後やイベントの前は `None`。
     pub fn resolve(&self, saves_dir: &Path) -> Option<WorldId> {
         self.resolve_since(saves_dir, None)
     }
 
-    /// [`resolve`](Self::resolve), where a singleplayer world must have been locked at
-    /// `not_before` or later.
+    /// シングルプレイのワールドが `not_before` 以降にロックされていなければならない
+    /// [`resolve`](Self::resolve)。
     pub fn resolve_since(
         &self,
         saves_dir: &Path,
@@ -475,14 +471,13 @@ impl WorldTracker {
     }
 }
 
-/// Returns the world folder directly under `saves_dir` whose `session.lock` was modified most
-/// recently (the game writes it when a world is loaded), or `None` if there is none.
-/// Non-directories and entries that cannot be read are skipped.
+/// `saves_dir` のすぐ下の、`session.lock` がいちばん最近変わったワールドのフォルダ（ゲームは
+/// ワールドを読み込むときに書く）。なければ `None`。フォルダでないものと、読めない項目は飛ばす。
 pub fn detect_singleplayer_world(saves_dir: &Path) -> io::Result<Option<String>> {
     detect_singleplayer_world_since(saves_dir, None)
 }
 
-/// [`detect_singleplayer_world`], counting only locks modified at `not_before` or later.
+/// `not_before` 以降に変わったロックだけを数える [`detect_singleplayer_world`]。
 pub fn detect_singleplayer_world_since(
     saves_dir: &Path,
     not_before: Option<SystemTime>,
@@ -495,8 +490,8 @@ pub fn detect_singleplayer_world_since(
     let mut newest: Option<(SystemTime, String)> = None;
     for entry in entries.flatten() {
         let path = entry.path();
-        // The entry's own type needs no extra call; a symlink is followed, so linked world
-        // folders count.
+        // 項目自身の種類は追加の呼び出しなしで分かる。シンボリックリンクはたどるので、リンクした
+        // ワールドのフォルダも数える。
         let is_dir = match entry.file_type() {
             Ok(kind) if kind.is_symlink() => fs::metadata(&path).is_ok_and(|m| m.is_dir()),
             Ok(kind) => kind.is_dir(),
@@ -513,7 +508,7 @@ pub fn detect_singleplayer_world_since(
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        // Ties are broken by name so the result does not depend on directory order.
+        // 同じなら名前で決めるので、結果はフォルダの並び順に左右されない。
         if newest
             .as_ref()
             .is_none_or(|(t, n)| (modified, &name) > (*t, n))
@@ -524,11 +519,11 @@ pub fn detect_singleplayer_world_since(
     Ok(newest.map(|(_, name)| name))
 }
 
-/// The largest `level.dat` read, decompressed. Real ones are a few KiB.
+/// 読む `level.dat` の最大の大きさ（展開後）。本物は数 KiB。
 const MAX_LEVEL_DAT: u64 = 8 * 1024 * 1024;
 
-/// The world's name in the game (`Data.LevelName` in its gzipped NBT `level.dat`), or `None`
-/// when it cannot be read.
+/// ゲームの中でのワールドの名前（gzip した NBT の `level.dat` の `Data.LevelName`）。読めなければ
+/// `None`。
 pub fn level_name(world_dir: &Path) -> Option<String> {
     let file = File::open(world_dir.join("level.dat")).ok()?;
     let mut data = Vec::new();
@@ -542,22 +537,22 @@ pub fn level_name(world_dir: &Path) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
-/// NBT tag ids.
+/// NBT のタグの id。
 const TAG_END: u8 = 0;
 const TAG_STRING: u8 = 8;
 const TAG_LIST: u8 = 9;
 const TAG_COMPOUND: u8 = 10;
-/// Deeper nesting than any real file; stops a crafted one from overflowing the stack.
+/// どの本物のファイルより深い入れ子。作ったファイルでスタックがあふれるのを止める。
 const MAX_NBT_DEPTH: u32 = 512;
 
-/// `Data.LevelName` in an uncompressed `level.dat`.
+/// 展開した `level.dat` の `Data.LevelName`。
 fn nbt_level_name(data: &[u8]) -> Option<String> {
     let mut nbt = Nbt { data, pos: 0 };
     if nbt.byte()? != TAG_COMPOUND {
         return None;
     }
     nbt.string()?;
-    // The root compound: find `Data`.
+    // いちばん外の compound：`Data` を探す。
     loop {
         let tag = nbt.byte()?;
         if tag == TAG_END {
@@ -582,7 +577,7 @@ fn nbt_level_name(data: &[u8]) -> Option<String> {
     }
 }
 
-/// A reader over NBT's big-endian payloads. Every read is bounds-checked (`None` at the end).
+/// NBT のビッグエンディアンの中身を読むもの。どの読み込みも範囲を確かめる（終わりなら `None`）。
 struct Nbt<'a> {
     data: &'a [u8],
     pos: usize,
@@ -616,7 +611,7 @@ impl Nbt<'_> {
         self.bytes(len).map(java_modified_utf8)
     }
 
-    /// Skips the payload of a `tag`.
+    /// `tag` の中身を飛ばす。
     fn skip(&mut self, tag: u8, depth: u32) -> Option<()> {
         if depth > MAX_NBT_DEPTH {
             return None;
@@ -656,8 +651,8 @@ impl Nbt<'_> {
     }
 }
 
-/// Decodes Java's modified UTF-8 (NBT strings): UTF-8 with supplementary characters as two
-/// encoded surrogates and NUL as two bytes. Malformed bytes become U+FFFD.
+/// Java の modified UTF-8（NBT の文字列）をデコードする：補助文字を 2 つの符号化したサロゲートで、
+/// NUL を 2 バイトで表す UTF-8。壊れたバイトは U+FFFD になる。
 fn java_modified_utf8(bytes: &[u8]) -> String {
     let mut units = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -787,7 +782,7 @@ mod tests {
             "AUX.json",
             "NUL .txt",
             "CON.",
-            // Listed as reserved in Microsoft's file naming documentation.
+            // Microsoft のファイル名の文書で予約として挙げられている。
             "COM0",
             "lpt0.log",
         ] {
@@ -807,12 +802,12 @@ mod tests {
         let out = sanitize_file_component(&long);
         assert_eq!(out.len(), 80);
         assert_eq!(out, format!("{}-d95e07ec", "a".repeat(71)));
-        // Multi-byte characters are never split.
+        // 複数バイトの文字は分けない。
         let wide = "あ".repeat(40);
         let out = sanitize_file_component(&wide);
         assert!(out.len() <= 80, "{}", out.len());
         assert_eq!(out, format!("{}-7d56f0a5", "あ".repeat(23)));
-        // 81 bytes is one too many.
+        // 81 バイトは 1 つ多い。
         let out = sanitize_file_component(&"b".repeat(81));
         assert_eq!(out.len(), 80);
         assert!(out.ends_with("-f7713920"), "{out}");
@@ -847,9 +842,9 @@ mod tests {
             "mp-2001_db8__1-eb334f17-25565"
         );
         assert_eq!(mp("::1", 25566).file_stem(), "mp-__1-eb56b0b4-25566");
-        // Folder names keep their case.
+        // フォルダの名前は大文字と小文字をそのまま保つ。
         assert_ne!(sp("World").file_stem(), sp("world").file_stem());
-        // A label follows the first `@`; a host cannot have one.
+        // ラベルは最初の `@` の後。host には `@` がありえない。
         let labelled = mp("example.com", 25565).with_label(Some("survival"));
         assert_eq!(labelled.file_stem(), "mp-example.com-25565@survival");
         assert_eq!(
@@ -1002,7 +997,7 @@ mod tests {
             "[12:34:56] [Server thread/WARN]: Stopping server",
             "[12:34:56] [Render thread/WARN]: Connecting to example.com, 25565",
             "[12:34:56] [Server thread/INFO]: Stopping server now",
-            // Integrated servers started in the background by tools (SeedQueue).
+            // ツール（SeedQueue）が裏で始める内蔵サーバー。
             "[12:34:56] [Server thread #2/INFO]: Starting integrated minecraft server version 1.16.1",
             "[12:34:56] [Render thread/INFO]: Starting integrated minecraft server version 1.16.1",
             "[12:34:56] [Render thread/INFO]: Connecting to example.com",
@@ -1016,8 +1011,8 @@ mod tests {
             "[12:34:56] [Render thread/INFO]: Setting user: Steve",
             "[12:34:56] [Render thread/INFO]:  Connecting to example.com, 25565",
             "\tat net.minecraft.client.Minecraft.run(Minecraft.java:1)",
-            // No layout puts a bracketed tag after the level without a colon, so a chat tag
-            // there must not be taken for Forge's logger name.
+            // レベルの後にコロンなしで角括弧のタグを置く形はないので、そこにあるチャットのタグを
+            // Forge のロガーの名前と取ってはならない。
             "[12:34:56] [Render thread/INFO] [CHAT] Connecting to evil.com, 1",
             "[12:34:56] [Render thread/INFO] [CHAT] Stopping server",
             "[12:34:56] [Server thread/INFO] [CHAT] Stopping server",
@@ -1104,7 +1099,7 @@ mod tests {
             tail.poll().unwrap(),
             ["[10:00:00] [main/INFO]: old session"]
         );
-        // Rotate the way log4j does: move the old file away and start a new one.
+        // log4j と同じく回す：古いファイルを移し、新しいものを始める。
         fs::rename(&path, dir.path().join("2026-09-29-1.log")).unwrap();
         fs::write(
             &path,
@@ -1135,7 +1130,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tail.poll().unwrap(), ["[10:00:00] [main/INFO]: old"]);
-        // The new session is already longer than everything read from the old one.
+        // 新しいセッションは、もう古いものから読んだ全部より長い。
         let new = format!("[11:00:00] [main/INFO]: {}\nsecond\n", "n".repeat(100));
         fs::write(&path, &new).unwrap();
         let lines = tail.poll().unwrap();
@@ -1149,8 +1144,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("latest.log");
         let mut tail = LogTail::new(&path);
-        // Only `\n` (optionally after `\r`) ends a line; text smuggled after a bare `\r` stays
-        // inside the line it was logged in, so it cannot pose as a line of its own.
+        // 行を終えるのは `\n`（前に `\r` があってもよい）だけ。`\r` だけの後に紛れ込ませた文字は、
+        // ログに出た行の中に残るので、別の行のふりはできない。
         append(
             &path,
             b"[10:00:00] [Render thread/INFO]: x\r[10:00:00] [Render thread/INFO]: Connecting to evil.com, 1\r",
@@ -1160,7 +1155,7 @@ mod tests {
         let lines = tail.poll().unwrap();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert_eq!(parse_log_line(&lines[0]), None);
-        // CR-only content is buffered like any unfinished line and stays bounded.
+        // CR だけの中身も、終わっていない行と同じく溜め、上限を超えない。
         tail.max_read = 64 * 1024;
         append(&path, "a\r".repeat(MAX_LINE_LEN).as_bytes());
         while tail.offset < fs::metadata(&path).unwrap().len() {
@@ -1177,7 +1172,7 @@ mod tests {
         let path = dir.path().join("latest.log");
         let mut tail = LogTail::new(&path);
         tail.max_read = 5;
-        // Every 3-byte character straddles some 5-byte read boundary.
+        // 3 バイトの文字はどれも、5 バイトの読み込みの境目のどこかをまたぐ。
         append(&path, "ワールドの名前\r\n".as_bytes());
         let mut lines = Vec::new();
         for _ in 0..10 {
@@ -1193,14 +1188,14 @@ mod tests {
         let mut tail = LogTail::new(&path);
         fs::write(&path, "a\n").unwrap();
         assert_eq!(tail.poll().unwrap(), ["a"]);
-        // The first bytes are unchanged, so this is growth, not replacement.
+        // 先頭のバイトは変わっていないので、置き換えではなく伸びたもの。
         let long_line = "x".repeat(600);
         append(&path, format!("{long_line}\n").as_bytes());
         assert_eq!(tail.poll().unwrap(), [long_line.as_str()]);
         assert_eq!(tail.fingerprint.len(), FINGERPRINT_LEN);
         append(&path, b"b\n");
         assert_eq!(tail.poll().unwrap(), ["b"]);
-        // Replacing with same-length-or-longer content that differs early is noticed.
+        // 同じかそれより長い、先の方が違う中身への置き換えは気づく。
         let mut replaced = fs::read(&path).unwrap();
         replaced[0] = b'Z';
         replaced.extend_from_slice(b"c\n");
@@ -1247,7 +1242,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("latest.log");
         let mut tail = LogTail::new(&path);
-        // Each part below within one read.
+        // 下のそれぞれの部分は 1 回の読み込みの中。
         tail.max_read = 4 * MAX_LINE_LEN as u64;
         let huge = vec![b'x'; MAX_LINE_LEN + 1];
         append(&path, b"before\n");
@@ -1257,7 +1252,7 @@ mod tests {
         assert!(tail.poll().unwrap().is_empty());
         append(&path, b"xxxx\nafter\n");
         assert_eq!(tail.poll().unwrap(), ["after"]);
-        // A complete overlong line within one read is dropped too.
+        // 1 回の読み込みの中の、完全な長すぎる行も捨てる。
         append(&path, &huge);
         append(&path, b"\nlast\n");
         assert_eq!(tail.poll().unwrap(), ["last"]);
@@ -1270,7 +1265,7 @@ mod tests {
         let mut tail = LogTail::new(&path);
         fs::write(&path, "a\n").unwrap();
         tail.poll().unwrap();
-        // Renaming and deleting would fail on Windows while a handle without sharing is open.
+        // Windows では、共有なしのハンドルが開いている間は、名前の変更も削除も失敗してしまう。
         fs::rename(&path, dir.path().join("old.log")).unwrap();
         fs::remove_file(dir.path().join("old.log")).unwrap();
     }
@@ -1290,7 +1285,7 @@ mod tests {
         set_lock_time(&saves.join("Current"), 1_700_000_000);
         set_lock_time(&saves.join("Older"), 1_500_000_000);
         fs::create_dir_all(saves.join("No lock")).unwrap();
-        // A newer plain file named like a world must be ignored.
+        // ワールドのような名前の、新しいただのファイルは無視しなければならない。
         let stray = File::create(saves.join("session.lock")).unwrap();
         stray
             .set_modified(UNIX_EPOCH + Duration::from_secs(1_800_000_000))
@@ -1352,7 +1347,7 @@ mod tests {
         assert!(lines.iter().all(|line| parse_log_line(line).is_some()));
     }
 
-    /// A gzipped level.dat with `Data.LevelName` among other tags.
+    /// ほかのタグの中に `Data.LevelName` のある、gzip した level.dat。
     fn write_level_dat(world: &Path, name_bytes: &[u8]) {
         use flate2::Compression;
         use flate2::write::GzEncoder;
@@ -1391,7 +1386,7 @@ mod tests {
         let world = dir.path().join("New World (1)");
         write_level_dat(&world, "サバイバル".as_bytes());
         assert_eq!(level_name(&world).as_deref(), Some("サバイバル"));
-        // Java writes a supplementary character as two encoded surrogates.
+        // Java は補助文字を 2 つの符号化したサロゲートで書く。
         write_level_dat(&world, &[0xed, 0xa0, 0xbc, 0xed, 0xbf, 0xb2, b'!']);
         assert_eq!(level_name(&world).as_deref(), Some("\u{1f3f2}!"));
         write_level_dat(&world, b"  ");
@@ -1399,7 +1394,7 @@ mod tests {
         fs::write(world.join("level.dat"), b"not gzip").unwrap();
         assert_eq!(level_name(&world), None);
         assert_eq!(level_name(&dir.path().join("missing")), None);
-        // Truncated NBT.
+        // 途中で切れた NBT。
         assert_eq!(nbt_level_name(&[TAG_COMPOUND, 0, 0, TAG_COMPOUND]), None);
     }
 
@@ -1434,10 +1429,10 @@ mod tests {
         });
         assert_eq!(tracker.resolve(&saves), Some(mp("play.example.com", 25565)));
 
-        // Joining a singleplayer world after a server switches back.
+        // サーバーの後にシングルプレイのワールドに入ると戻る。
         tracker.on_log_event(&LogEvent::IntegratedServerStarting);
         assert_eq!(tracker.resolve(&saves), Some(sp("Survival")));
-        // Resolution follows the lock file at the time of the call.
+        // 解決は、呼んだ時点のロックのファイルに従う。
         set_lock_time(&saves.join("Creative"), 1_800_000_000);
         assert_eq!(tracker.resolve(&saves), Some(sp("Creative")));
 

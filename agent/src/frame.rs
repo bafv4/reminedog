@@ -1,5 +1,5 @@
-//! Per-frame work inside the buffer swaps (`glfwSwapBuffers` for Minecraft up to 1.21,
-//! `SDL_GL_SwapWindow` for 26.x).
+//! バッファのスワップの中で毎フレーム行う処理（Minecraft 1.21 までは `glfwSwapBuffers`、
+//! 26.x は `SDL_GL_SwapWindow`）。
 
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -21,19 +21,19 @@ use crate::saver;
 use crate::tall::TallZoom;
 use crate::waypoints;
 
-/// Settings are saved after this long without further changes (or, changed in the menu, when
-/// it closes), so dragging a slider does not write the file each time.
+/// 設定は、これだけ変更がなければ保存する（メニューで変えたなら、メニューを閉じたときに）。
+/// スライダーを動かすたびにファイルを書かないように。
 const SAVE_DELAY: Duration = Duration::from_secs(1);
-/// A failed save is tried again after this long.
+/// 保存に失敗したら、これだけ後にもう一度試す。
 const SAVE_RETRY: Duration = Duration::from_secs(10);
-/// How long the overlay going away waits for the settings to be saved.
+/// オーバーレイがなくなるときに、設定の保存を待つ時間。
 const SAVE_WAIT: Duration = Duration::from_secs(2);
-/// How long a failed save's notice shows, in seconds.
+/// 保存に失敗した通知を出す秒数。
 const NOTICE_SECONDS: f64 = 6.0;
 
-/// Consecutive failed frames after which the overlay gives up for the session.
+/// これだけ続けてフレームに失敗したら、オーバーレイはそのセッションではあきらめる。
 const MAX_FAILURES: u32 = 30;
-/// GL errors reported before going quiet.
+/// 黙るまでに報告する GL のエラーの数。
 const MAX_GL_ERRORS_LOGGED: u32 = 10;
 
 enum State {
@@ -42,40 +42,40 @@ enum State {
     Disabled,
 }
 
-/// One overlay for the process, following its window across threads: Forge and NeoForge
-/// swap the same window from their early loading-screen thread before Minecraft's render
-/// thread takes it over. Being a static, it is never dropped, so nothing runs at exit.
+/// プロセスに 1 つのオーバーレイ。スレッドをまたいでウィンドウについていく：Forge と
+/// NeoForge は、Minecraft の描画のスレッドが引き継ぐ前に、早い読み込み画面のスレッドから
+/// 同じウィンドウをスワップする。static なので捨てられることはなく、終了時に何も動かない。
 static STATE: Mutex<State> = Mutex::new(State::Uninit);
 
-/// What the overlay needs from the library that owns the game's window (GLFW or SDL3).
+/// ゲームのウィンドウを持つライブラリ（GLFW か SDL3）から、オーバーレイが要るもの。
 pub trait WindowSystem: Sync {
-    /// Name and version, for the log and the status window.
+    /// 名前と版（ログと状態の窓のため）。
     fn describe(&self) -> String;
-    /// Hidden helper windows (mods, Minecraft 26.x's renderer) never get the overlay.
+    /// 隠れた補助のウィンドウ（Mod、Minecraft 26.x の描画）にはオーバーレイを描かない。
     fn is_visible(&self, window: *mut c_void) -> bool;
-    /// Drawable size in pixels; call on the thread that swaps the window.
+    /// 描画先の大きさ（ピクセル）。ウィンドウをスワップするスレッドで呼ぶこと。
     fn framebuffer_size(&self, window: *mut c_void) -> (i32, i32);
-    /// DPI scale of the window.
+    /// ウィンドウの DPI の拡大率。
     fn content_scale(&self, window: *mut c_void) -> f32;
-    /// The OS's window behind `window` ([`crate::os`]).
+    /// `window` の裏の OS のウィンドウ（[`crate::os`]）。
     fn native_window(&self, window: *mut c_void) -> Option<usize>;
-    /// Whether the window is minimized.
+    /// ウィンドウが最小化されているか。
     fn minimized(&self, window: *mut c_void) -> bool;
-    /// Whether the game gets raw mouse counts while it captures the cursor, untouched by
-    /// the system's pointer speed and acceleration (the overlay then applies them to its
-    /// own cursor), rather than the motion of the system's pointer.
+    /// ゲームがカーソルを捕まえている間に、システムのポインターの動きではなく、システムの
+    /// ポインターの速度と加速が効いていない生のマウスの数を受け取っているか（そのときは、
+    /// オーバーレイが自前のカーソルにそれらを掛ける）。
     fn raw_motion(&self, window: *mut c_void) -> bool;
-    /// Whether the game has grabbed the cursor (it is being played, not showing a menu).
+    /// ゲームがカーソルを捕まえているか（プレイ中で、メニューを出していない）。
     fn captured(&self, window: *mut c_void) -> bool;
-    /// How the game's options.txt names keys under this library.
+    /// このライブラリのもとで、ゲームの options.txt がキーをどう名付けるか。
     fn naming(&self) -> Naming;
-    /// Whether the game can be given `id` (as a key or mouse button event) under this library.
+    /// このライブラリのもとで、ゲームに `id` を（キーかマウスのボタンのイベントとして）渡せるか。
     fn can_send(&self, id: InputId) -> bool;
-    /// Whether this library reports presses of `id` (a rule's source must be one).
+    /// このライブラリが `id` の押下を報告するか（ルールの元のキーはそうでなければならない）。
     fn can_receive(&self, id: InputId) -> bool;
 }
 
-/// Draws the overlay into the back buffer right before the window system presents it.
+/// ウィンドウのシステムが見せる直前に、後ろのバッファにオーバーレイを描く。
 pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
     let Some(agent) = globals::globals() else {
         return;
@@ -83,9 +83,9 @@ pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
     if !agent.options.overlay || window.is_null() {
         return;
     }
-    // A minimized window has nothing to draw on (on Windows, GetDC hands out a new temporary
-    // DC on every call instead of the window's own one); skip the frame and keep the overlay.
-    // A zoom ends: the game would go on drawing its tall frames unseen.
+    // 最小化されたウィンドウには描く先がない（Windows では、GetDC がウィンドウ自身の DC ではなく、
+    // 呼ぶたびに新しい一時的な DC を返す）。フレームを飛ばし、オーバーレイは残す。
+    // ズームは終える：ゲームは見えない縦長のフレームを描き続けてしまう。
     let os = os::get();
     let minimized = os
         .window_minimized(ws.native_window(window))
@@ -99,25 +99,24 @@ pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
         }
         return;
     }
-    // Contended means another thread is swapping another window; poisoned means a panic
-    // hit mid-frame (the state was set to Disabled first). Skip the frame either way.
+    // 取れないのは、別のスレッドが別のウィンドウをスワップしているため。毒されているのは、
+    // フレームの途中でパニックしたため（先に状態を Disabled にした）。どちらでもフレームを飛ばす。
     let mut state = match STATE.try_lock() {
         Ok(state) => state,
         Err(TryLockError::WouldBlock) => return,
         Err(TryLockError::Poisoned(_)) => {
-            // Stay off, and make sure no invisible UI keeps taking the game's input.
+            // 止まったままにし、見えない UI がゲームの入力を取り続けないようにする。
             input::router().set_enabled(false);
             return;
         }
     };
-    // Disabled while we work: if anything below panics, the overlay stays off instead of
-    // failing again on every frame.
+    // 作業の間は Disabled にしておく：下で何かがパニックしても、オーバーレイは毎フレーム失敗し直す
+    // のではなく、止まったままになる。
     let next = match std::mem::replace(&mut *state, State::Disabled) {
         State::Disabled => State::Disabled,
-        // A hidden helper window (some mods create one) never gets the overlay; wait for a
-        // visible one.
+        // 隠れた補助のウィンドウ（作る Mod がある）にはオーバーレイを描かない。見えるウィンドウを待つ。
         State::Uninit if !ws.is_visible(window) => State::Uninit,
-        // Nor before a swap on a thread that can make the overlay's context.
+        // オーバーレイのコンテキストを作れるスレッドのスワップの前にも、作らない。
         State::Uninit if !os.can_create_context_here() => State::Uninit,
         State::Uninit => match Runtime::create(ws, window, agent) {
             Ok(runtime) => run_frame(runtime, ws, window, agent),
@@ -134,7 +133,7 @@ pub fn before_swap(ws: &dyn WindowSystem, window: *mut c_void) {
     *state = next;
 }
 
-/// How relative motion should move the overlay's cursor while the game captures the mouse.
+/// ゲームがマウスを捕まえている間に、相対移動でオーバーレイのカーソルをどう動かすか。
 fn pointer_speed(ws: &dyn WindowSystem, window: *mut c_void) -> PointerSpeed {
     if ws.raw_motion(window) {
         os::get().pointer_speed()
@@ -144,7 +143,7 @@ fn pointer_speed(ws: &dyn WindowSystem, window: *mut c_void) -> PointerSpeed {
     }
 }
 
-/// The surface the game's context draws the window on ([`os::Os::window_surface`]).
+/// ゲームのコンテキストがウィンドウを描く描画先（[`os::Os::window_surface`]）。
 fn window_surface(ws: &dyn WindowSystem, window: *mut c_void) -> usize {
     os::get().window_surface(ws.native_window(window))
 }
@@ -187,42 +186,42 @@ enum FrameError {
 }
 
 struct Runtime {
-    /// The window the overlay is drawn on; swaps of other windows are left alone.
+    /// オーバーレイを描くウィンドウ。ほかのウィンドウのスワップには触れない。
     window: usize,
     context: OwnContext,
     gl: Arc<glow::Context>,
     overlay: Overlay,
-    /// Static diagnostics plus, last, the per-frame cost.
+    /// 変わらない診断と、最後に 1 フレームの処理時間。
     status: Vec<StatusLine>,
-    /// Smoothed CPU time of one overlay frame (context switches included), in ms.
+    /// オーバーレイの 1 フレームの CPU 時間をならしたもの（コンテキストの切り替えを含む）。ミリ秒。
     cost_ms: f64,
     failures: u32,
     gl_errors_logged: u32,
-    /// The UI was open in the last frame.
+    /// 前のフレームで UI が開いていた。
     ui_was_open: bool,
     settings: Settings,
     settings_path: PathBuf,
-    /// When the settings are to be saved, if not saved since they changed, and whether they
-    /// changed in the menu (then they are saved when it closes).
+    /// 変わってから保存していなければ、設定を保存する時刻と、メニューで変わったか（そのときは
+    /// メニューを閉じたときに保存する）。
     unsaved: Option<(Instant, bool)>,
-    /// A save on the saving thread.
+    /// 保存のスレッドでの保存。
     saving: Option<saver::Pending>,
-    /// What was wrong with the settings file when it was read ([`settings_problem`]).
+    /// 読んだときの設定ファイルの問題（[`settings_problem`]）。
     load_problem: Option<String>,
-    /// Why the last save failed.
+    /// 最後の保存に失敗した理由。
     save_problem: Option<String>,
-    /// For the next frame.
+    /// 次のフレームのため。
     notices: Vec<Notice>,
-    /// The browser's picture last taken ([`os::Browser::with_new_picture`]).
+    /// 最後に取ったブラウザの絵（[`os::Browser::with_new_picture`]）。
     page_version: u64,
     tall: TallZoom,
-    /// The router's hotkeys, from `settings`.
+    /// `settings` から作った router のホットキー。
     hotkeys: Hotkeys,
 }
 
-// SAFETY: the GL handles and objects are only used inside the swap hook while STATE is
-// locked, with our context made current on the calling thread and released before the
-// lock is; a context may be made current on any thread (one at a time).
+// SAFETY: GL のハンドルと物は、STATE をロックしている間のスワップのフックの中でだけ使い、
+// そのとき自前のコンテキストを呼び出したスレッドで今のものにし、ロックを放す前に外す。
+// コンテキストはどのスレッドで今のものにしてもよい（1 度に 1 つ）。
 unsafe impl Send for Runtime {}
 
 impl Runtime {
@@ -238,7 +237,7 @@ impl Runtime {
         }
         let (current_surface, game_context) = os.current_gl();
         let (width, height) = ws.framebuffer_size(window);
-        // Describe the game's context only if it is the one current on this window.
+        // ゲームのコンテキストを説明するのは、それがこのウィンドウで今のものであるときだけ。
         let game_gl = if current_surface == surface && game_context != 0 {
             gl::describe_current()
         } else {
@@ -268,7 +267,7 @@ impl Runtime {
         let context = OwnContext::create(surface)?;
         let created = (|| {
             let _current = context.make_current()?;
-            // SAFETY: our context is current, and the glow context only used while it is.
+            // SAFETY: 自前のコンテキストが今のもので、glow のコンテキストはその間だけ使う。
             let gl = Arc::new(unsafe { gl::glow_context() });
             let overlay_gl = gl_summary(&gl);
             log::info!("overlay GL: {overlay_gl}");
@@ -354,29 +353,29 @@ impl Runtime {
         }
         let (width, height) = ws.framebuffer_size(window);
         if width <= 0 || height <= 0 {
-            // Minimized.
+            // 最小化している。
             return Ok(());
         }
         let scale = ws.content_scale(window) * agent.options.ui_scale.unwrap_or(1.0);
 
         let started = Instant::now();
-        // The pointer settings may change while the game runs; read them whenever the UI
-        // opens (a few events right after Ctrl+I may still use the previous ones).
+        // ポインターの設定はゲームの動いている間に変わりうる。UI を開くたびに読む（Ctrl+I の直後の
+        // いくつかのイベントは、前の設定のままのことがある）。
         let ui_open = input::router().ui_open();
         if ui_open && !self.ui_was_open {
             input::router().set_pointer_speed(pointer_speed(ws, window));
         }
         self.ui_was_open = ui_open;
-        // Ctrl+V in a text field: the clipboard is read with the router unlocked, and its
-        // text goes in with this frame's events.
+        // 入力欄の Ctrl+V：クリップボードは router のロックを外して読み、その文字はこのフレームの
+        // イベントと一緒に入れる。
         if input::router().take_paste_request()
             && let Some(text) = os.read_clipboard(ws.native_window(window))
         {
             input::router().paste(&text);
         }
 
-        // The zoom works in the game's context, which is current at the swap. It ends when
-        // the game shows a menu (the inventory opened with the zoom key held).
+        // ズームはゲームのコンテキストで働く（スワップのときに今のもの）。ゲームがメニューを出したら
+        // 終わる（ズームのキーを押したままインベントリを開いた）。
         let playing = ws.captured(window);
         let want_zoom = input::router().zoom_active() && playing;
         let zoom = self.tall.frame(
@@ -396,16 +395,16 @@ impl Runtime {
             .map(|reason| format!("高精細は使えない：{reason}"));
         let (waypoint_commands, browser_commands, browser_actions) = {
             let _current = self.context.make_current().map_err(FrameError::Failed)?;
-            // Takes the router's hotkey actions, so before the router is locked below.
+            // router のホットキーの操作を取るので、下で router をロックする前に。
             let marks = waypoints::before_frame(&agent.game_dir, self.window, playing, ws.naming());
             let (browser, browser_notices) = os
                 .browser()
                 .map(|browser| browser.before_frame())
                 .unwrap_or_default();
             let browser_shown = browser.shown;
-            // The browser's keys only while there is a page to act on.
+            // ブラウザのキーは、操作するページがある間だけ。
             let browser_keys = browser_shown && browser.state == BrowserState::Ready;
-            // Only the menu shows them.
+            // 出すのはメニューだけ。
             let (game_bindings, unsupported_inputs) = if ui_open {
                 (
                     waypoints::game_bindings(),
@@ -443,12 +442,12 @@ impl Runtime {
                 };
                 (input, router.take_browser_actions())
             };
-            // The browser thread waits only while a new picture is uploaded; a picture it is
-            // writing right now waits for the next frame. Hidden, the last one stays.
+            // ブラウザのスレッドが待つのは新しい絵を上げる間だけ。いま書いている絵は次のフレームを
+            // 待つ。隠している間は最後の絵が残る。
             if browser_shown && let Some(browser) = os.browser() {
                 let overlay = &mut self.overlay;
                 browser.with_new_picture(&mut self.page_version, &mut |pixels| {
-                    // SAFETY: our context is current.
+                    // SAFETY: 自前のコンテキストが今のもの。
                     unsafe { overlay.upload_page(Some(pixels)) }
                 });
             }
@@ -459,9 +458,9 @@ impl Runtime {
                 status: &self.status,
                 input,
             });
-            // The rules again only when they or the hotkeys changed: resolving logs them (the
-            // zoom's slider changes the settings every frame while dragged). The hotkeys'
-            // problems were logged when the settings were read.
+            // ルールを渡し直すのは、ルールかホットキーが変わったときだけ：解決するとログに出る（ズームの
+            // スライダーは、動かしている間、毎フレーム設定を変える）。ホットキーの問題は、設定を読んだ
+            // ときにログに出した。
             let changed = output.settings.as_ref().map(|settings| {
                 let keys = hotkeys_quiet(settings);
                 let rules = (settings.rebinds_enabled != self.settings.rebinds_enabled
@@ -556,8 +555,8 @@ impl Runtime {
         Ok(())
     }
 
-    /// Hands the settings to the saving thread once they are due, and takes in how the last
-    /// save went. A failed save is told once and tried again later.
+    /// 保存する時が来たら設定を保存のスレッドに渡し、前の保存の結果を受け取る。保存の失敗は
+    /// 1 回伝え、後でもう一度試す。
     fn save_settings_when_due(&mut self) {
         if let Some(saving) = &self.saving {
             let Some(result) = saving.poll() else {
@@ -612,14 +611,14 @@ impl Runtime {
                         .push(Notice::new(problem.clone(), true, NOTICE_SECONDS));
                     self.save_problem = Some(problem);
                 }
-                // A newer change is saved at its own time; else these again, later.
+                // 新しい変更は自分の時に保存する。そうでなければ、これをもう一度、後で。
                 self.unsaved
                     .get_or_insert((Instant::now() + SAVE_RETRY, false));
             }
         }
     }
 
-    /// What the menu says about the settings file.
+    /// 設定ファイルについてメニューが言うこと。
     fn settings_note(&self) -> Option<String> {
         let notes: Vec<&str> = [self.load_problem.as_deref(), self.save_problem.as_deref()]
             .into_iter()
@@ -628,8 +627,8 @@ impl Runtime {
         (!notes.is_empty()).then(|| notes.join("\n"))
     }
 
-    /// Saves what is not saved yet before the overlay goes (it is made again from the file),
-    /// waiting a little for it.
+    /// オーバーレイがなくなる前に、まだ保存していないものを保存し（ファイルから作り直すため）、
+    /// 少し待つ。
     fn flush_settings(&mut self) {
         if let Some(saving) = self.saving.take()
             && let Some(result) = saving.wait(SAVE_WAIT)
@@ -651,10 +650,10 @@ impl Runtime {
         }
     }
 
-    /// Drains our context's GL error queue (never the game's).
+    /// 自前のコンテキストの GL のエラーのキューを空にする（ゲームのものには触れない）。
     fn log_gl_errors(&mut self) {
         for _ in 0..8 {
-            // SAFETY: our context is current.
+            // SAFETY: 自前のコンテキストが今のもの。
             let error = unsafe { self.gl.get_error() };
             if error == glow::NO_ERROR {
                 break;
@@ -666,8 +665,8 @@ impl Runtime {
         }
     }
 
-    /// Saves the settings, ends the zoom (with the game's context current, as in the swap),
-    /// frees GL resources and deletes the context. Best effort: the DC may be gone.
+    /// 設定を保存し、ズームを終え（スワップのときと同じく、ゲームのコンテキストを今のものにして）、
+    /// GL の資源を解放し、コンテキストを消す。できる範囲で：DC がもうないこともある。
     fn teardown(mut self: Box<Self>) {
         self.flush_settings();
         self.tall.release();
@@ -684,17 +683,17 @@ impl Runtime {
     }
 }
 
-/// `path` for the screen, with the user's folders as `%APPDATA%` and the like (Windows) or
-/// the home folder as `~` (Linux, macOS): the status can be on the screen while streaming, and
-/// the full path has the user's name.
+/// 画面に出す `path`。利用者のフォルダを `%APPDATA%` などに（Windows）、ホームのフォルダを
+/// `~` に（Linux、macOS）置き換える：状態は配信中に画面に出ることがあり、そのままのパスには
+/// 利用者の名前が入る。
 fn screen_path(path: &std::path::Path) -> String {
     hide_user(&path.display().to_string(), |var| {
         std::env::var(var).ok().filter(|dir| !dir.is_empty())
     })
 }
 
-/// `text` (a path) with the first of the user's folders it is in replaced by its name;
-/// `var` reads an environment variable.
+/// `text`（パス）の、最初に当てはまる利用者のフォルダをその名前に置き換えたもの。
+/// `var` は環境変数を読む。
 fn hide_user(text: &str, var: impl Fn(&str) -> Option<String>) -> String {
     for name in ["APPDATA", "LOCALAPPDATA", "USERPROFILE"] {
         let Some(dir) = var(name) else {
@@ -708,8 +707,8 @@ fn hide_user(text: &str, var: impl Fn(&str) -> Option<String>) -> String {
             return format!("%{name}%{}", &text[dir.len()..]);
         }
     }
-    // Unix paths: case matters, and "/" is the only separator. (Git's shells set HOME on
-    // Windows too; the folders above come first there.)
+    // Unix のパス：大文字と小文字を区別し、区切りは "/" だけ。（Git のシェルは Windows でも
+    // HOME を設定する。そこでは上のフォルダが先に当たる。）
     if let Some(home) = var("HOME") {
         let home = home.trim_end_matches('/');
         if !home.is_empty()
@@ -722,7 +721,7 @@ fn hide_user(text: &str, var: impl Fn(&str) -> Option<String>) -> String {
     text.to_owned()
 }
 
-/// The menu's note about a settings file that was not read as it is.
+/// そのままでは読めなかった設定ファイルについての、メニューの注記。
 fn settings_problem(settings: &Settings) -> Option<String> {
     if let Some(moved) = &settings.moved_aside_to {
         let name = moved
@@ -738,8 +737,8 @@ fn settings_problem(settings: &Settings) -> Option<String> {
     })
 }
 
-/// The key rebinding's rules in `settings` the router uses ([`resolve`]): less those the
-/// window library cannot report the source of or give the game the output of.
+/// `settings` のキーの置き換えのルールのうち、router が使うもの（[`resolve`]）：元のキーを
+/// ウィンドウのライブラリが報告できないもの、出力をゲームに渡せないものを除く。
 fn rebind_rules(
     ws: &dyn WindowSystem,
     settings: &Settings,
@@ -748,8 +747,8 @@ fn rebind_rules(
     resolve(settings, keys, &unsupported_inputs(ws, settings))
 }
 
-/// The keys and buttons of the rules in `settings` that the window library cannot report (as
-/// a source) or give the game (as an output).
+/// `settings` のルールのキーとボタンのうち、ウィンドウのライブラリが報告できない（元のキーと
+/// して）か、ゲームに渡せない（出力として）もの。
 fn unsupported_inputs(ws: &dyn WindowSystem, settings: &Settings) -> Vec<InputId> {
     let mut ids = Vec::new();
     for rule in &settings.rebinds {
@@ -764,7 +763,7 @@ fn unsupported_inputs(ws: &dyn WindowSystem, settings: &Settings) -> Vec<InputId
     ids
 }
 
-/// The rules the router uses in the end.
+/// 最終的に router が使うルール。
 fn log_active_rebinds(rules: &[(InputId, InputId)]) {
     let list: Vec<String> = rules
         .iter()
@@ -773,7 +772,7 @@ fn log_active_rebinds(rules: &[(InputId, InputId)]) {
     log::info!("rebinds: {} active ({})", rules.len(), list.join(", "));
 }
 
-/// `rebinds 2` or `rebinds off (2)`, for the settings' log lines.
+/// 設定のログの行のための `rebinds 2` か `rebinds off (2)`。
 fn rebinds_summary(settings: &Settings) -> String {
     if settings.rebinds_enabled {
         format!("rebinds {}", settings.rebinds.len())
@@ -820,10 +819,10 @@ mod tests {
             "~/.local/share/PrismLauncher"
         );
         assert_eq!(hide_user("/home/alice", env(&vars)), "~");
-        // Another user's folder that only starts with the same letters.
+        // 同じ文字で始まるだけの、別の利用者のフォルダ。
         assert_eq!(hide_user("/home/alice2/mc", env(&vars)), "/home/alice2/mc");
         assert_eq!(hide_user("/srv/mc", env(&vars)), "/srv/mc");
-        // A home of "/" hides nothing.
+        // "/" のホームは何も隠さない。
         assert_eq!(hide_user("/srv/mc", env(&[("HOME", "/")])), "/srv/mc");
     }
 }

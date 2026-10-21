@@ -1,20 +1,20 @@
-//! Locating the game directory and reminedog's files inside it.
+//! ゲームフォルダと、その中の reminedog のファイルを探す。
 
 use std::path::{Path, PathBuf};
 
 use crate::world::WorldId;
 
-/// Finds the game directory from the process arguments.
+/// プロセスの引数からゲームフォルダを探す。
 ///
-/// Uses the last `--gameDir <path>` or `--gameDir=<path>` (the vanilla launcher passes it),
-/// resolving a relative path against `cwd`. Without one, `cwd` is the game directory, which is
-/// how Prism Launcher starts instances.
+/// 最後の `--gameDir <path>` か `--gameDir=<path>` を使い（公式ランチャーが渡す）、相対パスは
+/// `cwd` を起点に解く。なければ `cwd` がゲームフォルダ（Prism Launcher はそうしてインスタンスを
+/// 起動する）。
 pub fn detect_game_dir(args: &[String], cwd: &Path) -> PathBuf {
     let mut found: Option<&str> = None;
     let mut iter = args.iter().peekable();
     while let Some(arg) = iter.next() {
         if arg == "--gameDir" {
-            // A following option means the value is missing; leave it to be read as an option.
+            // 次がオプションなら値がない。それはオプションとして読ませる。
             if let Some(value) = iter.next_if(|v| !v.starts_with("--")) {
                 found = Some(value);
             }
@@ -28,24 +28,24 @@ pub fn detect_game_dir(args: &[String], cwd: &Path) -> PathBuf {
     }
 }
 
-/// `<game_dir>/reminedog`: everything reminedog writes lives here.
+/// `<game_dir>/reminedog`：reminedog が書くものは全部ここ。
 pub fn data_dir(game_dir: &Path) -> PathBuf {
     game_dir.join("reminedog")
 }
 
-/// `<game_dir>/reminedog/waypoints/<file_stem>.json`.
+/// `<game_dir>/reminedog/waypoints/<file_stem>.json`。
 pub fn waypoints_path(game_dir: &Path, world: &WorldId) -> PathBuf {
     data_dir(game_dir)
         .join("waypoints")
         .join(format!("{}.json", world.file_stem()))
 }
 
-/// `<game_dir>/saves`: singleplayer world folders.
+/// `<game_dir>/saves`：シングルプレイのワールドのフォルダ。
 pub fn saves_dir(game_dir: &Path) -> PathBuf {
     game_dir.join("saves")
 }
 
-/// `<game_dir>/logs/latest.log`: the game's current log.
+/// `<game_dir>/logs/latest.log`：ゲームの今のログ。
 pub fn latest_log_path(game_dir: &Path) -> PathBuf {
     game_dir.join("logs").join("latest.log")
 }
@@ -135,7 +135,7 @@ mod tests {
             detect_game_dir(&args(&["--gameDir", "--assetsDir", "assets"]), &cwd),
             cwd
         );
-        // Other options that merely resemble it do not count.
+        // 似ているだけのほかのオプションは数えない。
         assert_eq!(
             detect_game_dir(&args(&["--gamedir", "x", "-gameDir", "y"]), &cwd),
             cwd

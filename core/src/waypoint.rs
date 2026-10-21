@@ -1,9 +1,9 @@
-//! Per-world waypoint storage backed by a JSON file.
+//! JSON のファイルに置く、ワールドごとのウェイポイントの保存。
 //!
-//! File format (pretty-printed UTF-8 JSON):
-//! `{ "version": 1, "world": "<display name>", "next_id": 4, "waypoints": [ ... ] }`.
-//! Unknown fields are ignored on load. Files with a newer `version` are refused rather than
-//! overwritten, so a downgrade never destroys data written by a newer build.
+//! ファイルの形（整形した UTF-8 の JSON）：
+//! `{ "version": 1, "world": "<表示名>", "next_id": 4, "waypoints": [ ... ] }`。
+//! 読むときに知らないフィールドは無視する。`version` が新しいファイルは上書きせずに断るので、
+//! 版を下げても新しいビルドが書いたデータを壊さない。
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::location::Location;
 
-/// The file format version this build reads and writes.
+/// このビルドが読み書きするファイルの形の版。
 pub const FORMAT_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,7 +63,7 @@ struct FileIn {
     waypoints: Vec<Waypoint>,
 }
 
-/// The waypoints of one world, loaded from and saved to a single JSON file.
+/// 1 つのワールドのウェイポイント。1 つの JSON のファイルから読み、そこに保存する。
 #[derive(Debug, Clone)]
 pub struct WaypointStore {
     path: PathBuf,
@@ -73,8 +73,8 @@ pub struct WaypointStore {
 }
 
 impl WaypointStore {
-    /// Loads the store at `path`. A missing file gives an empty store; the file is not
-    /// created until [`save`](Self::save). An unparsable file is an error and is left untouched.
+    /// `path` の記録を読む。ファイルがなければ空の記録で、ファイルは [`save`](Self::save) まで
+    /// 作らない。読めないファイルはエラーで、触れずに残す。
     pub fn open(path: impl Into<PathBuf>, world_display: &str) -> Result<Self, StoreError> {
         let path = path.into();
         let mut store = Self::empty(path, world_display);
@@ -84,9 +84,8 @@ impl WaypointStore {
         Ok(store)
     }
 
-    /// Like [`open`](Self::open), but a corrupt file is renamed to
-    /// `<stem>.corrupt-<unix>.json` next to it and an empty store is returned together with
-    /// the backup path. Files with an unsupported version are still refused.
+    /// [`open`](Self::open) と同じだが、壊れたファイルは隣の `<stem>.corrupt-<unix>.json` に名前を
+    /// 変え、空の記録と控えのパスを返す。対応していない版のファイルは、やはり断る。
     pub fn open_or_backup(
         path: impl Into<PathBuf>,
         world_display: &str,
@@ -127,7 +126,7 @@ impl WaypointStore {
             .next_id
             .max(max_id.map_or(1, |id| id.saturating_add(1)))
             .max(1);
-        // Hand-edited files may repeat ids; give duplicates fresh ones to keep ids unique.
+        // 手で書き換えたファイルは id が重なることがある。重なったものには新しい id を与えて一意にする。
         let mut seen = HashSet::new();
         for i in 0..self.waypoints.len() {
             let old = self.waypoints[i].id;
@@ -143,8 +142,8 @@ impl WaypointStore {
         }
     }
 
-    /// Hands out `next_id`. Once ids reach `u64::MAX` (only possible with a hand-edited file)
-    /// uniqueness wins over never reusing an id: the lowest free id is returned instead.
+    /// `next_id` を渡す。id が `u64::MAX` に達したら（手で書き換えたファイルでしか起きない）、
+    /// id を使い回さないことより一意であることを優先し、空いているいちばん小さい id を返す。
     fn allocate_id(&mut self) -> u64 {
         let id = self.next_id;
         if id < u64::MAX {
@@ -164,7 +163,7 @@ impl WaypointStore {
         &self.path
     }
 
-    /// The display name written to the file's `world` field.
+    /// ファイルの `world` のフィールドに書く表示名。
     pub fn world(&self) -> &str {
         &self.world
     }
@@ -173,12 +172,12 @@ impl WaypointStore {
         world_display.clone_into(&mut self.world);
     }
 
-    /// The id the next [`add`](Self::add) will use (unless ids ran up to `u64::MAX`).
+    /// 次の [`add`](Self::add) が使う id（id が `u64::MAX` まで達していなければ）。
     pub fn next_id(&self) -> u64 {
         self.next_id
     }
 
-    /// Waypoints in insertion order.
+    /// 足した順のウェイポイント。
     pub fn waypoints(&self) -> &[Waypoint] {
         &self.waypoints
     }
@@ -187,9 +186,8 @@ impl WaypointStore {
         self.waypoints.iter().find(|w| w.id == id)
     }
 
-    /// Adds a waypoint at `location`. The name is trimmed; an empty name becomes
-    /// `Waypoint <id>`. A missing dimension means the overworld. Non-finite coordinates
-    /// (which JSON cannot represent) are stored as 0.
+    /// `location` にウェイポイントを足す。名前の前後の空白は取り、空なら `Waypoint <id>`。
+    /// ディメンションがなければオーバーワールド。有限でない座標（JSON で表せない）は 0 として保存する。
     pub fn add(&mut self, name: &str, location: &Location, now_unix: i64) -> &Waypoint {
         let id = self.allocate_id();
         let finite = |v: f64| if v.is_finite() { v } else { 0.0 };
@@ -205,8 +203,8 @@ impl WaypointStore {
         self.waypoints.last().expect("just pushed")
     }
 
-    /// Renames a waypoint with the same normalization as [`add`](Self::add).
-    /// Returns `false` if there is no waypoint with that id.
+    /// [`add`](Self::add) と同じ整え方でウェイポイントの名前を変える。その id のウェイポイントが
+    /// なければ `false`。
     pub fn rename(&mut self, id: u64, name: &str) -> bool {
         match self.waypoints.iter_mut().find(|w| w.id == id) {
             Some(waypoint) => {
@@ -222,7 +220,7 @@ impl WaypointStore {
         Some(self.waypoints.remove(index))
     }
 
-    /// Writes the store atomically ([`write_file`]).
+    /// 記録をアトミックに書く（[`write_file`]）。
     pub fn save(&self) -> Result<(), StoreError> {
         write_file(&self.path, &self.to_json()?).map_err(|source| StoreError::Io {
             path: self.path.clone(),
@@ -230,7 +228,7 @@ impl WaypointStore {
         })
     }
 
-    /// The file's contents, for [`write_file`] (on another thread).
+    /// [`write_file`] のための（別のスレッドで）ファイルの中身。
     pub fn to_json(&self) -> Result<Vec<u8>, StoreError> {
         let mut json = serde_json::to_vec_pretty(&FileOut {
             version: FORMAT_VERSION,
@@ -247,8 +245,8 @@ impl WaypointStore {
     }
 }
 
-/// Writes `data` to `path` atomically: `<file>.tmp` in the same directory is written and
-/// synced, then renamed over the target. Parent directories are created as needed.
+/// `data` を `path` にアトミックに書く：同じフォルダの `<file>.tmp` に書いて同期してから、
+/// 目的のファイルの上に名前を変えて置く。親のフォルダは必要なら作る。
 pub fn write_file(path: &Path, data: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         fs::create_dir_all(dir)?;
@@ -279,11 +277,11 @@ fn load(path: &Path) -> Result<Option<FileIn>, StoreError> {
         reason,
     };
     let text = std::str::from_utf8(&bytes).map_err(|e| corrupt(format!("not UTF-8: {e}")))?;
-    // Tolerate a BOM added by editors such as Notepad.
+    // メモ帳などのエディタが足した BOM を許す。
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|e| corrupt(e.to_string()))?;
-    // Check the version before the full schema: a newer format may not match it.
+    // 全体の形より先に版を確かめる：新しい形は今の形に合わないかもしれない。
     let version = match value.get("version") {
         Some(v) => v
             .as_u64()
@@ -321,12 +319,12 @@ pub(crate) fn tmp_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// `<stem>.corrupt-<unix>.json` next to `path`, with `-<n>` added if that already exists.
+/// `path` の隣の `<stem>.corrupt-<unix>.json`。もうあれば `-<n>` を足す。
 pub(crate) fn backup_path(path: &Path, unix: u64) -> PathBuf {
     copy_path(path, "corrupt", unix)
 }
 
-/// `<stem>.<kind>-<unix>.json` next to `path`, with `-<n>` added if that already exists.
+/// `path` の隣の `<stem>.<kind>-<unix>.json`。もうあれば `-<n>` を足す。
 pub(crate) fn copy_path(path: &Path, kind: &str, unix: u64) -> PathBuf {
     let stem = path.file_stem().unwrap_or_default();
     let candidate = |suffix: &str| {
@@ -350,7 +348,7 @@ pub(crate) fn write_synced(path: &Path, data: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
-/// Makes the rename durable on Unix; Windows has no equivalent for directories.
+/// Unix で名前の変更を確実に残す。Windows にはフォルダについての同じものはない。
 pub(crate) fn sync_parent_dir(path: &Path) {
     #[cfg(unix)]
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -516,7 +514,7 @@ mod tests {
                 store.waypoints()
             );
         };
-        // A hand-edited id at the very top of the range.
+        // 範囲のいちばん上の、手で書き換えた id。
         fs::write(
             &path,
             format!(
@@ -531,7 +529,7 @@ mod tests {
             store.add("x", &loc(None, 0.0, 0.0, 0.0), 0);
             unique(&store);
         }
-        // Duplicates cannot be renumbered past the top either.
+        // 重なった id も、いちばん上を超えて振り直せない。
         fs::write(
             &path,
             format!(
@@ -546,7 +544,7 @@ mod tests {
         unique(&store);
         store.add("x", &loc(None, 0.0, 0.0, 0.0), 0);
         unique(&store);
-        // `next_id` alone at the top still yields one fresh id, then unique ones.
+        // いちばん上の `next_id` だけでも、新しい id を 1 つ出し、その後は一意のものを出す。
         fs::write(
             &path,
             format!(r#"{{"version": 1, "next_id": {}}}"#, u64::MAX),
@@ -624,7 +622,7 @@ mod tests {
         let mut store = WaypointStore::open(&path, "W").unwrap();
         store.add("a", &loc(None, 1.0, 2.0, 3.0), 0);
         store.save().unwrap();
-        // A stale temp file from a crash in the middle of a save must not get in the way.
+        // 保存の途中で落ちて残った古い一時ファイルが、邪魔をしてはならない。
         fs::write(dir.path().join("w.json.tmp"), "garbage").unwrap();
         store.add("b", &loc(None, 4.0, 5.0, 6.0), 0);
         store.save().unwrap();
@@ -638,7 +636,7 @@ mod tests {
     #[test]
     fn save_failure_keeps_old_file_and_cleans_temp() {
         let dir = tempfile::tempdir().unwrap();
-        // The target is a non-empty directory, so the final rename must fail.
+        // 目的の場所が空でないフォルダなので、最後の名前の変更は失敗するはず。
         let path = dir.path().join("w.json");
         fs::create_dir(&path).unwrap();
         fs::write(path.join("keep"), "x").unwrap();
@@ -771,7 +769,7 @@ mod tests {
     fn newer_version_is_refused_and_never_overwritten() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("w.json");
-        // A future format whose waypoints no longer match this schema.
+        // ウェイポイントがもうこの形に合わない、将来の形。
         let future = r#"{"version": 2, "waypoints": {"by_id": {}}}"#;
         fs::write(&path, future).unwrap();
         assert!(matches!(
@@ -789,7 +787,7 @@ mod tests {
     #[test]
     fn io_errors_are_not_reported_as_corruption() {
         let dir = tempfile::tempdir().unwrap();
-        // Reading a directory fails with an I/O error on every platform.
+        // フォルダを読むと、どの OS でも I/O のエラーになる。
         let path = dir.path().join("w.json");
         fs::create_dir(&path).unwrap();
         assert!(matches!(

@@ -11,7 +11,8 @@ macOS は試作（`hook-macos/`。CI の macOS のランナーの SDL3 のスモ
 
 ## 利用者とのやり取り
 
-- 利用者は日本語で話す。返事・ドキュメント・UI の文言は日本語。コードのコメント、コミットメッセージ、ログは英語
+- 利用者は日本語で話す。返事・ドキュメント・UI の文言・コードのコメントは日本語。コミットメッセージとログは英語（識別子・`SAFETY:`・`# Safety` もそのまま）。
+  PowerShell のスクリプトは BOM 付きの UTF-8 で保存する（Windows PowerShell 5.1 は BOM のないファイルを ANSI のコードページで読む）
 - 実機で確かめるのは利用者（Windows、NVIDIA RTX 4060 Ti、Prism Launcher）。確かめたバージョンは 1.21.11（GLFW 3.4.0）と 26.3（SDL 3.4.14）。
   1.21.11 には 2026-10-05 から Fabric と Sodium・Iris・Lithium が入っている（それより前の 1.21.11 での確認はバニラ）。26.3 はバニラ
 - JVM 引数は `-agentpath:C:\reminedog\reminedog.dll`（先頭の `-` を忘れると起動しない）。ログは `<ゲームフォルダ>/reminedog/reminedog.log`、詳しいログは `=log=debug` を付ける

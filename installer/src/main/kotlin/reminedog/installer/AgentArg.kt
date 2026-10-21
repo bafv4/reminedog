@@ -1,23 +1,22 @@
 package reminedog.installer
 
-/** A reminedog argument found in an argument string: its place, the DLL and the agent's options. */
+/** 引数の文字列の中に見つけた reminedog の引数：その場所、DLL、エージェントのオプション。 */
 data class FoundAgent(val start: Int, val end: Int, val path: String, val options: String)
 
 /**
- * The reminedog argument (`-agentpath:<dll>[=<options>]`) in a launcher's JVM arguments.
+ * ランチャーの JVM 引数の中の reminedog の引数（`-agentpath:<dll>[=<options>]`）。
  *
- * The arguments are edited as text: only the reminedog argument changes, everything else
- * (spacing, quotes) stays as it was. An argument is reminedog's when its DLL's file name starts
- * with "reminedog" and ends with ".dll".
+ * 引数は文字として書き換える：変えるのは reminedog の引数だけで、ほか（空白、引用符）はそのまま
+ * 残す。DLL のファイル名が "reminedog" で始まり ".dll" で終わる引数が reminedog のもの。
  */
 object AgentArg {
     const val PREFIX = "-agentpath:"
 
     /**
-     * Why a DLL path cannot be put in the JVM arguments, or null when it can.
+     * DLL のパスを JVM 引数に入れられない理由。入れられれば null。
      *
-     * The launchers split the arguments at spaces (MCSR Launcher ignores quotes), the Java
-     * launcher reads its command line in the ANSI code page, and the JVM ends the path at '='.
+     * ランチャーは引数を空白で分け（MCSR Launcher は引用符を無視する）、Java のランチャーは
+     * コマンドラインを ANSI のコードページで読み、JVM はパスを '=' で終える。
      */
     fun problem(path: String): String? {
         if (path.isEmpty()) return "DLL の場所が空です"
@@ -36,7 +35,7 @@ object AgentArg {
     fun token(path: String, options: String = ""): String =
         PREFIX + path + if (options.isEmpty()) "" else "=$options"
 
-    /** The reminedog arguments in an argument string, in order. */
+    /** 引数の文字列の中の reminedog の引数（順に）。 */
     fun find(args: String): List<FoundAgent> {
         val found = mutableListOf<FoundAgent>()
         var i = 0
@@ -46,8 +45,8 @@ object AgentArg {
                 continue
             }
             val start = i
-            // Prism and MultiMC take an argument (or a part of one) in quotes, spaces and all,
-            // and drop the quotes.
+            // Prism と MultiMC は、引用符で囲んだ引数（またはその一部）を空白ごと 1 つにし、
+            // 引用符を外す。
             var quoted = false
             while (i < args.length && (quoted || !args[i].isWhitespace())) {
                 if (args[i] == '"') quoted = !quoted
@@ -65,8 +64,8 @@ object AgentArg {
     }
 
     /**
-     * The arguments with reminedog loaded from [path]: the first reminedog argument is replaced
-     * (keeping its options), any others are removed, and if there was none it is added at the end.
+     * [path] から reminedog を読み込む引数：最初の reminedog の引数を置き換え（オプションは残す）、
+     * ほかは外し、なければ最後に足す。
      */
     fun install(args: String, path: String): String {
         val found = find(args)
@@ -80,15 +79,15 @@ object AgentArg {
         return cut(replaced, found.drop(1).map { it.copy(start = it.start + shift, end = it.end + shift) })
     }
 
-    /** The arguments without any reminedog argument. */
+    /** reminedog の引数をすべて外した引数。 */
     fun remove(args: String): String = cut(args, find(args))
 
     fun samePath(a: String, b: String): Boolean = pathKey(a) == pathKey(b)
 
-    /** The same text for paths Windows takes as the same file (case and slash direction aside). */
+    /** Windows が同じファイルとみなすパス（大文字小文字とスラッシュの向きは問わない）に同じ文字。 */
     fun pathKey(path: String): String = path.replace('/', '\\').lowercase()
 
-    /** Whether a path starts with a drive (`C:\` or `C:/`), so it does not depend on the working folder. */
+    /** パスがドライブ（`C:\` か `C:/`）で始まり、作業フォルダに左右されないか。 */
     fun isDrivePath(path: String): Boolean =
         path.length > 2 && (path[0] in 'A'..'Z' || path[0] in 'a'..'z') && path[1] == ':' && (path[2] == '\\' || path[2] == '/')
 
@@ -99,7 +98,7 @@ object AgentArg {
         return lower.startsWith("reminedog") && lower.endsWith(".dll")
     }
 
-    /** Removes the found arguments with the spaces before them (after them for the first word). */
+    /** 見つけた引数を、その前の空白ごと外す（最初の語なら後ろの空白ごと）。 */
     private fun cut(args: String, found: List<FoundAgent>): String {
         val out = StringBuilder(args)
         for (f in found.asReversed()) {

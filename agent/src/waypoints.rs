@@ -1,12 +1,11 @@
-//! Waypoints on the swap path: the world the player is in (latest.log and the saves folder),
-//! Minecraft's key bindings (options.txt: the debug keys, and every key's mappings for the
-//! menu's key rebinding), the hotkeys and menu commands that become F3+C requests ([`f3c`]), and
-//! the positions and failures that come back as waypoints and notices.
+//! スワップの道の上のウェイポイント：プレイヤーがいるワールド（latest.log と saves のフォルダ）、
+//! Minecraft のキーの割り当て（options.txt：デバッグのキーと、メニューのキーの置き換えのための
+//! 各キーの割り当て）、F3+C の要求になるホットキーとメニューの命令（[`f3c`]）、ウェイポイントと
+//! 通知になって返ってくる位置と失敗。
 //!
-//! The state is a static, so it outlives the overlay's `Runtime` (rebuilt when the game's
-//! device context changes). Only the frame code uses it, inside the swap hook. With it
-//! locked the router and the f3c state may be locked, never the other way round, and no game
-//! code runs.
+//! 状態は static なので、オーバーレイの `Runtime`（ゲームのデバイスコンテキストが変わると
+//! 作り直す）より長く生きる。使うのはフレームの処理だけで、スワップのフックの中。これをロック
+//! している間に router と f3c の状態をロックしてよいが、逆は不可で、ゲームのコードも動かさない。
 
 use std::fs;
 use std::io;
@@ -28,17 +27,17 @@ use crate::f3c::{self, DebugKey, Failure, Job, Outcome, Purpose};
 use crate::input;
 use crate::saver;
 
-/// How often latest.log is read for world changes.
+/// ワールドの変化のために latest.log を読む間隔。
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// How often options.txt is looked at for changed key bindings (also right before a request).
+/// キーの割り当ての変化のために options.txt を見る間隔（要求の直前にも見る）。
 const KEYS_INTERVAL: Duration = Duration::from_secs(5);
-/// A larger options.txt is not read.
+/// これより大きい options.txt は読まない。
 const MAX_OPTIONS_LEN: u64 = 1024 * 1024;
-/// How often waypoints an earlier save failed to write are saved again.
+/// 前の保存が書けなかったウェイポイントを、もう一度保存する間隔。
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
-/// A request the platform did not take within this long fails.
+/// OS がこの時間のうちに受け取らなかった要求は失敗する。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-/// How long notices show, in seconds.
+/// 通知を出す秒数。
 const NOTICE_SECONDS: f64 = 6.0;
 const NAVIGATION_SECONDS: f64 = 8.0;
 
@@ -49,18 +48,18 @@ const UNKNOWN_WORLD: &str =
 
 static WAYPOINTS: Mutex<Option<Waypoints>> = Mutex::new(None);
 
-/// What the overlay gets from the waypoints this frame.
+/// このフレームでオーバーレイがウェイポイントから受け取るもの。
 pub struct Frame {
     pub view: WaypointView,
     pub notices: Vec<Notice>,
-    /// Minecraft's debug modifier, copy-location and crash keys.
+    /// Minecraft のデバッグの修飾キー、座標のコピーのキー、クラッシュのキー。
     pub reserved_keys: Vec<Key>,
 }
 
-/// Every frame of the overlay's window, before the overlay renders: follows the world and the
-/// key bindings, turns F3+C outcomes into waypoints and notices, and the hotkeys pressed since
-/// the last frame into requests. `playing`: the game has captured the cursor. `naming`: how
-/// the hooked window library's Minecraft names keys in options.txt.
+/// オーバーレイのウィンドウの毎フレーム、オーバーレイが描く前に：ワールドとキーの割り当てを
+/// 追い、F3+C の結果をウェイポイントと通知に、前のフレームから押されたホットキーを要求にする。
+/// `playing`：ゲームがカーソルを捕まえている。`naming`：フックしたウィンドウのライブラリの
+/// Minecraft が options.txt でキーをどう名付けるか。
 pub fn before_frame(game_dir: &Path, window: usize, playing: bool, naming: Naming) -> Frame {
     let mut state = lock();
     let now = Instant::now();
@@ -76,7 +75,7 @@ pub fn before_frame(game_dir: &Path, window: usize, playing: bool, naming: Namin
     }
     waypoints.poll_saves();
     if !waypoints.book.has_unsaved() {
-        // The first retry comes an interval after the failure, not at the next frame.
+        // 最初の試し直しは、次のフレームではなく、失敗から 1 間隔後に来る。
         waypoints.next_retry = now + RETRY_INTERVAL;
     } else if now >= waypoints.next_retry {
         waypoints.next_retry = now + RETRY_INTERVAL;
@@ -111,8 +110,7 @@ pub fn before_frame(game_dir: &Path, window: usize, playing: bool, naming: Namin
     }
 }
 
-/// The game's mappings on each key, as options.txt had them at the last read (for the menu's
-/// key rebinding).
+/// 最後に読んだときの options.txt の、各キーのゲームの割り当て（メニューのキーの置き換えのため）。
 pub fn game_bindings() -> Vec<(InputId, Vec<String>)> {
     lock()
         .as_ref()
@@ -120,7 +118,7 @@ pub fn game_bindings() -> Vec<(InputId, Vec<String>)> {
         .unwrap_or_default()
 }
 
-/// The menu's waypoint commands from the frame just rendered; their notices show next frame.
+/// いま描いたフレームのメニューのウェイポイントの命令。その通知は次のフレームで出る。
 pub fn after_frame(commands: Vec<WaypointCommand>, window: usize) {
     if commands.is_empty() {
         return;
@@ -140,51 +138,51 @@ fn lock() -> MutexGuard<'static, Option<Waypoints>> {
     WAYPOINTS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A file's modification time and size (`None`: there was no file).
+/// ファイルの更新時刻と大きさ（`None`：ファイルがなかった）。
 type FileStamp = Option<(Option<SystemTime>, u64)>;
 
 struct Waypoints {
     game_dir: PathBuf,
     watcher: WorldWatcher,
     book: WaypointBook,
-    /// The label last used on each server.
+    /// 各サーバーで最後に使ったラベル。
     labels: ServerLabels,
-    /// Saves on the saving thread: the waypoints', and the labels' (`None`).
+    /// 保存のスレッドでの保存：ウェイポイントのものと、ラベルのもの（`None`）。
     saving: Vec<(saver::Pending, Option<SaveJob>)>,
-    /// The waypoints as the menu shows them, made again when the book's revision changes.
+    /// メニューが見せるウェイポイント。記録の版が変わったら作り直す。
     shown: (u64, Arc<[Waypoint]>),
     next_poll: Instant,
     next_keys: Instant,
     next_retry: Instant,
-    /// The game had the cursor in every frame since the last poll of the log.
+    /// 前にログを読んでから、毎フレームゲームがカーソルを持っていた。
     in_game_since_poll: bool,
-    /// How the window library's Minecraft names keys.
+    /// ウィンドウのライブラリの Minecraft がキーをどう名付けるか。
     naming: Naming,
     keys: DebugKeys,
-    /// options.txt was read at least once.
+    /// options.txt を少なくとも 1 回読んだ。
     keys_read: bool,
-    /// options.txt as it was read, and the naming it was read with.
+    /// 読んだときの options.txt と、読んだときの名付け方。
     keys_stamp: Option<(FileStamp, Naming)>,
-    /// The menu's warnings about `keys`.
+    /// `keys` についてのメニューの警告。
     key_problems: Vec<String>,
     reserved_keys: Vec<Key>,
-    /// Every key's mappings in options.txt (`bindings_by_key`).
+    /// options.txt の各キーの割り当て（`bindings_by_key`）。
     game_bindings: Vec<(InputId, Vec<String>)>,
-    /// The player's last known position, and when it came.
+    /// 最後に分かったプレイヤーの位置と、その時刻。
     location: Option<(Location, Instant)>,
-    /// The destination.
+    /// 目的地。
     selected: Option<u64>,
-    /// The game refused F3+C in this world; nothing is sent until the menu's retry or another
-    /// world.
+    /// このワールドではゲームが F3+C を断った。メニューの「もう一度試す」か別のワールドまで、
+    /// 何も送らない。
     blocked: bool,
     pending_notices: Vec<Notice>,
-    /// Error kinds already logged, so a lasting error is logged once.
+    /// もうログに出したエラーの種類（続くエラーを 1 回だけ出すため）。
     log_errors: Vec<io::ErrorKind>,
     keys_errors: Vec<io::ErrorKind>,
 }
 
 impl Waypoints {
-    /// Reads nothing yet: the first frame polls the log and reads options.txt.
+    /// まだ何も読まない：最初のフレームがログを読み、options.txt を読む。
     fn new(game_dir: &Path, now: Instant) -> Self {
         let keys = DebugKeys::default();
         Self {
@@ -214,8 +212,8 @@ impl Waypoints {
         }
     }
 
-    /// Reads the log for world changes. World lines read after the game had the cursor all
-    /// the time since the last poll did not come from its screens: they are ignored.
+    /// ワールドの変化のためにログを読む。前に読んでからずっとゲームがカーソルを持っていた後に
+    /// 読んだワールドの行は、ゲームの画面から来たものではない：無視する。
     fn poll_world(&mut self) {
         let polled = if self.in_game_since_poll {
             self.watcher.poll_while_playing()
@@ -230,8 +228,8 @@ impl Waypoints {
         }
     }
 
-    /// Opens the new world's waypoints (a server's under its last label); what belonged to the
-    /// old world goes.
+    /// 新しいワールドのウェイポイントを開く（サーバーなら最後のラベルの下で）。古いワールドの
+    /// ものはなくなる。
     fn world_changed(&mut self) {
         let world = self.watcher.current().map(|world| self.labels.apply(world));
         self.switch_book(world.as_ref());
@@ -258,7 +256,7 @@ impl Waypoints {
         self.selected = None;
     }
 
-    /// Hands the book's saves to the saving thread.
+    /// 記録の保存を保存のスレッドに渡す。
     fn submit_saves(&mut self) {
         for mut job in self.book.take_saves() {
             let bytes = std::mem::take(&mut job.bytes);
@@ -267,7 +265,7 @@ impl Waypoints {
         }
     }
 
-    /// Takes in the saves done since the last frame.
+    /// 前のフレームから終わった保存を受け取る。
     fn poll_saves(&mut self) {
         let mut i = 0;
         while i < self.saving.len() {
@@ -294,9 +292,8 @@ impl Waypoints {
         }
     }
 
-    /// Reads the key bindings if options.txt changed since (or `naming` did), with key names as
-    /// `naming` has them; on an error the ones read before stay. A missing file (a fresh
-    /// instance) has the defaults.
+    /// options.txt（か `naming`）が前から変わっていれば、`naming` のキーの名前でキーの割り当てを
+    /// 読む。エラーなら前に読んだものが残る。ファイルがない（新しいインスタンス）なら既定のもの。
     fn load_keys(&mut self, naming: Naming) {
         let path = options_path(&self.game_dir);
         let file = match fs::metadata(&path) {
@@ -334,7 +331,7 @@ impl Waypoints {
         self.keys_stamp = stamp;
         self.game_bindings = bindings_by_key(&text, naming);
         let keys = parse_debug_keys(&text);
-        // The user's own F3+C: the copy key as the platform reports it to the game.
+        // 利用者自身の F3+C：OS がゲームに報告するコピーのキー。
         let copy = input_by_name(&keys.copy_location, naming);
         f3c::set_passive_keys(
             copy.and_then(glfw_key_of)
@@ -376,13 +373,13 @@ impl Waypoints {
         }
     }
 
-    /// A position from F3+C; `purpose` is `None` for the user's own F3+C.
+    /// F3+C から得た位置。利用者自身の F3+C なら `purpose` は `None`。
     fn located(&mut self, location: Location, purpose: Option<Purpose>, now: Instant) {
-        // The position belongs to a world entered since the last poll, if any.
+        // 位置は、前に読んでから入ったワールドのもの（あれば）。
         self.poll_world();
         if purpose == Some(Purpose::Record) && self.book.world().is_none() && self.watcher.refresh()
         {
-            // The world folder was not found when the server started; it may be there now.
+            // サーバーが始まったときにワールドのフォルダが見つからなかった。今はあるかもしれない。
             self.world_changed();
         }
         if purpose.is_none() && self.blocked {
@@ -418,8 +415,7 @@ impl Waypoints {
         }
     }
 
-    /// The way from `from` to the destination, if one is selected; it replaces the way shown
-    /// from an older position.
+    /// 目的地を選んでいれば、`from` から目的地への道。古い位置から見せていた道を置き換える。
     fn show_way(&mut self, from: &Location) {
         if let Some(notice) = self.destination().map(|waypoint| Notice {
             arrow: turn_to(from, waypoint),
@@ -444,8 +440,8 @@ impl Waypoints {
         self.warn(failure_text(&reason, &self.keys));
     }
 
-    /// The navigate hotkey: refreshes the position for the way to the destination. Without a
-    /// destination nothing is sent (F3+C would only print its chat line).
+    /// 案内のホットキー：目的地への道のために位置を更新する。目的地がなければ何も送らない
+    /// （F3+C はチャットに行を出すだけになる）。
     fn navigate(&mut self, window: usize) -> Option<Job> {
         if self.destination().is_none() {
             self.notice(NO_DESTINATION, false, NOTICE_SECONDS);
@@ -454,8 +450,8 @@ impl Waypoints {
         self.job(Purpose::Refresh, window)
     }
 
-    /// The request to send, unless the game refused F3+C in this world. The key bindings are
-    /// read again first if options.txt changed (the user may just have changed them).
+    /// 送る要求（このワールドでゲームが F3+C を断っていなければ）。options.txt が変わっていれば、
+    /// 先にキーの割り当てを読み直す（利用者がいま変えたかもしれない）。
     fn job(&mut self, purpose: Purpose, window: usize) -> Option<Job> {
         self.load_keys(self.naming);
         if self.blocked {
@@ -480,11 +476,11 @@ impl Waypoints {
         }
     }
 
-    /// Acts on a menu command; `Record` and `Refresh` give the request to send.
+    /// メニューの命令を行う。`Record` と `Refresh` は送る要求を返す。
     fn command(&mut self, command: WaypointCommand, window: usize) -> Option<Job> {
         match command {
             WaypointCommand::Record => return self.job(Purpose::Record, window),
-            // The menu's button refreshes the position even without a destination.
+            // メニューのボタンは、目的地がなくても位置を更新する。
             WaypointCommand::Refresh => return self.job(Purpose::Refresh, window),
             WaypointCommand::Select(id) => {
                 self.selected = id.filter(|&id| self.waypoint(id).is_some());
@@ -498,7 +494,7 @@ impl Waypoints {
                     Ok(()) => log::info!("waypoints: waypoint {id} removed"),
                     Err(e) => self.warn(e),
                 }
-                // Gone from memory even if the file could not be saved.
+                // ファイルを保存できなくても、記憶からは消える。
                 if self.selected == Some(id) && self.waypoint(id).is_none() {
                     self.selected = None;
                 }
@@ -513,7 +509,7 @@ impl Waypoints {
         None
     }
 
-    /// On a server: keeps its waypoints under `label` from now on (and on later visits).
+    /// サーバーで：これからは（次に来たときも）そのウェイポイントを `label` の下に置く。
     fn set_label(&mut self, label: Option<&str>) {
         let Some(world) = self
             .book
@@ -589,8 +585,8 @@ fn log_once(logged: &mut Vec<io::ErrorKind>, error: &io::Error, what: &str) {
     }
 }
 
-/// The world for the menu: a singleplayer world by its name in the game (`level_name`) and
-/// its folder when that differs (two worlds can have one name), a server by its address.
+/// メニューのためのワールド：シングルプレイのワールドはゲームの中の名前（`level_name`）と、
+/// それと違えばフォルダ（2 つのワールドが同じ名前を持てる）、サーバーはアドレス。
 fn world_label(state: &WorldState, level_name: Option<&str>) -> WorldLabel {
     match state {
         WorldState::NotInWorld => WorldLabel::NotInWorld,
@@ -607,17 +603,17 @@ fn world_label(state: &WorldState, level_name: Option<&str>) -> WorldLabel {
     }
 }
 
-/// The egui key the platforms report for a Minecraft key name: letters, digits, F-keys, and
-/// keypad digits as the plain digits (as the GLFW and SDL3 hooks translate them).
+/// Minecraft のキーの名前に対して OS が報告する egui のキー：文字、数字、F キー、テンキーの
+/// 数字はふつうの数字として（GLFW と SDL3 のフックがそう変換する）。
 fn egui_key(name: &str) -> Option<Key> {
-    // Only the keys core knows the codes of.
+    // core がコードを知っているキーだけ。
     glfw_key(name)?;
     let key = name.strip_prefix("key.keyboard.")?;
     let key = key.strip_prefix("keypad.").unwrap_or(key);
     Key::from_name(&key.to_ascii_uppercase())
 }
 
-/// The debug keys as egui keys, which the waypoint and navigate hotkeys must not take.
+/// egui のキーとしてのデバッグのキー。ウェイポイントと案内のホットキーはこれを取ってはいけない。
 fn reserved_keys(keys: &DebugKeys) -> Vec<Key> {
     let mut reserved = Vec::new();
     for name in [&keys.modifier, &keys.copy_location, &keys.crash] {
@@ -630,11 +626,11 @@ fn reserved_keys(keys: &DebugKeys) -> Vec<Key> {
     reserved
 }
 
-/// The menu's warnings about Minecraft's F3+C bindings: one the agent cannot send, and other
-/// mappings on the copy key, which a refused F3+C sets off once.
+/// Minecraft の F3+C の割り当てについてのメニューの警告：エージェントが送れないキーと、
+/// コピーのキーのほかの割り当て（断られた F3+C が 1 回動かしてしまう）。
 fn binding_problems(keys: &DebugKeys) -> Vec<String> {
     let mut problems = Vec::new();
-    // GLFW's table has every key SDL3's has, and F25; on SDL3 a request reports F25 itself.
+    // GLFW の表には SDL3 の表のキーが全部と F25 がある。SDL3 では、要求が F25 を自分で報告する。
     if let Err(reason) = f3c::key_codes(keys, glfw_key) {
         problems.push(failure_text(&reason, keys));
     }
@@ -652,7 +648,7 @@ fn binding_problems(keys: &DebugKeys) -> Vec<String> {
     problems
 }
 
-/// `F3・C`: the bound debug keys, each once.
+/// `F3・C`：割り当てたデバッグのキー（それぞれ 1 回）。
 fn debug_key_labels(keys: &DebugKeys) -> String {
     let mut labels: Vec<String> = Vec::new();
     for name in [&keys.modifier, &keys.copy_location, &keys.crash] {
@@ -664,7 +660,7 @@ fn debug_key_labels(keys: &DebugKeys) -> String {
     labels.join("・")
 }
 
-/// The notice for a failed request.
+/// 失敗した要求の通知。
 fn failure_text(reason: &Failure, keys: &DebugKeys) -> String {
     match reason {
         Failure::Refused => {
@@ -756,7 +752,7 @@ mod tests {
         }
     }
 
-    /// Writes the saves handed out so far and takes in how they went.
+    /// ここまでに渡した保存を書き、その結果を受け取る。
     fn settle(waypoints: &mut Waypoints) {
         waypoints.submit_saves();
         let saving = std::mem::take(&mut waypoints.saving);
@@ -771,13 +767,13 @@ mod tests {
         }
     }
 
-    /// Polls the log as after a frame with one of the game's screens (they change worlds).
+    /// ゲームの画面があるフレームの後と同じように、ログを読む（画面はワールドを変える）。
     fn poll_after_a_screen(waypoints: &mut Waypoints) {
         waypoints.in_game_since_poll = false;
         waypoints.poll_world();
     }
 
-    /// The notices so far, taken.
+    /// ここまでの通知を取り出す。
     fn notices(waypoints: &mut Waypoints) -> Vec<String> {
         std::mem::take(&mut waypoints.pending_notices)
             .into_iter()
@@ -797,7 +793,7 @@ mod tests {
         fs::write(log, STARTING).unwrap();
     }
 
-    /// Waypoints in the singleplayer world `name`, with one waypoint recorded and selected.
+    /// シングルプレイのワールド `name` のウェイポイント。1 つ記録して選んである。
     fn with_destination(game: &Path, name: &str, now: Instant) -> Waypoints {
         create_world(game, name);
         start_server(game);
@@ -831,7 +827,7 @@ mod tests {
             }
         );
 
-        // No world yet: the position is known, but not where to record it.
+        // まだワールドがない：位置は分かるが、どこに記録するかが分からない。
         let spot = here(OVERWORLD, 12.3, 64.0, -7.2);
         waypoints.on_outcome(located(spot.clone(), Some(Purpose::Record)), now);
         assert_eq!(notices(&mut waypoints), [UNKNOWN_WORLD]);
@@ -845,7 +841,7 @@ mod tests {
         poll_after_a_screen(&mut waypoints);
         let view = waypoints.view(true, false, now);
         assert_eq!(view.world, WorldLabel::Singleplayer("New World".into()));
-        // The old world's position went with it.
+        // 古いワールドの位置は、ワールドと一緒になくなった。
         assert_eq!(view.location, None);
 
         waypoints.on_outcome(located(spot.clone(), Some(Purpose::Record)), now);
@@ -860,7 +856,7 @@ mod tests {
         let world = WorldId::Singleplayer {
             folder: "New World".into(),
         };
-        // Saved on the saving thread.
+        // 保存のスレッドで保存した。
         settle(&mut waypoints);
         assert!(waypoints_path(game, &world).is_file());
         assert!(!waypoints.book.has_unsaved());
@@ -872,7 +868,7 @@ mod tests {
         let game = dir.path();
         let now = Instant::now();
         let mut waypoints = Waypoints::new(game, now);
-        // The server started, but its world folder is not there (yet).
+        // サーバーは始まったが、そのワールドのフォルダが（まだ）ない。
         start_server(game);
         poll_after_a_screen(&mut waypoints);
         assert_eq!(waypoints.view(true, false, now).world, WorldLabel::Unknown);
@@ -894,7 +890,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let now = Instant::now();
         let mut waypoints = Waypoints::new(dir.path(), now);
-        // Read again right before each request.
+        // 要求のたびに、その直前に読み直す。
         fs::write(
             options_path(dir.path()),
             "key_key.drop:key.keyboard.c
@@ -918,19 +914,19 @@ mod tests {
             ]
         );
         assert!(waypoints.view(true, false, now).blocked);
-        // Neither the hotkey nor the menu's buttons send anything now.
+        // ホットキーもメニューのボタンも、いまは何も送らない。
         assert_eq!(waypoints.job(Purpose::Record, WINDOW), None);
         assert_eq!(waypoints.command(WaypointCommand::Record, WINDOW), None);
         assert_eq!(waypoints.command(WaypointCommand::Refresh, WINDOW), None);
         assert_eq!(notices(&mut waypoints), [BLOCKED, BLOCKED, BLOCKED]);
 
-        // The menu's 「もう一度試す」.
+        // メニューの「もう一度試す」。
         assert_eq!(waypoints.command(WaypointCommand::Unblock, WINDOW), None);
         assert!(!waypoints.view(true, false, now).blocked);
         assert_eq!(waypoints.job(Purpose::Record, WINDOW), Some(job));
         assert!(notices(&mut waypoints).is_empty());
 
-        // Another world starts unblocked.
+        // 別のワールドは止められていない状態で始まる。
         waypoints.on_outcome(failed(Failure::Refused), now);
         assert!(waypoints.blocked);
         create_world(dir.path(), "Other");
@@ -938,7 +934,7 @@ mod tests {
         poll_after_a_screen(&mut waypoints);
         assert!(!waypoints.blocked);
 
-        // So does a world where the user's own F3+C worked.
+        // 利用者自身の F3+C がうまくいったワールドも同じ。
         waypoints.on_outcome(failed(Failure::Refused), now);
         let spot = here(OVERWORLD, 0.0, 64.0, 0.0);
         waypoints.on_outcome(located(spot, None), now);
@@ -980,7 +976,7 @@ mod tests {
         let mut waypoints = Waypoints::new(dir.path(), now);
         assert_eq!(waypoints.navigate(WINDOW), None);
         assert_eq!(notices(&mut waypoints), [NO_DESTINATION]);
-        // The menu's button refreshes the position all the same, without a notice for it.
+        // メニューのボタンはそれでも位置を更新する。そのための通知は出さない。
         let job = waypoints.command(WaypointCommand::Refresh, WINDOW).unwrap();
         assert_eq!(job.purpose, Purpose::Refresh);
         let spot = here(OVERWORLD, 5.0, 64.0, 5.0);
@@ -997,7 +993,7 @@ mod tests {
         let job = waypoints.navigate(WINDOW).unwrap();
         assert_eq!(job.purpose, Purpose::Refresh);
 
-        // Facing north, 100 blocks south of the waypoint.
+        // 北を向き、ウェイポイントの 100 ブロック南。
         let spot = here(OVERWORLD, 0.0, 64.0, 100.0);
         waypoints.on_outcome(located(spot.clone(), Some(Purpose::Refresh)), now);
         let shown = std::mem::take(&mut waypoints.pending_notices);
@@ -1009,7 +1005,7 @@ mod tests {
                     .replacing(Notice::NAVIGATION)
             }]
         );
-        // The user's own F3+C too.
+        // 利用者自身の F3+C も。
         waypoints.on_outcome(located(spot, None), now);
         assert_eq!(notices(&mut waypoints), ["地点 1：北 100 m（正面）"]);
     }
@@ -1019,7 +1015,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let now = Instant::now();
         let mut waypoints = with_destination(dir.path(), "World", now);
-        // Unknown ids select nothing.
+        // 知らない id は何も選ばない。
         waypoints.command(WaypointCommand::Select(Some(99)), WINDOW);
         assert_eq!(waypoints.selected, None);
         waypoints.command(WaypointCommand::Select(Some(1)), WINDOW);
@@ -1041,7 +1037,7 @@ mod tests {
         assert!(waypoints.view(true, false, now).waypoints.is_empty());
         assert!(notices(&mut waypoints).is_empty());
 
-        // Errors from the book become notices.
+        // 記録のエラーは通知になる。
         waypoints.command(WaypointCommand::Delete(1), WINDOW);
         waypoints.command(
             WaypointCommand::Rename {
@@ -1076,7 +1072,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let now = Instant::now();
         let mut waypoints = Waypoints::new(dir.path(), now);
-        // Missing: the defaults.
+        // ない：既定のもの。
         waypoints.load_keys(Naming::Glfw);
         assert_eq!(waypoints.keys, DebugKeys::default());
         assert_eq!(waypoints.reserved_keys, [Key::F3, Key::C]);
@@ -1095,7 +1091,7 @@ mod tests {
         .unwrap();
         waypoints.load_keys(Naming::Glfw);
         assert_eq!(waypoints.keys.modifier, "key.keyboard.f4");
-        // Every key's mappings, for the menu (debug ones other than the modifier left out).
+        // 各キーの割り当て（メニューのため。修飾キー以外のデバッグのものは除く）。
         let ids = |ids: &[&str]| ids.iter().map(|&id| id.to_owned()).collect::<Vec<_>>();
         assert_eq!(
             waypoints.game_bindings,
@@ -1134,7 +1130,7 @@ mod tests {
                 key_label("key.keyboard.left.shift")
             )]
         );
-        // The menu shows them.
+        // メニューがそれを見せる。
         let view = waypoints.view(true, false, now);
         assert_eq!(view.problems, waypoints.key_problems);
     }
@@ -1158,14 +1154,14 @@ mod tests {
             failure_text(&Failure::KeysHeld(None), &keys(f4, x, UNBOUND)),
             "F4・X を押している間は座標を取得できない"
         );
-        // Ctrl matters only where the copy key drops items.
+        // Ctrl が関係するのは、コピーのキーがアイテムを捨てるときだけ。
         let mut drops = keys(f4, x, y);
         drops.shared_with_copy = vec!["key.drop".into()];
         assert_eq!(
             failure_text(&Failure::KeysHeld(None), &drops),
             "F4・X・Y か Ctrl を押している間は座標を取得できない"
         );
-        // Held by a rebinding rule: the key to let go of.
+        // 置き換えのルールが押さえている：離すべきキー。
         let mouse4_f3 = Some((InputId::Mouse(4), InputId::Key(60)));
         assert_eq!(
             failure_text(&Failure::KeysHeld(mouse4_f3), &drops),
@@ -1242,7 +1238,7 @@ mod tests {
             port: 25565,
             label: Some("survival".into()),
         };
-        // The label shows in its own row.
+        // ラベルは自分の行に出る。
         assert_eq!(
             world_label(&WorldState::In(server), None),
             WorldLabel::Multiplayer("example.com".into())
@@ -1289,7 +1285,7 @@ mod tests {
         assert!(view.waypoints.is_empty());
         settle(&mut waypoints);
 
-        // The next visit opens the label's waypoints.
+        // 次に来たときは、ラベルのウェイポイントを開く。
         let mut again = Waypoints::new(game, now);
         poll_after_a_screen(&mut again);
         assert_eq!(
@@ -1306,7 +1302,7 @@ mod tests {
         let game = dir.path();
         let now = Instant::now();
         let mut waypoints = with_destination(game, "World", now);
-        // A frame in game, then a poll: a server's text put a world line in the log.
+        // ゲーム中のフレームの後にログを読む：サーバーの文字がワールドの行をログに入れた。
         let log = latest_log_path(game);
         let mut text = fs::read_to_string(&log).unwrap();
         text.push_str("[12:30:00] [Server thread/INFO]: Stopping server\n");

@@ -1,9 +1,9 @@
-//! The world the player is in, and that world's waypoints.
+//! プレイヤーがいるワールドと、そのワールドのウェイポイント。
 //!
-//! [`WorldWatcher`] follows `latest.log` and the saves folder. [`WaypointBook`] holds the
-//! current world's [`WaypointStore`] and saves every change, at once or (deferred) on another
-//! thread. [`ServerLabels`] keeps the label last used on each server. Errors meant for the user
-//! are Japanese UI text; the details go to the log in English.
+//! [`WorldWatcher`] は `latest.log` と saves のフォルダを追う。[`WaypointBook`] は今のワールドの
+//! [`WaypointStore`] を持ち、変更のたびに保存する（すぐに、または（deferred なら）別のスレッドで）。
+//! [`ServerLabels`] は各サーバーで最後に使ったラベルを覚える。利用者に向けたエラーは日本語の
+//! UI の文言で、詳しいことは英語でログに出す。
 
 use std::collections::BTreeMap;
 use std::io;
@@ -17,34 +17,34 @@ use crate::location::Location;
 use crate::waypoint::{StoreError, Waypoint, WaypointStore};
 use crate::world::{LogEvent, LogTail, WorldId, WorldTracker, level_name, might_be_world_line};
 
-/// The world opened when an integrated server starts was locked at most this long before the
-/// start line was read. An older lock means the line did not come from opening a world (a
-/// server can put lines in the log through text the game logs as it is).
+/// 内蔵サーバーが始まるときに開くワールドは、始まりの行を読む前のせいぜいこの時間内にロック
+/// された。それより古いロックなら、その行はワールドを開いたことから来たのではない（サーバーは、
+/// ゲームがそのままログに出す文字を通して、ログに行を入れられる）。
 const LOCK_WINDOW: Duration = Duration::from_secs(300);
 
-/// Where the player is, according to the log and the saves folder.
+/// ログと saves のフォルダから見た、プレイヤーのいる場所。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorldState {
-    /// Before any world, or after the integrated server stopped.
+    /// どのワールドより前、または内蔵サーバーが止まった後。
     NotInWorld,
-    /// An integrated server started, but its world folder was not found.
+    /// 内蔵サーバーは始まったが、そのワールドのフォルダが見つからなかった。
     Unknown,
     In(WorldId),
 }
 
-/// Follows latest.log and the saves folder to know which world or server the player is in.
+/// latest.log と saves のフォルダを追い、プレイヤーがどのワールドかサーバーにいるかを知る。
 #[derive(Debug)]
 pub struct WorldWatcher {
     tail: LogTail,
     tracker: WorldTracker,
     saves: PathBuf,
-    /// The last event entered a world (the tracker's `resolve` gives `None` both after
-    /// leaving one and when the singleplayer world cannot be found).
+    /// 最後のイベントでワールドに入った（追跡の `resolve` は、ワールドを出た後も、シングルプレイの
+    /// ワールドが見つからないときも `None` を返す）。
     entered: bool,
-    /// When the last integrated server start was read.
+    /// 最後に内蔵サーバーの始まりを読んだ時刻。
     started_at: Option<SystemTime>,
     state: WorldState,
-    /// The singleplayer world's name in the game, read when it was entered.
+    /// 入ったときに読んだ、ゲームの中でのシングルプレイのワールドの名前。
     level_name: Option<String>,
 }
 
@@ -61,17 +61,17 @@ impl WorldWatcher {
         }
     }
 
-    /// Reads new lines. A tail restart (latest.log rotated, e.g. at midnight) does NOT reset the
-    /// tracker: the startup rotation happens before the agent's first frame, so later restarts
-    /// are mid-session and the new file has no world lines yet. Re-resolves once after new
-    /// world events. Returns true when `state()` changed. A missing log gives `Ok(false)`.
+    /// 新しい行を読む。追跡のやり直し（latest.log が回された。例：深夜 0 時）では、追跡を戻さない：
+    /// 起動時の回しはエージェントの最初のフレームより前に起きるので、それより後のやり直しは
+    /// セッションの途中で、新しいファイルにはまだワールドの行がない。新しいワールドのイベントの後に
+    /// 1 回解決し直す。`state()` が変わったら true。ログがなければ `Ok(false)`。
     pub fn poll(&mut self) -> io::Result<bool> {
         self.poll_lines(true)
     }
 
-    /// [`poll`](Self::poll) when the player was in the game (no screen) all the time since the
-    /// last poll: the game changes worlds only through its screens, so world lines read now
-    /// were put in the log by a server (in text the game logs as it is) and are ignored.
+    /// 前に読んでからずっとプレイヤーがゲームの中（画面なし）にいたときの [`poll`](Self::poll)：
+    /// ゲームは画面を通してしかワールドを変えないので、いま読むワールドの行はサーバーがログに入れた
+    /// もの（ゲームがそのままログに出す文字で）で、無視する。
     pub fn poll_while_playing(&mut self) -> io::Result<bool> {
         self.poll_lines(false)
     }
@@ -101,8 +101,8 @@ impl WorldWatcher {
         Ok(relevant && self.refresh())
     }
 
-    /// Re-resolves now (singleplayer: the newest session.lock, locked shortly before the
-    /// server started); true when `state()` changed.
+    /// いま解決し直す（シングルプレイ：サーバーが始まる少し前にロックされた、いちばん新しい
+    /// session.lock）。`state()` が変わったら true。
     pub fn refresh(&mut self) -> bool {
         let not_before = self
             .started_at
@@ -129,7 +129,7 @@ impl WorldWatcher {
         &self.state
     }
 
-    /// The singleplayer world's name in the game (its `level.dat`), if it could be read.
+    /// ゲームの中でのシングルプレイのワールドの名前（その `level.dat`）。読めれば。
     pub fn level_name(&self) -> Option<&str> {
         self.level_name.as_deref()
     }
@@ -145,44 +145,43 @@ impl WorldWatcher {
 const NOT_IN_WORLD: &str = "ワールドに入っていない";
 const NOT_FOUND: &str = "その地点は見つからない";
 
-/// A save of a world's waypoints, to write with [`write_file`](crate::waypoint::write_file)
-/// on another thread and report back with [`WaypointBook::save_done`].
+/// ワールドのウェイポイントの保存。別のスレッドで [`write_file`](crate::waypoint::write_file) で
+/// 書き、[`WaypointBook::save_done`] で結果を返す。
 #[derive(Debug)]
 pub struct SaveJob {
     pub path: PathBuf,
     pub bytes: Vec<u8>,
-    /// The store this came from, and its change.
+    /// これが来た記録と、その変更。
     opened: u64,
     revision: u64,
     world: String,
 }
 
-/// The waypoints of the current world. Memory is the truth: every change is saved, at once or
-/// (deferred) by [`take_saves`](Self::take_saves) on another thread; if saving fails the
-/// change stays in memory, `problem` says so, and the next change (or `retry_save`) saves
-/// again.
+/// 今のワールドのウェイポイント。正しいのは記憶の方：変更のたびに、すぐに、または（deferred
+/// なら）別のスレッドで [`take_saves`](Self::take_saves) で保存する。保存に失敗しても変更は
+/// 記憶に残り、`problem` がそう言い、次の変更（か `retry_save`）がもう一度保存する。
 #[derive(Debug)]
 pub struct WaypointBook {
     game_dir: PathBuf,
     world: Option<WorldId>,
     store: Option<WaypointStore>,
-    /// Why the store could not be opened, or that a corrupt file was moved aside.
+    /// 記録を開けなかった理由、または壊れたファイルを脇に移したこと。
     open_problem: Option<String>,
-    /// The last save failed; cleared by the next successful one.
+    /// 前の保存が失敗した。次に成功すると消える。
     save_problem: Option<String>,
-    /// Changes that are not on disk yet.
+    /// まだディスクにない変更。
     dirty: bool,
-    /// Opening failed with an I/O error, which may pass; `add` tries again.
+    /// 開くのに I/O のエラーで失敗した（直るかもしれない）。`add` がもう一度試す。
     reopen: bool,
-    /// Saves are handed out by `take_saves` instead of written.
+    /// 保存は書かずに `take_saves` が渡す。
     deferred: bool,
-    /// Saves to hand out, the newest for each file.
+    /// 渡す保存（ファイルごとにいちばん新しいもの）。
     queued: Vec<SaveJob>,
-    /// Saves handed out and not reported back yet.
+    /// 渡したが、まだ結果が返っていない保存。
     in_flight: usize,
-    /// Counts the stores opened, so a late report is told from one for the store open now.
+    /// 開いた記録を数え、遅れた報告を今開いている記録のものと見分ける。
     opened: u64,
-    /// Counts changes to what [`waypoints`](Self::waypoints) returns (also a world switch).
+    /// [`waypoints`](Self::waypoints) が返すものの変更を数える（ワールドの切り替えも）。
     revision: u64,
 }
 
@@ -204,9 +203,8 @@ impl WaypointBook {
         }
     }
 
-    /// A book whose saves are written elsewhere: changes queue a [`SaveJob`] for
-    /// [`take_saves`](Self::take_saves), and the outcome comes back through
-    /// [`save_done`](Self::save_done). Changes succeed even when saving later fails.
+    /// 保存を別の場所で書く記録：変更は [`take_saves`](Self::take_saves) のために [`SaveJob`] を
+    /// 並べ、結果は [`save_done`](Self::save_done) で返ってくる。後で保存に失敗しても、変更は成功する。
     pub fn deferred(game_dir: &Path) -> Self {
         Self {
             deferred: true,
@@ -214,14 +212,14 @@ impl WaypointBook {
         }
     }
 
-    /// The saves to write, oldest first.
+    /// 書く保存（古い順）。
     pub fn take_saves(&mut self) -> Vec<SaveJob> {
         self.in_flight += self.queued.len();
         std::mem::take(&mut self.queued)
     }
 
-    /// The outcome of writing `job`. Returns a message for the UI: changes to a world left
-    /// since that are lost, or a new failure (`problem` says so as long as it lasts).
+    /// `job` を書いた結果。UI のための文言を返す：その後に出たワールドの変更が失われた、または新しい
+    /// 失敗（続く間は `problem` がそう言う）。
     pub fn save_done(&mut self, job: &SaveJob, result: Result<(), String>) -> Option<String> {
         self.in_flight = self.in_flight.saturating_sub(1);
         if job.opened != self.opened {
@@ -249,17 +247,16 @@ impl WaypointBook {
         }
     }
 
-    /// Counts changes to the waypoints and switches of the world, so a view of
-    /// [`waypoints`](Self::waypoints) is built again only when this changed.
+    /// ウェイポイントの変更とワールドの切り替えを数える。[`waypoints`](Self::waypoints) の見え方は、
+    /// これが変わったときだけ作り直す。
     pub fn revision(&self) -> u64 {
         self.revision
     }
 
-    /// Switches to `world` (None = none): tries to save a dirty store first, then opens
-    /// `<game>/reminedog/waypoints/<stem>.json` with `open_or_backup`. On error the store is
-    /// None and `problem` says why. A corrupt file that was backed up is reported too. The world
-    /// already open is kept as it is. Returns a message for the UI when changes to the old
-    /// world could not be saved and are lost.
+    /// `world` に切り替える（None = なし）：先に変更のある記録の保存を試し、それから
+    /// `<game>/reminedog/waypoints/<stem>.json` を `open_or_backup` で開く。エラーなら記録は None で、
+    /// `problem` が理由を言う。壊れていて控えを取ったファイルも報告する。もう開いているワールドは
+    /// そのまま残す。古いワールドの変更を保存できずに失ったら、UI のための文言を返す。
     pub fn set_world(&mut self, world: Option<&WorldId>) -> Option<String> {
         if self.store.is_some() && self.world.as_ref() == world {
             return None;
@@ -279,7 +276,7 @@ impl WaypointBook {
                 store.world()
             ));
         }
-        // The last change's save is queued already, unless it failed: then once more.
+        // 最後の変更の保存はもう並んでいる。失敗していれば、もう 1 回。
         if self.dirty && self.deferred && !self.queued.iter().any(|job| job.opened == self.opened) {
             let _ = self.save();
         }
@@ -340,26 +337,26 @@ impl WaypointBook {
         self.world.as_ref()
     }
 
-    /// The current world's waypoints in the order they were added; empty without a store.
+    /// 今のワールドのウェイポイント（足した順）。記録がなければ空。
     pub fn waypoints(&self) -> &[Waypoint] {
         self.store.as_ref().map_or(&[], |store| store.waypoints())
     }
 
-    /// A problem to show in the menu: a failed save, or the store's file.
+    /// メニューに出す問題：失敗した保存、または記録のファイル。
     pub fn problem(&self) -> Option<&str> {
         self.save_problem
             .as_deref()
             .or(self.open_problem.as_deref())
     }
 
-    /// Adds a waypoint named "地点 {id}" at `location`. If the store could not be opened for an
-    /// I/O error, tries to reopen it first. A failed save is an error, but the waypoint stays.
+    /// `location` に "地点 {id}" という名前のウェイポイントを足す。I/O のエラーで保存先を開けて
+    /// いなかったら、先に開き直す。保存の失敗はエラーだが、ウェイポイントは残る。
     pub fn add(&mut self, location: &Location, now_unix: i64) -> Result<Waypoint, String> {
         if self.store.is_none() && self.reopen {
             self.open();
         }
         let store = self.store_mut()?;
-        // The store names unnamed waypoints in English; give them the Japanese name instead.
+        // 記録は名前のないウェイポイントに英語の名前を付ける。代わりに日本語の名前を与える。
         let mut waypoint = store.add("", location, now_unix).clone();
         waypoint.name = format!("地点 {}", waypoint.id);
         store.rename(waypoint.id, &waypoint.name);
@@ -368,13 +365,13 @@ impl WaypointBook {
         Ok(waypoint)
     }
 
-    /// Renames a waypoint. An empty (trimmed) name keeps the old name. Unknown id -> Err.
+    /// ウェイポイントの名前を変える。（前後の空白を取って）空なら古い名前のまま。知らない id なら Err。
     pub fn rename(&mut self, id: u64, name: &str) -> Result<(), String> {
         let store = self.store_mut()?;
         if store.get(id).is_none() {
             return Err(NOT_FOUND.into());
         }
-        // The store would turn an empty name into "Waypoint {id}".
+        // 記録は空の名前を "Waypoint {id}" にしてしまう。
         if name.chars().all(|c| c.is_whitespace() || c.is_control()) {
             return Ok(());
         }
@@ -397,13 +394,12 @@ impl WaypointBook {
         self.revision += 1;
     }
 
-    /// Changes an earlier save failed to write are waiting.
+    /// 前の保存が書けなかった変更が待っている。
     pub fn has_unsaved(&self) -> bool {
         self.dirty
     }
 
-    /// Saves changes that an earlier save failed to write. Nothing to do without any, or
-    /// (deferred) while a save is on its way.
+    /// 前の保存が書けなかった変更を保存する。なければ、または（deferred なら）保存が途中なら何もしない。
     pub fn retry_save(&mut self) -> Result<(), String> {
         if !self.dirty || self.in_flight > 0 || !self.queued.is_empty() {
             return Ok(());
@@ -459,10 +455,10 @@ impl WaypointBook {
         }
     }
 
-    /// Notes a failed save (`detail`: why); returns the message when the failure is new.
+    /// 保存の失敗を書き留める（`detail`：理由）。新しい失敗なら文言を返す。
     fn save_failed(&mut self, detail: &str) -> Option<String> {
         let problem = format!("保存できなかった：{detail}（あとで保存し直す）");
-        // A lasting error is logged and told once, not at every retry.
+        // 続くエラーは、試し直すたびではなく 1 回だけログに出して伝える。
         if self.save_problem.as_ref() == Some(&problem) {
             log::debug!("waypoints: still cannot save: {detail}");
             return None;
@@ -473,7 +469,7 @@ impl WaypointBook {
     }
 }
 
-/// What went wrong with a waypoint file, for the UI.
+/// UI のための、ウェイポイントのファイルの問題。
 fn store_error_text(e: &StoreError) -> String {
     match e {
         StoreError::Io { source, .. } => source.to_string(),
@@ -481,9 +477,9 @@ fn store_error_text(e: &StoreError) -> String {
     }
 }
 
-/// The label last used on each server address, so the next visit opens the same waypoints:
-/// `<game>/reminedog/waypoints/labels.json`, `{"version": 1, "labels": {"<host>:<port>":
-/// "<label>"}}`. Read once, when first needed; a file that cannot be read gives no labels.
+/// 各サーバーのアドレスで最後に使ったラベル。次に来たときに同じウェイポイントを開くため：
+/// `<game>/reminedog/waypoints/labels.json`、`{"version": 1, "labels": {"<host>:<port>":
+/// "<label>"}}`。最初に要るときに 1 回読む。読めないファイルならラベルなし。
 #[derive(Debug)]
 pub struct ServerLabels {
     path: PathBuf,
@@ -527,7 +523,7 @@ impl ServerLabels {
         })
     }
 
-    /// `world` under the label last used on its address (a singleplayer world as it is).
+    /// そのアドレスで最後に使ったラベルの下の `world`（シングルプレイのワールドはそのまま）。
     pub fn apply(&mut self, world: &WorldId) -> WorldId {
         let Some(address) = world.address_key() else {
             return world.clone();
@@ -536,8 +532,8 @@ impl ServerLabels {
         world.with_label(label.as_deref())
     }
 
-    /// Keeps `world`'s label for its address; the file to write ([`write_file`]
-    /// (crate::waypoint::write_file)), or `None` for a singleplayer world.
+    /// `world` のラベルをそのアドレスについて覚える。書くファイル（[`write_file`]
+    /// (crate::waypoint::write_file)）、シングルプレイのワールドなら `None`。
     pub fn set(&mut self, world: &WorldId) -> Option<(PathBuf, Vec<u8>)> {
         let address = world.address_key()?;
         let label = match world {
@@ -559,7 +555,7 @@ impl ServerLabels {
     }
 }
 
-/// Seconds since the Unix epoch (0 if the clock is set before it), for `created_unix`.
+/// Unix の紀元からの秒（時計がそれより前なら 0）。`created_unix` のため。
 pub fn unix_now() -> i64 {
     i64::try_from(crate::waypoint::unix_now()).unwrap_or(i64::MAX)
 }
@@ -586,7 +582,7 @@ mod tests {
         }
     }
 
-    /// Locks `world` `secs_ago` seconds ago.
+    /// `secs_ago` 秒前に `world` をロックする。
     fn set_lock_time(game: &Path, world: &str, secs_ago: u64) {
         let dir = saves_dir(game).join(world);
         fs::create_dir_all(&dir).unwrap();
@@ -643,7 +639,7 @@ mod tests {
         assert!(watcher.poll().unwrap());
         assert_eq!(watcher.state(), &WorldState::In(sp("Survival")));
         assert_eq!(watcher.current(), Some(&sp("Survival")));
-        // Nothing new, nothing changed.
+        // 新しいことはなく、何も変わらない。
         assert!(!watcher.poll().unwrap());
         assert!(!watcher.refresh());
 
@@ -656,12 +652,12 @@ mod tests {
         assert!(watcher.poll().unwrap());
         assert_eq!(watcher.current(), Some(&mp("example.com", 25565)));
 
-        // Back to singleplayer in another world, all within one poll.
+        // 1 回の読み込みの間に、シングルプレイに戻って別のワールドへ。
         set_lock_time(game, "Creative", 10);
         append_log(game, &[STOPPING, STARTING]);
         assert!(watcher.poll().unwrap());
         assert_eq!(watcher.current(), Some(&sp("Creative")));
-        // Entering and leaving between two polls changes nothing.
+        // 2 回の読み込みの間に入って出ても、何も変わらない。
         append_log(game, &[STOPPING, STARTING]);
         assert!(!watcher.poll().unwrap());
         assert_eq!(watcher.current(), Some(&sp("Creative")));
@@ -676,14 +672,14 @@ mod tests {
         assert!(watcher.poll().unwrap());
         assert_eq!(watcher.state(), &WorldState::Unknown);
         assert_eq!(watcher.current(), None);
-        // Nothing new in the log: polling does not look at the saves folder again.
+        // ログに新しいことがない：読み込みは saves のフォルダをもう一度は見ない。
         set_lock_time(game, "New World", 50);
         assert!(!watcher.poll().unwrap());
         assert_eq!(watcher.state(), &WorldState::Unknown);
         assert!(watcher.refresh());
         assert_eq!(watcher.state(), &WorldState::In(sp("New World")));
         assert!(!watcher.refresh());
-        // Stopping goes back to "not in a world", not "unknown".
+        // 止まったら「不明」ではなく「ワールドにいない」に戻る。
         append_log(game, &[STOPPING]);
         assert!(watcher.poll().unwrap());
         assert_eq!(watcher.state(), &WorldState::NotInWorld);
@@ -693,7 +689,7 @@ mod tests {
     fn watcher_needs_a_world_opened_just_now() {
         let dir = tempfile::tempdir().unwrap();
         let game = dir.path();
-        // Played an hour ago; a start line now does not mean that world.
+        // 1 時間前に遊んだ。今の始まりの行は、そのワールドを意味しない。
         set_lock_time(game, "Survival", 3600);
         let mut watcher = WorldWatcher::new(game);
         append_log(game, &[STARTING]);
@@ -711,7 +707,7 @@ mod tests {
         let mut watcher = WorldWatcher::new(game);
         append_log(game, &[CONNECTING]);
         assert!(watcher.poll().unwrap());
-        // A server's text with a line break, logged as it is.
+        // 改行を含むサーバーの文字が、そのままログに出た。
         append_log(
             game,
             &[STOPPING, CONNECTING.replace("Example.com", "evil").as_str()],
@@ -731,7 +727,7 @@ mod tests {
         let mut watcher = WorldWatcher::new(game);
         append_log(game, &[STARTING]);
         assert!(watcher.poll().unwrap());
-        // No level.dat: the folder name is all there is.
+        // level.dat がない：あるのはフォルダの名前だけ。
         assert_eq!(watcher.level_name(), None);
         assert_eq!(watcher.current(), Some(&sp("New World (1)")));
     }
@@ -745,7 +741,7 @@ mod tests {
         assert!(watcher.poll().unwrap());
         assert_eq!(watcher.current(), Some(&mp("example.com", 25565)));
 
-        // At midnight log4j starts a new latest.log without the world's lines.
+        // 深夜 0 時に log4j は、ワールドの行のない新しい latest.log を始める。
         fs::write(
             latest_log_path(game),
             "[00:00:01] [Render thread/INFO]: [CHAT] <Alex> hello\r\n",
@@ -753,11 +749,11 @@ mod tests {
         .unwrap();
         assert!(!watcher.poll().unwrap());
         assert_eq!(watcher.current(), Some(&mp("example.com", 25565)));
-        // A removed log changes nothing either.
+        // ログが消えても何も変わらない。
         fs::remove_file(latest_log_path(game)).unwrap();
         assert!(!watcher.poll().unwrap());
         assert_eq!(watcher.current(), Some(&mp("example.com", 25565)));
-        // Events in the new file still count.
+        // 新しいファイルのイベントは、やはり数える。
         append_log(game, &[STOPPING]);
         assert!(watcher.poll().unwrap());
         assert_eq!(watcher.state(), &WorldState::NotInWorld);
@@ -805,7 +801,7 @@ mod tests {
         book.set_world(Some(&world));
         assert_eq!(book.world(), Some(&world));
         assert!(book.waypoints().is_empty());
-        // Opening alone creates nothing.
+        // 開くだけでは何も作らない。
         assert!(!data_dir_exists(dir.path()));
 
         let first = book
@@ -833,7 +829,7 @@ mod tests {
         assert_eq!(names(&book), ["地点 1", "地点 2", "地点 3"]);
 
         book.rename(first.id, "  拠点  ").unwrap();
-        // An empty name keeps the old one.
+        // 空の名前は古い名前のまま。
         book.rename(second.id, "  \t ").unwrap();
         book.rename(second.id, "").unwrap();
         book.remove(third.id).unwrap();
@@ -845,7 +841,7 @@ mod tests {
         let mut reloaded = WaypointBook::new(dir.path());
         reloaded.set_world(Some(&world));
         assert_eq!(reloaded.waypoints(), book.waypoints());
-        // Ids are not reused after a removal.
+        // 消した後も id は使い回さない。
         let fourth = reloaded
             .add(&location(OVERWORLD, 5.0, 5.0, 5.0), 1_700_000_300)
             .unwrap();
@@ -876,7 +872,7 @@ mod tests {
 
         book.set_world(Some(&a));
         assert_eq!(names(&book), ["地点 1", "地点 2"]);
-        // Setting the same world again keeps it as it is.
+        // 同じワールドをもう一度入れても、そのまま残す。
         book.set_world(Some(&a));
         assert_eq!(names(&book), ["地点 1", "地点 2"]);
         assert!(waypoints_path(dir.path(), &b).exists());
@@ -900,7 +896,7 @@ mod tests {
         let backups = fs::read_dir(path.parent().unwrap()).unwrap().count();
         assert_eq!(backups, 1);
 
-        // The book works from an empty list; the report stays until the world changes.
+        // 記録は空のリストから動く。報告はワールドが変わるまで残る。
         book.add(&location(OVERWORLD, 0.0, 0.0, 0.0), 1).unwrap();
         assert!(path.exists());
         assert!(book.problem().is_some());
@@ -935,7 +931,7 @@ mod tests {
     fn book_reopens_after_an_io_error() {
         let dir = tempfile::tempdir().unwrap();
         let world = sp("Locked");
-        // A folder where the file should be cannot be read.
+        // ファイルの場所にあるフォルダは読めない。
         let path = waypoints_path(dir.path(), &world);
         fs::create_dir_all(&path).unwrap();
 
@@ -962,7 +958,7 @@ mod tests {
         let path = waypoints_path(dir.path(), &world);
         let mut book = WaypointBook::new(dir.path());
         book.set_world(Some(&world));
-        // A file where the waypoints folder should be.
+        // ウェイポイントのフォルダの場所にあるファイル。
         let blocker = path.parent().unwrap().to_owned();
         fs::create_dir_all(blocker.parent().unwrap()).unwrap();
         fs::write(&blocker, "").unwrap();
@@ -970,7 +966,7 @@ mod tests {
         let here = location(OVERWORLD, 3.0, 64.0, 4.0);
         let error = book.add(&here, 1).unwrap_err();
         assert!(error.starts_with("保存できなかった："), "{error}");
-        // Kept in memory, and the menu says so.
+        // 記憶に残り、メニューがそう言う。
         assert_eq!(names(&book), ["地点 1"]);
         assert!(book.problem().unwrap().starts_with(&error));
         assert!(book.remove(1).is_err());
@@ -978,7 +974,7 @@ mod tests {
         book.add(&here, 2).unwrap_err();
         assert!(book.retry_save().is_err());
 
-        // Once the folder can be created, the next change saves everything.
+        // フォルダを作れるようになれば、次の変更が全部を保存する。
         fs::remove_file(&blocker).unwrap();
         book.rename(2, "拠点").unwrap();
         assert_eq!(book.problem(), None);
@@ -1010,7 +1006,7 @@ mod tests {
         assert_eq!(names(&book), ["地点 1"]);
         assert!(!book.has_unsaved());
 
-        // Still failing at the switch: the change is lost, and the caller is told.
+        // 切り替えのときにまだ失敗する：変更は失われ、呼び出し側に伝える。
         let blocker = path.parent().unwrap().to_owned();
         fs::remove_dir_all(&blocker).unwrap();
         fs::write(&blocker, "").unwrap();
@@ -1052,14 +1048,14 @@ mod tests {
         let added = book.add(&location(OVERWORLD, 1.0, 2.0, 3.0), 1).unwrap();
         assert_eq!(added.name, "地点 1");
         assert!(book.revision() > revision);
-        // Nothing is written until the job is.
+        // 仕事が書かれるまで、何も書かれない。
         let path = waypoints_path(game, &sp("w"));
         assert!(!path.exists());
         book.rename(1, "home").unwrap();
         let jobs = book.take_saves();
         assert_eq!(jobs.len(), 1, "the newer save replaces the older");
         assert!(book.has_unsaved());
-        // A failure is told once, and retried only after the report.
+        // 失敗は 1 回だけ伝え、報告の後にだけ試し直す。
         assert_eq!(book.retry_save(), Ok(()));
         assert!(book.take_saves().is_empty());
         let told = book.save_done(&jobs[0], Err("disk full".into()));
@@ -1086,7 +1082,7 @@ mod tests {
         let mut book = WaypointBook::deferred(game);
         book.set_world(Some(&sp("a")));
         book.add(&location(OVERWORLD, 0.0, 0.0, 0.0), 1).unwrap();
-        // Switching before the save was handed out keeps it.
+        // 保存を渡す前の切り替えでも、それを残す。
         assert_eq!(book.set_world(Some(&sp("b"))), None);
         let jobs = book.take_saves();
         assert_eq!(jobs.len(), 1);
@@ -1109,7 +1105,7 @@ mod tests {
         let (path, bytes) = labels.set(&labelled).unwrap();
         crate::waypoint::write_file(&path, &bytes).unwrap();
         assert_eq!(labels.apply(&server), labelled);
-        // Read back from the file.
+        // ファイルから読み戻す。
         let mut again = ServerLabels::new(game);
         assert_eq!(again.apply(&server), labelled);
         assert_eq!(
@@ -1118,7 +1114,7 @@ mod tests {
         );
         assert_eq!(again.apply(&sp("w")), sp("w"));
         assert!(again.set(&sp("w")).is_none());
-        // No label: the address alone again.
+        // ラベルなし：またアドレスだけ。
         let (path, bytes) = again.set(&server).unwrap();
         crate::waypoint::write_file(&path, &bytes).unwrap();
         assert_eq!(ServerLabels::new(game).apply(&server), server);
@@ -1126,7 +1122,7 @@ mod tests {
 
     #[test]
     fn unix_now_is_recent() {
-        // 2020-09-13 or later.
+        // 2020-09-13 以降。
         assert!(unix_now() > 1_600_000_000);
     }
 }

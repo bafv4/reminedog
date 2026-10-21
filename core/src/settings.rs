@@ -1,10 +1,9 @@
-//! The user's settings: `<game_dir>/reminedog/settings.json`.
+//! 利用者の設定：`<game_dir>/reminedog/settings.json`。
 //!
-//! Every field has a default, so older and newer files load: unknown fields are ignored and
-//! missing ones take their defaults. Values out of range are clamped rather than refused, and
-//! the rebinding fields, which hand edits are likely to break, drop a malformed value or entry
-//! (with a warning, and a copy of the file to keep it from the next save) instead of the whole
-//! file.
+//! どのフィールドにも既定があるので、古いファイルも新しいファイルも読める：知らないフィールドは
+//! 無視し、ないものは既定になる。範囲外の値は断らずに範囲に収める。手で書き換えると壊れやすい
+//! 置き換えのフィールドは、ファイル全体ではなく、読めない値や項目だけを捨てる（警告を出し、
+//! 次の保存で失わないようにファイルの写しを残す）。
 
 use std::cell::Cell;
 use std::fs;
@@ -16,81 +15,78 @@ use serde_json::Value;
 
 use crate::waypoint::{backup_path, copy_path, unix_now, write_file};
 
-/// Range of the zoom factor.
+/// ズームの倍率の範囲。
 pub const ZOOM_FACTOR_RANGE: (f32, f32) = (1.5, 8.0);
-/// Range of the browser's page zoom.
+/// ブラウザのページの拡大率の範囲。
 pub const BROWSER_ZOOM_RANGE: (f32, f32) = (0.25, 3.0);
-/// Range of the browser's opacity while the menu is closed.
+/// メニューを閉じている間のブラウザの不透明度の範囲。
 pub const BROWSER_OPACITY_RANGE: (f32, f32) = (0.2, 1.0);
-/// Range of the seconds the browser's seek keys move a video by.
+/// ブラウザの送り・戻しのキーが動画を動かす秒数の範囲。
 pub const BROWSER_SEEK_RANGE: (f32, f32) = (1.0, 60.0);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// Opens and closes the menu, e.g. `"Ctrl+I"`.
+    /// メニューを開閉する（例：`"Ctrl+I"`）。
     pub menu_key: String,
-    /// Zooms while held, e.g. `"Z"` or `"Mouse4"`.
+    /// 押している間ズームする（例：`"Z"`、`"Mouse4"`）。
     pub zoom_key: String,
     pub zoom_factor: f32,
-    /// Has the game render at a taller resolution for real detail, instead of enlarging
-    /// the pixels of its normal frame.
+    /// ふつうのフレームのピクセルを引き伸ばすのではなく、ゲームに縦長の解像度で描かせて本物の
+    /// 細かさにする。
     pub zoom_high_res: bool,
-    /// Filters the enlarged pixels when not zooming in high resolution.
+    /// 高精細でないズームのときに、引き伸ばしたピクセルを滑らかにする。
     pub zoom_smooth: bool,
-    /// Shows the status window while the menu is closed.
+    /// メニューを閉じている間も状態の窓を出す。
     pub show_status: bool,
-    /// Records a waypoint at the player's position (through F3+C).
+    /// プレイヤーの位置にウェイポイントを記録する（F3+C で）。
     pub waypoint_key: String,
-    /// Refreshes the player's position and shows the way to the selected waypoint.
+    /// プレイヤーの位置を更新し、選んだウェイポイントへの道を示す。
     pub navigate_key: String,
-    /// Applies `rebinds` (the menu's switch for all of them).
+    /// `rebinds` を使う（全部をまとめたメニューのスイッチ）。
     #[serde(deserialize_with = "lenient_rebinds_enabled")]
     pub rebinds_enabled: bool,
-    /// Keys and mouse buttons that reach the game as other ones while in game.
+    /// ゲーム中に、別のものとしてゲームに届くキーとマウスのボタン。
     #[serde(deserialize_with = "lenient_rebinds")]
     pub rebinds: Vec<Rebind>,
-    /// Shows and hides the browser; empty for none (the menu's button only).
+    /// ブラウザを出し入れする。空ならなし（メニューのボタンだけ）。
     pub browser_toggle_key: String,
-    /// The browser's keys while it shows and the game is played (empty for none).
+    /// ブラウザを出していてゲームをプレイしている間の、ブラウザのキー（空ならなし）。
     pub browser_page_up_key: String,
     pub browser_page_down_key: String,
     pub browser_play_pause_key: String,
     pub browser_seek_back_key: String,
     pub browser_seek_forward_key: String,
-    /// The page the browser opened with in older versions. Read (the platform hook takes it
-    /// over once) but no longer written: the address can hold tokens, and this file goes
-    /// with the game folder (exported instances, reports). The last page is kept with the
-    /// browser's own data instead.
+    /// 古い版でブラウザが開いたページ。読む（OS のフックが 1 回引き継ぐ）が、もう書かない：
+    /// アドレスにトークンが入りうるし、このファイルはゲームフォルダと一緒に動く（書き出した
+    /// インスタンス、報告）。最後のページは、代わりにブラウザ自身のデータに残す。
     #[serde(skip_serializing)]
     pub browser_url: String,
-    /// Where the page is on the screen: left, top, width and height in points. `None` puts
-    /// it in the top right corner.
+    /// 画面のどこにページがあるか：左、上、幅、高さ（ポイント）。`None` なら右上の隅。
     pub browser_rect: Option<[f32; 4]>,
-    /// The page's zoom (1.0 is 100 %).
+    /// ページの拡大率（1.0 が 100 %）。
     pub browser_zoom: f32,
-    /// The page's opacity while the menu is closed.
+    /// メニューを閉じている間のページの不透明度。
     pub browser_opacity: f32,
-    /// Seconds the seek keys move a video by.
+    /// 送り・戻しのキーが動画を動かす秒数。
     pub browser_seek_seconds: f32,
-    /// Where [`Settings::load`] copied the file because it dropped rebinding values or entries
-    /// it could not read (the next save would lose them). Not saved.
+    /// 読めない置き換えの値か項目を捨てたので、[`Settings::load`] がファイルを写した場所（次の
+    /// 保存でそれらが失われるため）。保存しない。
     #[serde(skip)]
     pub rebinds_kept_in: Option<PathBuf>,
-    /// Where [`Settings::load`] moved a file that was not valid JSON (these are the defaults
-    /// then). Not saved.
+    /// 有効な JSON でなかったファイルを [`Settings::load`] が移した場所（そのときは既定のもの）。
+    /// 保存しない。
     #[serde(skip)]
     pub moved_aside_to: Option<PathBuf>,
-    /// [`Settings::load`] could not read the file (not a missing one): these are the defaults,
-    /// and saving them would overwrite the user's file. Not saved.
+    /// [`Settings::load`] がファイルを読めなかった（ないのではなく）：これは既定のもので、保存すると
+    /// 利用者のファイルを上書きしてしまう。保存しない。
     #[serde(skip)]
     pub unreadable: bool,
 }
 
-/// One rule of the key rebinding: `from` reaches the game as `to`. Both are 26.x key names,
-/// e.g. `"key.mouse.4"` and `"key.keyboard.f3"` (`keybinds::input_by_name` with
-/// `Naming::Modern`); names that are not a key are kept here and left out where the rules are
-/// used.
+/// キーの置き換えの 1 つのルール：`from` が `to` としてゲームに届く。どちらも 26.x のキーの名前
+/// （例：`"key.mouse.4"`、`"key.keyboard.f3"`。[`Naming::Modern`] の `keybinds::input_by_name`）。
+/// キーでない名前はここに残し、ルールを使うところで除く。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rebind {
     pub from: String,
@@ -129,12 +125,11 @@ impl Default for Settings {
 }
 
 thread_local! {
-    /// A lenient reader dropped something since [`Settings::load`] started reading.
+    /// [`Settings::load`] が読み始めてから、寛容な読み手が何かを捨てた。
     static DROPPED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// `rebinds_enabled`: `true` or `false`, also written as a string; anything else gives the
-/// default.
+/// `rebinds_enabled`：`true` か `false`（文字列でもよい）。それ以外は既定。
 fn lenient_rebinds_enabled<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
     Ok(match Value::deserialize(deserializer)? {
         Value::Bool(enabled) => enabled,
@@ -148,8 +143,7 @@ fn lenient_rebinds_enabled<'de, D: Deserializer<'de>>(deserializer: D) -> Result
     })
 }
 
-/// `rebinds`: a value that is not a list gives none, and entries without a `from` and a `to`
-/// string are dropped.
+/// `rebinds`：リストでない値ならなし。`from` と `to` の文字列のない項目は捨てる。
 fn lenient_rebinds<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Rebind>, D::Error> {
     let Value::Array(entries) = Value::deserialize(deserializer)? else {
         log::warn!("settings: rebinds is not a list; ignoring it");
@@ -170,7 +164,7 @@ fn lenient_rebinds<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Reb
 }
 
 impl Settings {
-    /// Brings values from a hand-edited file back into range.
+    /// 手で書き換えたファイルの値を範囲に戻す。
     pub fn sanitized(mut self) -> Self {
         let defaults = Settings::default();
         let clamp = |value: f32, (lo, hi): (f32, f32), default: f32| {
@@ -200,13 +194,12 @@ impl Settings {
         self
     }
 
-    /// Loads the settings at `path`. A missing file gives the defaults; one that cannot be
-    /// read gives them with [`Settings::unreadable`] set. A UTF-8 byte order mark (Notepad,
-    /// PowerShell 5.1) is skipped. A file that is not valid JSON is moved aside
-    /// (`settings.corrupt-<unix>.json`, [`Settings::moved_aside_to`]) so the next save does not
-    /// destroy the user's edits, and the defaults are used. A file whose rebinding values or
-    /// entries could not all be read is copied to `settings.rebinds-<unix>.json`
-    /// ([`Settings::rebinds_kept_in`]), for the same reason.
+    /// `path` の設定を読む。ファイルがなければ既定のもの。読めなければ、[`Settings::unreadable`] を
+    /// 立てた既定のもの。UTF-8 の BOM（メモ帳、PowerShell 5.1）は飛ばす。有効な JSON でない
+    /// ファイルは、次の保存で利用者の書き換えを壊さないように脇に移し
+    /// （`settings.corrupt-<unix>.json`、[`Settings::moved_aside_to`]）、既定のものを使う。
+    /// 置き換えの値か項目を全部は読めなかったファイルは、同じ理由で `settings.rebinds-<unix>.json` に
+    /// 写す（[`Settings::rebinds_kept_in`]）。
     pub fn load(path: &Path) -> Settings {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
@@ -262,12 +255,12 @@ impl Settings {
         }
     }
 
-    /// Writes the settings atomically (temporary file, then rename), creating the folder.
+    /// 設定をアトミックに書く（一時ファイルに書いてから名前を変える）。フォルダは作る。
     pub fn save(&self, path: &Path) -> io::Result<()> {
         write_file(path, &self.to_json()?)
     }
 
-    /// The file's contents, for [`write_file`] (on another thread).
+    /// [`write_file`] のための（別のスレッドで）ファイルの中身。
     pub fn to_json(&self) -> io::Result<Vec<u8>> {
         let mut json = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         json.push(b'\n');
@@ -275,9 +268,9 @@ impl Settings {
     }
 }
 
-/// Copies the settings file to `settings.rebinds-<unix>.json` next to it; where, if it could.
-/// A copy with the same content already there is reused, so loading the same file again (the
-/// next start, an overlay rebuild) does not pile up copies.
+/// 設定ファイルを隣の `settings.rebinds-<unix>.json` に写す。写せたらその場所。同じ中身の写しが
+/// もうあればそれを使うので、同じファイルをまた読んでも（次の起動、オーバーレイの作り直し）
+/// 写しが積み上がらない。
 fn keep_copy(path: &Path) -> Option<PathBuf> {
     if let Some(same) = existing_copy(path) {
         log::debug!(
@@ -308,7 +301,7 @@ fn keep_copy(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// A `settings.rebinds-*.json` next to `path` with exactly its content.
+/// `path` の隣の、ちょうど同じ中身の `settings.rebinds-*.json`。
 fn existing_copy(path: &Path) -> Option<PathBuf> {
     let content = fs::read(path).ok()?;
     let stem = path.file_stem()?.to_str()?;
@@ -325,7 +318,7 @@ fn existing_copy(path: &Path) -> Option<PathBuf> {
         .find(|copy| fs::read(copy).is_ok_and(|bytes| bytes == content))
 }
 
-/// `<game_dir>/reminedog/settings.json`.
+/// `<game_dir>/reminedog/settings.json`。
 pub fn settings_path(game_dir: &Path) -> PathBuf {
     crate::gamedir::data_dir(game_dir).join("settings.json")
 }
@@ -402,7 +395,7 @@ mod tests {
             browser_play_pause_key: "End".into(),
             browser_seek_back_key: "Home".into(),
             browser_seek_forward_key: "Insert".into(),
-            // Not written (see the_browser_url_is_read_but_not_written).
+            // 書かない（the_browser_url_is_read_but_not_written を参照）。
             browser_url: Settings::default().browser_url,
             browser_rect: Some([1.5, 2.0, 300.0, 168.75]),
             browser_zoom: 0.75,
@@ -439,12 +432,12 @@ mod tests {
             json["rebinds"],
             serde_json::json!([{"from": "key.mouse.4", "to": "key.keyboard.f3"}])
         );
-        // Files from before the rebinding: on, with no rules.
+        // 置き換えより前のファイル：オンで、ルールなし。
         fs::write(&path, r#"{"zoom_key": "C"}"#).unwrap();
         let settings = Settings::load(&path);
         assert!(settings.rebinds_enabled);
         assert!(settings.rebinds.is_empty());
-        // Names are kept as written, known or not.
+        // 名前は、知っていてもいなくても、書かれたとおりに残す。
         fs::write(
             &path,
             r#"{"rebinds_enabled": false, "rebinds": [{"from": "key.keyboard.nope", "to": "x", "note": 1}]}"#,
@@ -454,7 +447,7 @@ mod tests {
         assert!(!settings.rebinds_enabled);
         assert_eq!(settings.rebinds, [rebind("key.keyboard.nope", "x")]);
         assert_eq!(settings.rebinds_kept_in, None, "nothing dropped");
-        // The switch written as a string.
+        // 文字列で書いたスイッチ。
         for (text, enabled) in [("false", false), ("true", true)] {
             fs::write(&path, format!(r#"{{"rebinds_enabled": "{text}"}}"#)).unwrap();
             let settings = Settings::load(&path);
@@ -464,7 +457,7 @@ mod tests {
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1, "no copies");
     }
 
-    /// The `settings.rebinds-*.json` copies in `dir`.
+    /// `dir` の中の `settings.rebinds-*.json` の写し。
     fn copies(dir: &Path) -> Vec<PathBuf> {
         fs::read_dir(dir)
             .unwrap()
@@ -499,7 +492,7 @@ mod tests {
         .unwrap();
         let original = fs::read(&path).unwrap();
         let settings = Settings::load(&path);
-        // The file is not moved aside, and the other settings stay.
+        // ファイルは脇に移さず、ほかの設定も残る。
         assert!(path.exists());
         assert_eq!(settings.zoom_key, "C");
         assert!(settings.rebinds_enabled);
@@ -510,11 +503,11 @@ mod tests {
                 rebind("key.keyboard.b", "key.mouse.left"),
             ]
         );
-        // What was dropped is kept in a copy of the file, which saving does not touch.
+        // 捨てたものはファイルの写しに残り、保存はそれに触れない。
         let copy = settings.rebinds_kept_in.clone().expect("copied");
         assert_eq!(copies(dir.path()), std::slice::from_ref(&copy));
         assert_eq!(fs::read(&copy).unwrap(), original);
-        // Loading the same file again (the next start) reuses that copy.
+        // 同じファイルをまた読んでも（次の起動）、その写しを使う。
         assert_eq!(Settings::load(&path).rebinds_kept_in, Some(copy.clone()));
         assert_eq!(copies(dir.path()).len(), 1);
         settings.save(&path).unwrap();
@@ -534,7 +527,7 @@ mod tests {
             assert!(settings.rebinds.is_empty(), "{rebinds}");
             assert!(settings.rebinds_kept_in.is_some(), "{rebinds}");
         }
-        // Only the switch.
+        // スイッチだけ。
         fs::write(&path, r#"{"rebinds_enabled": "no"}"#).unwrap();
         let settings = Settings::load(&path);
         assert!(settings.rebinds_enabled);
@@ -549,10 +542,10 @@ mod tests {
         let settings = Settings::load(&path);
         assert_eq!(settings.zoom_key, "C");
         assert_eq!(settings.menu_key, "Ctrl+I");
-        // Files from before the waypoint keys existed get their defaults.
+        // ウェイポイントのキーより前のファイルは、その既定を得る。
         assert_eq!(settings.waypoint_key, "J");
         assert_eq!(settings.navigate_key, "K");
-        // And from before the browser.
+        // ブラウザより前のものも。
         assert_eq!(settings.browser_toggle_key, "");
         assert_eq!(settings.browser_page_down_key, "PageDown");
         assert_eq!(settings.browser_play_pause_key, "Down");

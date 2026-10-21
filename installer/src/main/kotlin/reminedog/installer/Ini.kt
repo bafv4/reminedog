@@ -1,14 +1,13 @@
 package reminedog.installer
 
 /**
- * The settings files of MultiMC and Prism Launcher (instance.cfg, multimc.cfg,
- * prismlauncher.cfg), edited line by line so that the other lines stay as they were.
+ * MultiMC と Prism Launcher の設定ファイル（instance.cfg、multimc.cfg、prismlauncher.cfg）。
+ * ほかの行をそのまま残すように、行単位で書き換える。
  *
- * There are two formats. MultiMC writes `key=value` lines with its own escapes (`\\`, `\n`,
- * `\t`, `\#`). Prism Launcher writes Qt's INI format (a `[General]` section, quotes around values
- * with `; , =`, C-like escapes) and marks it with a `ConfigVersion` key; it reads a file without
- * that key in MultiMC's format. Only the keys of the top-level (`[General]`) section are read and
- * written.
+ * 形式は 2 つ。MultiMC は独自のエスケープ（`\\`、`\n`、`\t`、`\#`）の `key=value` の行を書く。
+ * Prism Launcher は Qt の INI の形式（`[General]` のセクション、`; , =` を含む値を囲む引用符、
+ * C に似たエスケープ）で書き、`ConfigVersion` のキーで印を付ける。そのキーのないファイルは
+ * MultiMC の形式で読む。読み書きするのは一番上（`[General]`）のセクションのキーだけ。
  */
 class Ini private constructor(text: String) {
     private val newline = if ("\r\n" in text) "\r\n" else "\n"
@@ -18,10 +17,10 @@ class Ini private constructor(text: String) {
         if (endsWithNewline) removeAt(lastIndex)
     }
 
-    /** Whether the file is in Qt's format (written by Prism Launcher). */
+    /** ファイルが Qt の形式（Prism Launcher が書いたもの）か。 */
     val isQt: Boolean = lineOf("ConfigVersion", sections = true) >= 0
 
-    /** The value of a top-level key, or null when it is not there. */
+    /** 一番上のキーの値。なければ null。 */
     operator fun get(key: String): String? {
         val index = lineOf(key, isQt)
         if (index < 0) return null
@@ -31,7 +30,7 @@ class Ini private constructor(text: String) {
 
     fun getBool(key: String): Boolean = get(key)?.trim().equals("true", ignoreCase = true)
 
-    /** Sets a top-level key, replacing its line or adding one at the end of the section. */
+    /** 一番上のキーを設定する。その行を置き換えるか、セクションの最後に足す。 */
     operator fun set(key: String, value: String) {
         val line = "$key=" + if (isQt) qtEscape(value) else multimcEscape(value)
         val index = lineOf(key, isQt)
@@ -43,7 +42,7 @@ class Ini private constructor(text: String) {
         return if (endsWithNewline && lines.isNotEmpty()) joined + newline else joined
     }
 
-    /** The index of the last line of a top-level key (the last one wins when read), or -1. */
+    /** 一番上のキーの最後の行（読むときは最後のものが勝つ）の番号。なければ -1。 */
     private fun lineOf(key: String, sections: Boolean): Int {
         var found = -1
         var top = true
@@ -58,7 +57,7 @@ class Ini private constructor(text: String) {
         return found
     }
 
-    /** Where a new top-level key goes: after the last line of the top-level section. */
+    /** 新しい一番上のキーを置く場所：一番上のセクションの最後の行の後。 */
     private fun insertionPoint(): Int {
         if (!isQt) return lines.size
         var point = 0
@@ -78,8 +77,8 @@ class Ini private constructor(text: String) {
     companion object {
         fun parse(text: String) = Ini(text)
 
-        // MultiMC's escapes (INIFile::escape / unescape). Prism reads files without ConfigVersion
-        // the same way, after cutting the value at an unescaped '#'.
+        // MultiMC のエスケープ（INIFile::escape / unescape）。Prism は ConfigVersion のないファイルを、
+        // エスケープしていない '#' で値を切ってから同じように読む。
 
         fun multimcEscape(value: String): String = buildString {
             for (c in value) {
@@ -114,7 +113,7 @@ class Ini private constructor(text: String) {
             }
         }
 
-        // Qt's INI escapes (QSettingsPrivate::iniEscapedString / iniUnescapedStringList).
+        // Qt の INI のエスケープ（QSettingsPrivate::iniEscapedString / iniUnescapedStringList）。
 
         fun qtEscape(value: String): String {
             val out = StringBuilder()
@@ -157,7 +156,7 @@ class Ini private constructor(text: String) {
         fun qtUnescape(raw: String): String {
             val out = StringBuilder()
             var quoted = false
-            // Spaces outside quotes at the end are dropped: the text is kept up to here.
+            // 末尾の、引用符の外の空白は捨てる：文字はここまで残す。
             var keep = 0
             var i = 0
             while (i < raw.length && (raw[i] == ' ' || raw[i] == '\t')) i++

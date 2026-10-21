@@ -1,7 +1,7 @@
-//! Puts the version into reminedog.dll's version resource (Explorer's Properties > Details),
-//! since the file keeps its name across versions. The release workflow sets
-//! REMINEDOG_VERSION (and CI REMINEDOG_BUILD_ID); other builds use the crate's version, as
-//! `reminedog_agent::VERSION` and `BUILD_ID` do.
+//! reminedog.dll のバージョン情報のリソース（エクスプローラーのプロパティ > 詳細）に版を入れる。
+//! ファイルは版が変わっても同じ名前のため。リリースのワークフローが REMINEDOG_VERSION を
+//! （CI が REMINEDOG_BUILD_ID を）入れる。それ以外のビルドは、`reminedog_agent::VERSION` と
+//! `BUILD_ID` と同じく crate の版を使う。
 
 use std::env;
 use std::fs;
@@ -53,8 +53,8 @@ END
     if let Err(e) =
         embed_resource::compile_for_cdylib(&path, embed_resource::NONE).manifest_optional()
     {
-        // MSVC brings its resource compiler. A GNU build may lack windres: its DLL just has
-        // no version resource (the version still shows in the log).
+        // MSVC は自分のリソースコンパイラを持つ。GNU のビルドには windres がないことがある：その DLL には
+        // バージョン情報のリソースがないだけ（版はログには出る）。
         if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
             panic!("cannot put the version resource in: {e}");
         }
@@ -62,7 +62,7 @@ END
     }
 }
 
-/// `1.2.3-beta.1` → `1,2,3,0` (the numeric version a version resource holds).
+/// `1.2.3-beta.1` → `1,2,3,0`（バージョン情報のリソースが持つ数の版）。
 fn numeric_version(version: &str) -> String {
     let core = version.split(['-', '+']).next().unwrap_or_default();
     let mut parts: Vec<u16> = core
@@ -77,7 +77,7 @@ fn numeric_version(version: &str) -> String {
         .join(",")
 }
 
-/// A string for the resource script: `"` doubled, nothing else special.
+/// リソースのスクリプトのための文字列：`"` を 2 つにする。ほかに特別なものはない。
 fn quoted(text: &str) -> String {
     text.replace('"', "\"\"")
 }

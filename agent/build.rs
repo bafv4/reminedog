@@ -1,6 +1,6 @@
-//! The version and build id the agent logs and shows ([`VERSION`], [`BUILD_ID`] in `lib.rs`):
-//! the release workflow sets REMINEDOG_VERSION and CI REMINEDOG_BUILD_ID; other builds use the
-//! crate's version and "local".
+//! エージェントがログと画面に出す版とビルドの id（`lib.rs` の [`VERSION`]・[`BUILD_ID`]）。
+//! リリースのワークフローが REMINEDOG_VERSION を、CI が REMINEDOG_BUILD_ID を入れる。
+//! それ以外のビルドは crate の版と "local"。
 
 use std::env;
 

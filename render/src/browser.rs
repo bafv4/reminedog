@@ -1,10 +1,8 @@
-//! The in-game browser on the overlay: the page's picture where the user put it, a window
-//! around it while the menu is open (address bar, moving, resizing, the page's own input),
-//! and the menu's section.
+//! オーバーレイの上のゲーム内ブラウザ：利用者が置いた場所のページの絵、メニューを開いている
+//! 間のその周りの窓（アドレス欄、移動、大きさの変更、ページ自身への入力）、メニューの欄。
 //!
-//! The browser runs in the platform hook. This side sends it [`BrowserCommand`]s, among them
-//! the page's input as [`PageInput`], and draws the pictures it hands over
-//! ([`BrowserPixels`]).
+//! ブラウザは各 OS のフックの中で動く。こちらは [`BrowserCommand`]（その中には [`PageInput`]
+//! としてのページへの入力もある）を送り、渡された絵（[`BrowserPixels`]）を描く。
 
 use egui::{
     Color32, Event, EventFilter, Id, Key, LayerId, Order, Pos2, Rect, RichText, Sense, Stroke,
@@ -15,23 +13,23 @@ use reminedog_core::Settings;
 use reminedog_core::browser::{PageButton, PageInput, PageKey, PageModifiers, normalize_url};
 use reminedog_core::settings::{BROWSER_OPACITY_RANGE, BROWSER_SEEK_RANGE, BROWSER_ZOOM_RANGE};
 
-/// How far the browser got.
+/// ブラウザがどこまで進んだか。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BrowserState {
-    /// Not running.
+    /// 動いていない。
     #[default]
     Off,
     Starting,
     Ready,
-    /// It could not start or stopped working; why, for the menu.
+    /// 始められなかったか、動かなくなった。メニューのための理由。
     Failed(String),
 }
 
-/// The browser's state, from the platform hook.
+/// 各 OS のフックから来るブラウザの状態。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BrowserView {
     pub state: BrowserState,
-    /// To be seen (it may still be starting).
+    /// 見せる（まだ始まる途中かもしれない）。
     pub shown: bool,
     pub url: String,
     pub title: String,
@@ -39,14 +37,14 @@ pub struct BrowserView {
     pub can_go_forward: bool,
 }
 
-/// What the overlay asks of the browser.
+/// オーバーレイがブラウザに頼むこと。
 #[derive(Debug, Clone, PartialEq)]
 pub enum BrowserCommand {
-    /// Shows the browser, starting it if it is not running.
+    /// ブラウザを見せる。動いていなければ始める。
     Show,
-    /// Hides it, pausing its video.
+    /// 隠す。動画は止める。
     Hide,
-    /// Stops it.
+    /// 止める。
     Quit,
     Navigate(String),
     Back,
@@ -56,65 +54,63 @@ pub enum BrowserCommand {
     Input(PageInput),
 }
 
-/// The page's size and scale.
+/// ページの大きさと拡大率。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageLayout {
-    /// Pixels.
+    /// ピクセル。
     pub size: [u32; 2],
-    /// Pixels per point: one CSS pixel of the page at 100 % is one point of the overlay.
+    /// ポイントあたりのピクセル：100 % のページの 1 CSS ピクセルが、オーバーレイの 1 ポイント。
     pub scale: f32,
-    /// The page's zoom (1.0 is 100 %).
+    /// ページの拡大率（1.0 が 100 %）。
     pub zoom: f32,
 }
 
-/// The newest picture of the page.
+/// ページの最新の絵。
 pub struct BrowserPixels<'a> {
-    /// Which run of the browser it is from; with `seq`, tells a new picture.
+    /// ブラウザのどの起動のものか。`seq` と合わせて、新しい絵かが分かる。
     pub generation: u64,
-    /// 0: no picture yet.
+    /// 0：まだ絵がない。
     pub seq: u64,
-    /// Pixels.
+    /// ピクセル。
     pub size: [u32; 2],
-    /// `size[0] * size[1]` pixels, top row first: blue, green, red, alpha.
+    /// `size[0] * size[1]` のピクセル。上の行から：青、緑、赤、アルファ。
     pub bgra: &'a [u8],
 }
 
-/// The page's smallest size, in points.
+/// ページのいちばん小さい大きさ（ポイント）。
 const MIN_SIZE: Vec2 = vec2(160.0, 90.0);
-/// Space between the page and the screen's edges when placed by default, in points.
+/// 既定の位置に置くときの、ページと画面の端の間（ポイント）。
 const MARGIN: f32 = 16.0;
-/// Room above the page for the window's title bar and address bar until it is measured.
+/// 測るまでの、窓のタイトルバーとアドレス欄のためのページの上の場所。
 const DEFAULT_OFFSET: Vec2 = vec2(7.0, 64.0);
-/// The page's size is sent at most this often while it changes, in seconds.
+/// 大きさが変わっている間、ページの大きさを送るのはせいぜいこの間隔（秒）。
 const LAYOUT_INTERVAL: f64 = 0.1;
-/// Clicks closer in time and place than this count as a double click.
+/// 時間と場所がこれより近いクリックは、ダブルクリックとして数える。
 const DOUBLE_CLICK_SECONDS: f64 = 0.5;
 const DOUBLE_CLICK_DISTANCE: f32 = 4.0;
-/// CSS pixels per wheel notch (Chromium's on Windows).
+/// ホイールの 1 刻みの CSS ピクセル（Windows の Chromium のもの）。
 const WHEEL_STEP: f32 = 100.0;
-/// Frames to get the window where the page was when it appears.
+/// ページが現れたときに、窓をページがあった場所に置くためのフレーム数。
 const PLACING_TRIES: u8 = 3;
-/// The most characters of the page's address the address bar shows (pages can make their
-/// address megabytes long).
+/// アドレス欄が出す、ページのアドレスの最大の文字数（ページはアドレスを数 MB にできる）。
 const MAX_ADDRESS_CHARS: usize = 2048;
-/// Where the page is told the pointer went when it leaves (outside its view).
+/// ポインターが出たときに、ページに伝える行き先（その見え方の外）。
 const OUTSIDE: [f32; 2] = [-1.0, -1.0];
 
-/// The page's picture as a GL texture of the overlay's context.
+/// オーバーレイのコンテキストの GL のテクスチャとしての、ページの絵。
 #[derive(Default)]
 pub(crate) struct PageTexture {
     texture: Option<(glow::Texture, TextureId)>,
     size: [u32; 2],
-    /// Generation and number of the picture on the texture; `None` when it has none to show.
+    /// テクスチャの上の絵の世代と番号。出すものがなければ `None`。
     uploaded: Option<(u64, u64)>,
 }
 
 impl PageTexture {
-    /// Uploads a new picture. `None` (the platform hook could not get at it this frame)
-    /// keeps the last one.
+    /// 新しい絵を上げる。`None`（各 OS のフックがこのフレームで取れなかった）なら前のものを残す。
     ///
     /// # Safety
-    /// The painter's GL context must be current.
+    /// 描く者の GL のコンテキストが今のものであること。
     pub(crate) unsafe fn update(
         &mut self,
         painter: &mut egui_glow::Painter,
@@ -133,7 +129,7 @@ impl PageTexture {
             return;
         }
         let gl = painter.gl().clone();
-        // SAFETY: the caller made the context current; the slice holds the whole picture.
+        // SAFETY: 呼び出し側がコンテキストを今のものにした。スライスは絵の全部を持つ。
         unsafe {
             let texture = match self.texture {
                 Some((texture, _)) => texture,
@@ -193,33 +189,33 @@ impl PageTexture {
         self.uploaded = Some((pixels.generation, pixels.seq));
     }
 
-    /// The texture with the page on it.
+    /// ページの載ったテクスチャ。
     pub(crate) fn picture(&self) -> Option<TextureId> {
         self.uploaded.and(self.texture).map(|(_, id)| id)
     }
 }
 
-/// The browser window's own state.
+/// ブラウザの窓自身の状態。
 #[derive(Default)]
 pub(crate) struct BrowserMenu {
-    /// The address bar's text while it is being edited.
+    /// 書き換えている間のアドレス欄の文字。
     address: Option<String>,
-    /// The page's corner relative to the window's, measured.
+    /// 測った、窓の隅に対するページの隅の位置。
     offset: Option<Vec2>,
-    /// Tries at putting the window where the page was since it appeared (the offset is only
-    /// known once drawn); [`PLACING_TRIES`] once it is there.
+    /// 現れてから、ページがあった場所に窓を置く試み（ずれは描いてからしか分からない）。そこに
+    /// 置けたら [`PLACING_TRIES`]。
     placing: u8,
-    /// Buttons that went down on the page and are not up yet ([`PageButton::bit`]).
+    /// ページの上で下りて、まだ上がっていないボタン（[`PageButton::bit`]）。
     buttons: u8,
-    /// Keys that went down on the page and are not up yet.
+    /// ページの上で下りて、まだ上がっていないキー。
     keys: Vec<PageKey>,
-    /// Where the page last had the pointer, in CSS pixels.
+    /// ページが最後にポインターを持っていた場所（CSS ピクセル）。
     pointer: [f32; 2],
-    /// The page was last told the pointer is over it: it must hear when it leaves (or its
-    /// hover menus and previews stay).
+    /// ページに最後に、ポインターが上にあると伝えた：出たときにそれを伝えなければならない
+    /// （そうしないとホバーのメニューやプレビューが残る）。
     pointer_inside: bool,
     last_click: Option<Click>,
-    /// The layout sent last, and when (seconds).
+    /// 最後に送った大きさと、その時刻（秒）。
     sent: Option<(PageLayout, f64)>,
 }
 
@@ -232,8 +228,8 @@ struct Click {
 }
 
 impl BrowserMenu {
-    /// Lets go of what the page still has down: it gets no more input once the window goes
-    /// (the menu closes or the browser hides).
+    /// ページがまだ下ろしているものを離す：窓がなくなると（メニューを閉じるかブラウザを隠すと）、
+    /// ページはもう入力を受け取らない。
     fn release(&mut self, commands: &mut Vec<BrowserCommand>) {
         self.release_keys(commands);
         self.leave(commands);
@@ -251,7 +247,7 @@ impl BrowserMenu {
         }
     }
 
-    /// Tells the page the pointer left it.
+    /// ポインターが出たことをページに伝える。
     fn leave(&mut self, commands: &mut Vec<BrowserCommand>) {
         if std::mem::take(&mut self.pointer_inside) && self.buttons == 0 {
             commands.push(BrowserCommand::Input(PageInput::MouseMove {
@@ -262,8 +258,7 @@ impl BrowserMenu {
         }
     }
 
-    /// Lets go of the keys the page still has down: it gets no more keys once it loses the
-    /// focus.
+    /// ページがまだ下ろしているキーを離す：フォーカスを失うと、もうキーを受け取らない。
     fn release_keys(&mut self, commands: &mut Vec<BrowserCommand>) {
         for key in self.keys.drain(..) {
             commands.push(BrowserCommand::Input(PageInput::KeyUp {
@@ -273,7 +268,7 @@ impl BrowserMenu {
         }
     }
 
-    /// Sends the page's size when it changed (at most every [`LAYOUT_INTERVAL`]).
+    /// 大きさが変わったら、ページの大きさを送る（せいぜい [`LAYOUT_INTERVAL`] ごと）。
     pub(crate) fn layout(
         &mut self,
         settings: &Settings,
@@ -299,8 +294,7 @@ impl BrowserMenu {
     }
 }
 
-/// Where the page goes, in points: as the settings have it, kept on the screen, or in the
-/// top right corner.
+/// ページを置く場所（ポイント）：設定のとおり（画面の中に収めて）、または右上の隅。
 pub(crate) fn page_rect(settings: &Settings, screen: Rect) -> Rect {
     let max = (screen.size() - Vec2::splat(MARGIN)).max(MIN_SIZE);
     let rect = match settings.browser_rect {
@@ -329,8 +323,7 @@ pub(crate) fn page_rect(settings: &Settings, screen: Rect) -> Rect {
     Rect::from_min_size(min, size)
 }
 
-/// Draws the browser while it shows: its window while the menu is open, the page alone
-/// otherwise.
+/// 見せている間のブラウザを描く：メニューを開いている間は窓、そうでなければページだけ。
 pub(crate) fn browser_ui(
     ctx: &egui::Context,
     menu: &mut BrowserMenu,
@@ -341,7 +334,7 @@ pub(crate) fn browser_ui(
     commands: &mut Vec<BrowserCommand>,
 ) {
     if !(ui_open && view.shown) {
-        // No window: it is placed again when it appears.
+        // 窓なし：現れたときにまた置く。
         menu.placing = 0;
         menu.release(commands);
     }
@@ -386,8 +379,8 @@ fn browser_window(
         .collapsible(false)
         .resizable(false)
         .auto_sized()
-        // Dragged by the title bar only, a window keeps the position it remembers over
-        // `current_pos`. Here the page and its corner take their own drags anyway.
+        // タイトルバーだけで動かすなら、窓は `current_pos` より覚えた位置を保つ。ここでは
+        // どちらにしても、ページとその隅が自分でドラッグを受け取る。
         .drag_area(egui::WindowDrag::Anywhere);
     if menu.placing < PLACING_TRIES {
         window = window.current_pos(rect.min - menu.offset.unwrap_or(DEFAULT_OFFSET));
@@ -403,7 +396,7 @@ fn browser_window(
         return;
     };
     if menu.placing < PLACING_TRIES {
-        // Put the page back where it was (the offset is only known once drawn).
+        // ページを元の場所に戻す（ずれは描いてからしか分からない）。
         if (page_rect.min - rect.min).length() > 0.5 {
             menu.offset = Some(page_rect.min - window_rect.min);
             menu.placing += 1;
@@ -411,8 +404,7 @@ fn browser_window(
         }
         menu.placing = PLACING_TRIES;
     }
-    // The window moves the page; its size is the settings' (the corner may have just
-    // changed it).
+    // 窓がページを動かす。大きさは設定のもの（隅がいま変えたかもしれない）。
     let size = match settings.browser_rect {
         Some([_, _, w, h]) => vec2(w, h),
         None => page_rect.size(),
@@ -428,8 +420,8 @@ fn browser_window(
     }
 }
 
-/// "ブラウザ：<title>", short enough for the page's width (the window grows to fit its
-/// title).
+/// "ブラウザ：<title>"。ページの幅に収まる長さにする（ウィンドウはタイトルに合わせて
+/// 広がる）。
 fn window_title(ctx: &egui::Context, view: &BrowserView, width: f32) -> String {
     let title = if view.title.is_empty() {
         &view.url
@@ -439,10 +431,9 @@ fn window_title(ctx: &egui::Context, view: &BrowserView, width: f32) -> String {
     if title.is_empty() {
         return "ブラウザ".to_owned();
     }
-    // Measured in the title bar's font. egui does not shrink the title of a window sized to
-    // its contents, so a longer title would draw the title bar wider than the window. The bar
-    // also holds the close button (a square of the font's row height) and gaps between the
-    // title, the space around it and the button.
+    // タイトルバーのフォントで測る。egui は中身に合わせた大きさの窓のタイトルを縮めないので、
+    // 長いタイトルはタイトルバーを窓より広く描いてしまう。バーには閉じるボタン（フォントの行の
+    // 高さの四角）と、タイトル、その周りの余白、ボタンの間の隙間もある。
     let room = title_room(ctx, width);
     let style = ctx.global_style();
     let font = egui::TextStyle::Heading.resolve(&style);
@@ -459,7 +450,7 @@ fn window_title(ctx: &egui::Context, view: &BrowserView, width: f32) -> String {
     if fits(&titled(count)) {
         return titled(count);
     }
-    // The most characters that fit, with "…".
+    // "…" 付きで収まる最大の文字数。
     let (mut fit, mut over) = (0, count);
     while over - fit > 1 {
         let middle = (fit + over) / 2;
@@ -472,7 +463,7 @@ fn window_title(ctx: &egui::Context, view: &BrowserView, width: f32) -> String {
     titled(fit)
 }
 
-/// The width the title's text may take in a window `width` points wide.
+/// `width` ポイントの幅の窓で、タイトルの文字が使ってよい幅。
 fn title_room(ctx: &egui::Context, width: f32) -> f32 {
     let style = ctx.global_style();
     let font = egui::TextStyle::Heading.resolve(&style);
@@ -480,7 +471,7 @@ fn title_room(ctx: &egui::Context, width: f32) -> f32 {
     width - button - style.spacing.item_spacing.x * 3.0 - 1.0
 }
 
-/// The first `max` characters of `text`, with "…" when there are more (reading no further).
+/// `text` の最初の `max` 文字。もっとあれば "…" を付ける（それより先は読まない）。
 fn shorten(text: &str, max: usize) -> String {
     let mut chars = text.chars();
     let mut short: String = chars.by_ref().take(max).collect();
@@ -490,7 +481,7 @@ fn shorten(text: &str, max: usize) -> String {
     short
 }
 
-/// Back, forward, reload and the address bar.
+/// 戻る、進む、読み込み直し、アドレス欄。
 fn toolbar(
     ui: &mut egui::Ui,
     menu: &mut BrowserMenu,
@@ -524,7 +515,7 @@ fn toolbar(
         let shown = shorten(&view.url, MAX_ADDRESS_CHARS);
         let mut text = menu.address.clone().unwrap_or_else(|| shown.clone());
         let room = (width - (ui.min_rect().width() + ui.spacing().item_spacing.x)).max(60.0);
-        // Without a running browser there is nothing to open the address in.
+        // ブラウザが動いていなければ、アドレスを開く先がない。
         let usable = matches!(view.state, BrowserState::Ready | BrowserState::Starting);
         let edit = ui.add_enabled(
             usable,
@@ -539,7 +530,7 @@ fn toolbar(
         } else if edit.lost_focus() {
             menu.address = None;
             if ui.input(|i| i.key_pressed(Key::Enter)) {
-                // Enter on the address as it was opens it again (all of it, if shortened).
+                // 元のままのアドレスで Enter なら、それをもう一度開く（縮めていれば全部を）。
                 let url = if text == shown {
                     Some(view.url.clone()).filter(|url| !url.is_empty())
                 } else {
@@ -553,7 +544,7 @@ fn toolbar(
     });
 }
 
-/// The page: its picture, its input, and the corner to resize it by. Returns where it is.
+/// ページ：その絵、その入力、大きさを変える隅。ページの場所を返す。
 fn page(
     ui: &mut egui::Ui,
     menu: &mut BrowserMenu,
@@ -568,7 +559,7 @@ fn page(
     let response = ui.interact(rect, page_id, Sense::click_and_drag());
     paint_page(ui.painter(), rect, picture, view, Color32::WHITE);
 
-    // The corner that resizes the page, over the page's own input.
+    // ページ自身の入力の上の、ページの大きさを変える隅。
     let grip = Rect::from_min_max(rect.max - Vec2::splat(16.0), rect.max);
     let grip_response = ui.interact(grip, Id::new("reminedog-browser-grip"), Sense::drag());
     paint_grip(
@@ -611,7 +602,7 @@ fn page(
                 .iter()
                 .any(|e| matches!(e, Event::PointerButton { pressed: true, .. }))
         {
-            // Clicked elsewhere: the keys are no longer the page's.
+            // ほかの場所をクリックした：キーはもうページのものではない。
             ui.memory_mut(|m| m.surrender_focus(page_id));
         }
         if response.has_focus() {
@@ -631,26 +622,26 @@ fn page(
     rect
 }
 
-/// Where the page's input goes.
+/// ページの入力が行く場所。
 struct PageArea {
     rect: Rect,
-    /// The resize corner: not the page's.
+    /// 大きさを変える隅：ページのものではない。
     grip: Rect,
     layer: LayerId,
     zoom: f32,
 }
 
 impl PageArea {
-    /// A position of the screen in the page's CSS pixels.
+    /// 画面の位置を、ページの CSS ピクセルで。
     fn css(&self, pos: Pos2) -> [f32; 2] {
         let v = (pos - self.rect.min) / self.zoom;
         [v.x, v.y]
     }
 }
 
-/// Turns this frame's events into the page's input, in their order; whether a button went
-/// down on the page. Moves between two other events are sent before the second one (one per
-/// run of moves), so a drag reaches the page between its press and release.
+/// このフレームのイベントを、順に、ページへの入力にする。ページの上でボタンが下りたかを返す。
+/// 2 つのほかのイベントの間の移動は、2 つ目の前に送る（移動の連なりごとに 1 つ）ので、ドラッグは
+/// 押下と解放の間にページに届く。
 #[allow(clippy::too_many_arguments)]
 fn page_input(
     ctx: &egui::Context,
@@ -664,7 +655,7 @@ fn page_input(
 ) -> bool {
     let mut pressed_on_page = false;
     let mut moved_to: Option<Pos2> = None;
-    // The modifiers held now (moves carry no modifiers of their own).
+    // 今押している修飾キー（移動は自分の修飾キーを持たない）。
     let modifiers = ctx.input(|i| page_modifiers(i.modifiers));
     let send = |commands: &mut Vec<BrowserCommand>, input| {
         commands.push(BrowserCommand::Input(input));
@@ -701,7 +692,7 @@ fn page_input(
                 menu.leave(commands);
             }
             Event::WindowFocused(false) => {
-                // The releases of what is held now will not come.
+                // 今押しているものの解放は来ない。
                 moved_to = None;
                 menu.release(commands);
             }
@@ -789,7 +780,7 @@ fn page_input(
                     commands,
                     PageInput::Wheel {
                         pos: area.css(pos),
-                        // egui's delta moves the content; the page's scrolls the view.
+                        // egui の delta は中身を動かす。ページのものは見え方をスクロールする。
                         delta: [-delta.x * step, -delta.y * step],
                         modifiers: page_modifiers(*held),
                     },
@@ -853,7 +844,7 @@ fn page_modifiers(modifiers: egui::Modifiers) -> PageModifiers {
     }
 }
 
-/// The page's name for an egui key (US layout), for the keys a page uses.
+/// egui のキー（US 配列）のページの名前（ページが使うキーについて）。
 pub(crate) fn page_key(key: Key) -> Option<PageKey> {
     macro_rules! table {
         ($($key:ident => $vk:literal, $code:literal, $name:literal;)*) => {
@@ -941,8 +932,7 @@ pub(crate) fn page_key(key: Key) -> Option<PageKey> {
     }
 }
 
-/// The picture, or while there is none what the browser is doing. A failure shows over the
-/// last picture too (which no longer changes).
+/// 絵、絵がなければブラウザがしていること。失敗は、前の絵（もう変わらない）の上にも出す。
 fn paint_page(
     painter: &egui::Painter,
     rect: Rect,
@@ -982,7 +972,7 @@ fn paint_page(
     );
 }
 
-/// Three diagonal lines in the corner.
+/// 隅の 3 本の斜めの線。
 fn paint_grip(painter: &egui::Painter, rect: Rect, hot: bool) {
     let color = if hot {
         Color32::WHITE
@@ -1002,7 +992,7 @@ fn paint_grip(painter: &egui::Painter, rect: Rect, hot: bool) {
     }
 }
 
-/// The menu's section above the browser's keys.
+/// ブラウザのキーの上の、メニューの欄。
 pub(crate) fn browser_section(
     ui: &mut egui::Ui,
     view: &BrowserView,
@@ -1066,7 +1056,7 @@ pub(crate) fn browser_section(
     );
 }
 
-/// A slider for a fraction, shown in percent.
+/// 割合のスライダー（パーセントで出す）。
 fn percent_slider(
     ui: &mut egui::Ui,
     value: &mut f32,
@@ -1109,11 +1099,11 @@ mod tests {
             browser_rect: Some(rect),
             ..Settings::default()
         };
-        // Off to the bottom right (the screen got smaller).
+        // 右下にはみ出した（画面が小さくなった）。
         let rect = page_rect(&settings([1200.0, 700.0, 400.0, 300.0]), screen());
         assert_eq!(rect.max, pos2(1280.0, 720.0));
         assert_eq!(rect.size(), vec2(400.0, 300.0));
-        // Too small, too big.
+        // 小さすぎる、大きすぎる。
         let rect = page_rect(&settings([10.0, 10.0, 20.0, 20.0]), screen());
         assert_eq!(rect.size(), MIN_SIZE);
         let rect = page_rect(&settings([0.0, 0.0, 5000.0, 5000.0]), screen());
@@ -1159,7 +1149,7 @@ mod tests {
     #[test]
     fn long_titles_are_cut_to_the_page_width() {
         let ctx = egui::Context::default();
-        // Fonts are there after the first pass.
+        // フォントは最初の 1 回の後にある。
         ctx.run_ui(egui::RawInput::default(), |_| {})
             .textures_delta
             .clear();
@@ -1185,7 +1175,7 @@ mod tests {
                 "{title} is wider than the title bar of {page}"
             );
         }
-        // Wider pages show more of it.
+        // 広いページほど多くを見せる。
         assert!(window_title(&ctx, &view, 800.0).len() > window_title(&ctx, &view, 360.0).len());
         let short = BrowserView {
             title: "Wiki".into(),
@@ -1198,8 +1188,7 @@ mod tests {
         );
     }
 
-    /// Runs the window for a few frames with these events in the last one; the commands of
-    /// that frame.
+    /// いくつかのフレームの間、最後のフレームにこれらのイベントを入れて窓を動かす。そのフレームの命令。
     fn run(
         ctx: &egui::Context,
         menu: &mut BrowserMenu,
@@ -1213,7 +1202,7 @@ mod tests {
         frame(ctx, menu, settings, view, true, events)
     }
 
-    /// One frame, with the menu open or not; its commands.
+    /// メニューを開いた、または閉じた 1 フレーム。その命令。
     fn frame(
         ctx: &egui::Context,
         menu: &mut BrowserMenu,
@@ -1291,7 +1280,7 @@ mod tests {
         let view = ready();
         run(&ctx, &mut menu, &mut settings, &view, Vec::new());
         let at = pos2(350.0, 250.0);
-        // A click gives the page the keys; then a key and a button go down on it.
+        // クリックでページにキーを渡す。それから、ページの上でキーとボタンが下りる。
         frame(
             &ctx,
             &mut menu,
@@ -1330,7 +1319,7 @@ mod tests {
             )),
             "{released:?}"
         );
-        // Their real releases (the game's now) send nothing more.
+        // それらの本物の解放（今はゲームのもの）は、もう何も送らない。
         let later = frame(
             &ctx,
             &mut menu,
@@ -1373,7 +1362,7 @@ mod tests {
             true,
             vec![key(Key::A, true)],
         );
-        // A click off the page takes the keys from it.
+        // ページの外のクリックで、ページからキーを取る。
         let away = pos2(50.0, 600.0);
         let mut commands = Vec::new();
         for events in [
@@ -1501,7 +1490,7 @@ mod tests {
             })
             .collect();
         let near = |pos: [f32; 2]| (pos[0] - 20.0).abs() < 0.6 && (pos[1] - 10.0).abs() < 0.6;
-        // In the order they happened: the move to the page, then the click.
+        // 起きた順に：ページへの移動、次にクリック。
         assert!(
             matches!(inputs[0], PageInput::MouseMove { pos, buttons: 0, .. } if near(pos)),
             "{inputs:?}"
@@ -1514,7 +1503,7 @@ mod tests {
             matches!(inputs[2], PageInput::MouseUp { buttons: 0, .. }),
             "{inputs:?}"
         );
-        // The page has the keys now.
+        // 今はページがキーを持っている。
         let commands = run(
             &ctx,
             &mut menu,
@@ -1597,7 +1586,7 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, ["move", "down", "drag", "up"]);
-        // Off the page: it hears the pointer left.
+        // ページの外：ポインターが出たことを聞く。
         let away = pos2(50.0, 600.0);
         let commands = frame(
             &ctx,
@@ -1658,7 +1647,7 @@ mod tests {
 
     #[test]
     fn the_page_address_stays_out_of_the_settings() {
-        // It can hold tokens; the platform hook keeps it elsewhere.
+        // トークンを含みうる。各 OS のフックは、それを別の場所に置く。
         let ctx = egui::Context::default();
         let mut menu = BrowserMenu::default();
         let mut settings = Settings::default();

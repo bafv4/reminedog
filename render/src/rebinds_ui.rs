@@ -1,5 +1,5 @@
-//! The menu's 「キーの置き換え」 section, and [`resolve`]: the rules in the settings that the
-//! input router uses.
+//! メニューの「キーの置き換え」の欄と、[`resolve`]：設定のルールのうち、入力の router が使う
+//! もの。
 
 use std::fmt;
 
@@ -17,18 +17,17 @@ use crate::rebind::MAX_REBINDS;
 const DESCRIPTION: &str = "Minecraft に届くキーを別のキーやマウスのボタンに置き換える。\
      ゲーム中だけ置き換える（チャットやインベントリなどの画面と、このメニューを開いている間は元のキーのまま）";
 
-/// The mouse buttons offered as outputs, which cannot be captured: the left and right buttons
-/// work the menu.
+/// 出力として出すマウスのボタン（割り当て待ちでは取れない：左と右のボタンはメニューを操作する）。
 const CLICK_TARGETS: [(&str, InputId); 3] = [
     ("左クリック", InputId::Mouse(1)),
     ("右クリック", InputId::Mouse(3)),
     ("ホイールクリック", InputId::Mouse(2)),
 ];
 
-/// Keys that cannot be a source: Esc stays the way to the game's menu and out of ours, the
-/// Windows keys open the Start menu whatever the game gets, PrintScreen arrives only when it
-/// is released, and the IME keys of Japanese keyboards (international1-5, lang1-5) may never
-/// send a release.
+/// 元のキーにできないキー：Esc はゲームのメニューを開き、こちらのメニューから出る手段として
+/// 残す。Windows キーは、ゲームが何を受け取ってもスタートメニューを開く。PrintScreen は離した
+/// ときにしか届かない。日本語のキーボードの IME のキー（international1-5、lang1-5）は解放を
+/// 送らないことがある。
 fn refused_source(id: InputId) -> bool {
     matches!(
         id,
@@ -36,30 +35,30 @@ fn refused_source(id: InputId) -> bool {
     )
 }
 
-/// Keys that cannot be an output: Esc (the game's own menu stays on Esc) and the Windows keys.
+/// 出力にできないキー：Esc（ゲーム自身のメニューは Esc のまま）と Windows キー。
 fn refused_target(id: InputId) -> bool {
     matches!(id, InputId::Key(41 | 227 | 231))
 }
 
-/// Why a rule in the settings is not used.
+/// 設定のルールを使わない理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Unused {
-    /// Not one of 26.x's key names.
+    /// 26.x のキーの名前ではない。
     UnknownName(String),
     Source(InputId),
     Target(InputId),
-    /// The game's window library cannot report this source or give the game this output.
+    /// ゲームのウィンドウのライブラリが、この元のキーを報告できないか、この出力をゲームに渡せない。
     Unsupported(InputId),
     SameKey,
-    /// An earlier rule has the same source.
+    /// 前のルールに同じ元のキーがある。
     Duplicate(InputId),
-    /// A hotkey without modifiers takes every press of the source.
+    /// 修飾キーなしのホットキーが、元のキーの押下を全部取る。
     Hotkey(InputId, Action),
     TooMany,
 }
 
 impl Unused {
-    /// For the menu.
+    /// メニューのため。
     fn note(&self) -> String {
         match self {
             Unused::UnknownName(name) => {
@@ -87,7 +86,7 @@ impl Unused {
     }
 }
 
-/// For the log.
+/// ログのため。
 impl fmt::Display for Unused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -107,7 +106,7 @@ impl fmt::Display for Unused {
     }
 }
 
-/// The hotkey without modifiers on `source`, which takes every press of it.
+/// `source` についての修飾キーなしのホットキー（その押下を全部取る）。
 fn plain_hotkey_on(source: InputId, keys: &Hotkeys) -> Option<Action> {
     let trigger = input_trigger(source)?;
     Action::ALL
@@ -115,11 +114,10 @@ fn plain_hotkey_on(source: InputId, keys: &Hotkeys) -> Option<Action> {
         .find(|&action| keys.get(action) == Some(Hotkey::plain(trigger)))
 }
 
-/// Each rule of the settings as the ids it uses, or why it is not used, in order: names that
-/// are not keys, refused sources and outputs, keys and buttons in `unsupported` (the game's
-/// window library cannot report the source or send the output), a key on itself, a source an
-/// earlier rule has, a source a hotkey without modifiers takes, and rules beyond
-/// [`MAX_REBINDS`].
+/// 設定の各ルールを、それが使う id として、または使わない理由として、順に：キーでない名前、
+/// 断る元のキーと出力、`unsupported` のキーとボタン（ゲームのウィンドウのライブラリが元のキーを
+/// 報告できないか、出力を送れない）、自分自身へのキー、前のルールにある元のキー、修飾キーなしの
+/// ホットキーが取る元のキー、[`MAX_REBINDS`] を超えたルール。
 fn check_rules(
     rebinds: &[Rebind],
     keys: &Hotkeys,
@@ -160,10 +158,10 @@ fn check_rules(
         .collect()
 }
 
-/// The rules in `settings` the router uses, as (source, output): none while the rebinding is
-/// off; rules that cannot be used are left out (see [`check_rules`]; `unsupported`: keys and
-/// buttons the game's window library cannot handle), each logged. Logs, so call it when the
-/// rules or the hotkeys change, not every frame.
+/// `settings` のルールのうち router が使うもの（(元のキー, 出力) として）：置き換えがオフなら
+/// なし。使えないルールは除き（[`check_rules`] を参照。`unsupported`：ゲームのウィンドウの
+/// ライブラリが扱えないキーとボタン）、それぞれをログに出す。ログに出すので、毎フレームではなく、
+/// ルールかホットキーが変わったときに呼ぶこと。
 pub fn resolve(
     settings: &Settings,
     keys: &Hotkeys,
@@ -188,7 +186,7 @@ pub fn resolve(
     rules
 }
 
-/// The sources of the rules in `settings` (known names only), for refusing hotkeys on them.
+/// `settings` のルールの元のキー（知っている名前だけ）。そのホットキーを断るため。
 pub(crate) fn rule_sources(settings: &Settings) -> impl Iterator<Item = InputId> + '_ {
     settings
         .rebinds
@@ -196,7 +194,8 @@ pub(crate) fn rule_sources(settings: &Settings) -> impl Iterator<Item = InputId>
         .filter_map(|rule| input_by_name(&rule.from, Naming::Modern))
 }
 
-/// Warnings for a rule in use whose source a hotkey also uses: with its modifiers, or as one.
+/// 使っているルールの元のキーをホットキーも使っているときの警告：修飾キー付きで、または
+/// そのものとして。
 fn hotkey_warnings(source: InputId, keys: &Hotkeys) -> Vec<String> {
     let trigger = input_trigger(source);
     let modifier = modifier_kind(source).map(|(kind, _)| kind);
@@ -231,7 +230,7 @@ fn hotkey_warnings(source: InputId, keys: &Hotkeys) -> Vec<String> {
     warnings
 }
 
-/// The game's mappings on `id`, from its key bindings, by name.
+/// ゲームのキーの割り当てからの、`id` についてのゲームの割り当て（名前で）。
 fn mapping_names(id: InputId, bindings: &[(InputId, Vec<String>)]) -> Vec<String> {
     bindings
         .iter()
@@ -240,8 +239,8 @@ fn mapping_names(id: InputId, bindings: &[(InputId, Vec<String>)]) -> Vec<String
         .unwrap_or_default()
 }
 
-/// What the game does with `id`, from its key bindings: "（前進）", "（デバッグ修飾キー・オーバーレイの
-/// 切り替え）", or nothing when nothing is bound to it.
+/// `id` でゲームがすること（キーの割り当てから）："（前進）"、"（デバッグ修飾キー・オーバーレイの
+/// 切り替え）"。何も割り当てられていなければなし。
 fn mappings_text(id: InputId, bindings: &[(InputId, Vec<String>)]) -> String {
     let names = mapping_names(id, bindings);
     if names.is_empty() {
@@ -250,8 +249,8 @@ fn mappings_text(id: InputId, bindings: &[(InputId, Vec<String>)]) -> String {
     format!("（{}）", names.join("・"))
 }
 
-/// Notes for a rule in use: what the game no longer gets from the source while it is
-/// rebound, and a hotkey the output would not set off (hotkeys go by the physical key).
+/// 使っているルールについての注記：置き換えている間、元のキーからゲームが受け取らなくなるものと、
+/// 出力では動かないホットキー（ホットキーは物理のキーで決まる）。
 fn rule_notes(
     from: InputId,
     to: InputId,
@@ -282,7 +281,7 @@ fn rule_notes(
     notes
 }
 
-/// A row of the list: "マウスのボタン4 → F3（デバッグ修飾キー・オーバーレイの切り替え）".
+/// 一覧の 1 行："マウスのボタン4 → F3（デバッグ修飾キー・オーバーレイの切り替え）"。
 fn row_text(
     rule: &Rebind,
     check: &Result<(InputId, InputId), Unused>,
@@ -299,41 +298,41 @@ fn row_text(
     format!("{} → {}{mappings}", label(&rule.from), label(&rule.to))
 }
 
-/// Where adding a rule is.
+/// ルールを足すところ。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum Adding {
     #[default]
     No,
-    /// Waiting for the source.
+    /// 元のキーを待っている。
     Source,
-    /// Waiting for the output of this source.
+    /// この元のキーの出力を待っている。
     Target(InputId),
 }
 
-/// The section's own state.
+/// この欄自身の状態。
 #[derive(Debug, Default)]
 pub(crate) struct RebindMenu {
     adding: Adding,
-    /// Why the last key pressed for a rule was not taken.
+    /// ルールのために最後に押したキーを取らなかった理由。
     note: Option<String>,
 }
 
-/// What the section asks the router for.
+/// この欄が router に頼むこと。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct RebindActions {
-    /// Capture the next key or button ([`crate::InputRouter::start_input_capture`]).
+    /// 次のキーかボタンを取る（[`crate::InputRouter::start_input_capture`]）。
     pub(crate) capture: bool,
     pub(crate) cancel_capture: bool,
 }
 
 impl RebindMenu {
-    /// Whether a key is being waited for.
+    /// キーを待っているか。
     pub(crate) fn adding(&self) -> bool {
         self.adding != Adding::No
     }
 
-    /// Stops waiting for a key (the menu closed, or a hotkey is being assigned instead), and
-    /// forgets why a key was not taken.
+    /// キーを待つのをやめ（メニューを閉じた、または代わりにホットキーを割り当てる）、キーを
+    /// 取らなかった理由を忘れる。
     pub(crate) fn cancel(&mut self) {
         self.adding = Adding::No;
         self.note = None;
@@ -344,7 +343,7 @@ impl RebindMenu {
         self.note = None;
     }
 
-    /// The router's capture ended. Returns whether to capture again (for the output).
+    /// router の割り当て待ちが終わった。もう一度取るか（出力のため）を返す。
     pub(crate) fn on_captured(
         &mut self,
         captured: Captured,
@@ -355,12 +354,12 @@ impl RebindMenu {
         let id = match (adding, captured) {
             (Adding::No, _) => return false,
             (_, Captured::Input(id)) => id,
-            // Esc, or the menu closing.
+            // Esc か、メニューを閉じた。
             (_, Captured::Cancelled) => {
                 self.note = None;
                 return false;
             }
-            // A capture that was not ours.
+            // 自分のものでなかった割り当て待ち。
             (_, Captured::Hotkey(_)) => return false,
         };
         match adding {
@@ -380,8 +379,8 @@ impl RebindMenu {
         }
     }
 
-    /// The output for `source` was chosen: adds the rule, or stays at the output with a note.
-    /// Returns whether still waiting for the output.
+    /// `source` の出力を選んだ：ルールを足すか、注記を出して出力のところに留まる。まだ出力を
+    /// 待っているかを返す。
     fn target(&mut self, source: InputId, target: InputId, settings: &mut Settings) -> bool {
         let refusal = if refused_target(target) {
             Some(Unused::Target(target))
@@ -409,7 +408,7 @@ impl RebindMenu {
     }
 }
 
-/// Why `id` cannot be the source of a new rule.
+/// `id` が新しいルールの元のキーになれない理由。
 fn source_refusal(id: InputId, settings: &Settings, keys: &Hotkeys) -> Option<String> {
     let unused = if refused_source(id) {
         Some(Unused::Source(id))
@@ -421,7 +420,7 @@ fn source_refusal(id: InputId, settings: &Settings, keys: &Hotkeys) -> Option<St
     unused.map(|unused| unused.note())
 }
 
-/// Where the settings file was copied because rebinding entries in it could not be read.
+/// 置き換えの項目を読めなかったので、設定ファイルを写した場所。
 fn kept_note(settings: &Settings) -> Option<String> {
     let copy = settings.rebinds_kept_in.as_ref()?;
     let file = copy.file_name().map_or_else(
@@ -433,9 +432,9 @@ fn kept_note(settings: &Settings) -> Option<String> {
     ))
 }
 
-/// The 「キーの置き換え」 section. `bindings`: the game's mappings by key, from options.txt;
-/// `note`: why some rules cannot work now (shown as a warning); `unsupported`: keys and
-/// buttons the game's window library cannot handle.
+/// 「キーの置き換え」の欄。`bindings`：options.txt から読んだ、キーごとのゲームの割り当て。
+/// `note`：今は使えないルールがある理由（警告として出す）。`unsupported`：ゲームのウィンドウの
+/// ライブラリが扱えないキーとボタン。
 pub(crate) fn rebind_section(
     ui: &mut egui::Ui,
     menu: &mut RebindMenu,
@@ -462,7 +461,7 @@ pub(crate) fn rebind_section(
             )
         });
     if shown.body_returned.is_none() && menu.adding() {
-        // Folded while waiting for a key.
+        // キーを待っている間は畳む。
         menu.cancel();
         actions.cancel_capture = true;
     }
@@ -494,8 +493,7 @@ fn section_body(
     let enabled = settings.rebinds_enabled;
     for (i, (rule, check)) in settings.rebinds.iter().zip(&checks).enumerate() {
         ui.push_id(i, |ui| {
-            // Wrapped, so a long row does not widen the menu. A rule can be deleted while
-            // the rebinding is off.
+            // 長い行でメニューが広がらないように折り返す。置き換えがオフでもルールは消せる。
             ui.horizontal_wrapped(|ui| {
                 ui.add_enabled(enabled, egui::Label::new(row_text(rule, check, bindings)));
                 if ui.button("削除").clicked() {
@@ -573,7 +571,7 @@ fn section_body(
             if let Some(id) = picked
                 && !menu.target(source, id, settings)
             {
-                // Chosen with a click: the router is still waiting for a key.
+                // クリックで選んだ：router はまだキーを待っている。
                 actions.cancel_capture = true;
             }
         }
@@ -622,7 +620,7 @@ mod tests {
             ("key.keyboard.caps.lock", "key.keyboard.left.win"),
             ("key.mouse.5", "key.mouse.5"),
             ("key.mouse.4", "key.keyboard.c"),
-            // Z is the zoom.
+            // Z はズーム。
             ("key.keyboard.z", "key.keyboard.c"),
             ("key.keyboard.caps.lock", "key.keyboard.left.control"),
             ("key.mouse.5", "key.mouse.left"),
@@ -645,7 +643,7 @@ mod tests {
                 Unused::Hotkey(Z, Action::Zoom),
             ]
         );
-        // Off: nothing.
+        // オフ：なし。
         let off = Settings {
             rebinds_enabled: false,
             ..s
@@ -655,7 +653,7 @@ mod tests {
 
     #[test]
     fn rules_the_window_library_cannot_handle_are_left_out_with_a_note() {
-        // GLFW has no menu key and no mute key.
+        // GLFW にはメニューのキーもミュートのキーもない。
         let menu_key = InputId::Key(118);
         let mute = InputId::Key(127);
         let s = settings(&[
@@ -672,7 +670,7 @@ mod tests {
             Unused::Unsupported(menu_key).note(),
             "キー 118 はこの版のゲームでは使えない"
         );
-        // Its source is not taken: a later rule from it is used.
+        // その元のキーは取られていない：それからの後のルールを使う。
         let s = settings(&[
             ("key.mouse.4", "key.keyboard.mute"),
             ("key.mouse.4", "key.keyboard.f3"),
@@ -691,7 +689,7 @@ mod tests {
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect();
         let s = settings(&rules);
-        // Of the 42 usable rules (J and K are the waypoint hotkeys), the first 32.
+        // 使える 42 のルール（J と K はウェイポイントのホットキー）のうち、最初の 32。
         assert_eq!(resolve(&s, &Hotkeys::DEFAULT, &[]).len(), MAX_REBINDS);
         let checks = check_rules(&s.rebinds, &Hotkeys::DEFAULT, &[]);
         assert!(checks.contains(&Err(Unused::TooMany)));
@@ -709,7 +707,7 @@ mod tests {
             hotkey_warnings(InputId::Key(5), &keys),
             ["B は「ズーム」（Shift+B）にも使っている"]
         );
-        // Left Ctrl is the menu's modifier (Ctrl+I).
+        // 左の Ctrl はメニューの修飾キー（Ctrl+I）。
         assert_eq!(
             hotkey_warnings(LCTRL, &keys),
             ["左 Ctrl は「メニューを開く」（Ctrl+I）の修飾キーにも使っている"]
@@ -751,7 +749,7 @@ mod tests {
         );
     }
 
-    /// Starts adding a rule and presses `source`.
+    /// ルールを足し始め、`source` を押す。
     fn add_source(menu: &mut RebindMenu, s: &mut Settings, source: InputId) -> bool {
         menu.start();
         menu.on_captured(Captured::Input(source), s, &Hotkeys::DEFAULT)
@@ -766,7 +764,7 @@ mod tests {
             "waits for the output"
         );
         assert_eq!(menu.adding, Adding::Target(MOUSE4));
-        // The same key again: stays at the output.
+        // 同じキーがまた：出力のところに留まる。
         assert!(menu.on_captured(Captured::Input(MOUSE4), &mut s, &Hotkeys::DEFAULT));
         assert_eq!(menu.note.as_deref(), Some("同じキーには置き換えられない"));
         assert!(menu.on_captured(Captured::Input(LEFT_WIN), &mut s, &Hotkeys::DEFAULT));
@@ -778,7 +776,7 @@ mod tests {
         assert!(!menu.adding());
         assert_eq!(menu.note, None);
         assert_eq!(s.rebinds, [rebind("key.mouse.4", "key.keyboard.f3")]);
-        // An output chosen with a button.
+        // ボタンで選んだ出力。
         assert!(add_source(&mut menu, &mut s, CAPS));
         assert!(!menu.target(CAPS, InputId::Mouse(3), &mut s));
         assert_eq!(
@@ -811,7 +809,7 @@ mod tests {
             assert!(!menu.adding());
             assert_eq!(menu.note.as_deref(), Some(note));
         }
-        // I is free: the menu is on Ctrl+I.
+        // I は空いている：メニューは Ctrl+I。
         assert!(add_source(&mut menu, &mut s, InputId::Key(12)));
         assert_eq!(s.rebinds.len(), 1);
     }
@@ -827,8 +825,7 @@ mod tests {
         assert!(!menu.on_captured(Captured::Cancelled, &mut s, &Hotkeys::DEFAULT));
         assert!(!menu.adding());
         assert!(s.rebinds.is_empty());
-        // The note of a refused key goes with the add: Esc at the output, 取り消し, or the
-        // menu closing.
+        // 使えないキーの注記は追加と一緒に消える：出力での Esc、取り消し、メニューを閉じる。
         assert!(add_source(&mut menu, &mut s, MOUSE5));
         assert!(menu.on_captured(Captured::Input(MOUSE5), &mut s, &Hotkeys::DEFAULT));
         assert!(menu.note.is_some());
@@ -842,12 +839,12 @@ mod tests {
         assert!(menu.note.is_some());
         menu.cancel();
         assert_eq!(menu.note, None);
-        // Not adding: captures are someone else's.
+        // 足していない：割り当て待ちはほかのもの。
         assert!(!menu.on_captured(Captured::Input(MOUSE5), &mut s, &Hotkeys::DEFAULT));
         assert!(s.rebinds.is_empty());
     }
 
-    /// The section's contents in a window like the menu's, after a few frames.
+    /// いくつかのフレームの後の、メニューのような窓の中のこの欄の中身。
     fn section_rect(menu: &mut RebindMenu, s: &mut Settings) -> egui::Rect {
         let ctx = egui::Context::default();
         let bindings = vec![(
@@ -903,7 +900,7 @@ mod tests {
         let mut menu = RebindMenu::default();
         let narrow = section_rect(&mut menu, &mut s);
         assert!(narrow.width() <= 360.0, "{narrow:?}");
-        // Waiting for an output, with the click buttons.
+        // クリックのボタンで、出力を待っている。
         menu.adding = Adding::Target(InputId::Key(229));
         menu.note = Some("同じキーには置き換えられない".into());
         let rect = section_rect(&mut menu, &mut s);

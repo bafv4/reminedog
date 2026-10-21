@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Builds the Linux agent (libreminedog_linux.so) in release, optionally with the installer's
-# jar, into dist/linux. Runs on Linux with Rust (and a JDK 17 or later for the installer), or
-# from Windows in the development container:
+# Linux のエージェント（libreminedog_linux.so）をリリースでビルドし、必要ならインストーラーの
+# jar と一緒に dist/linux に出す。Rust のある Linux（インストーラーには JDK 17 以降も）で動かすか、
+# Windows から開発用のコンテナで動かす：
 #   scripts/linux/run.sh scripts/linux/build.sh [OPTIONS]
 #
-# Usage: build.sh [--check] [--installer] [--out DIR]
-#   --check      first fmt (check only), clippy (warnings are errors) and the tests, as the CI
-#   --installer  also build the installer (its tests and reminedog-installer.jar)
-#   --out DIR    where the files go (default: dist/linux in the repository)
-# REMINEDOG_VERSION, when set, is the version in the library and the jar (as the release
-# workflow sets it); the library keeps its plain name, the jar is reminedog-installer-<version>.jar.
+# 使い方：build.sh [--check] [--installer] [--out DIR]
+#   --check      CI と同じく、先に fmt（確認だけ）、clippy（警告はエラー）、テスト
+#   --installer  インストーラーもビルドする（そのテストと reminedog-installer.jar）
+#   --out DIR    ファイルの出力先（既定：リポジトリの dist/linux）
+# REMINEDOG_VERSION を設定すれば、それがライブラリと jar の版になる（リリースのワークフローと
+# 同じ）。ライブラリの名前はそのまま、jar は reminedog-installer-<version>.jar。
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -22,11 +22,11 @@ while [ "$#" -gt 0 ]; do
     *) echo "build.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
-# Relative to where the script was run, not the repository it changes to.
+# 移った先のリポジトリではなく、スクリプトを動かした場所からの相対。
 case $out in /*) ;; *) out=$PWD/$out ;; esac
 
 cd "$repo"
-# Cargo's output folder, wherever its settings put it (CARGO_TARGET_DIR, build.target-dir).
+# Cargo の出力のフォルダ（設定がどこに置いていても。CARGO_TARGET_DIR、build.target-dir）。
 target=$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 [ -n "$target" ] || { echo "build.sh: cargo metadata gave no target directory" >&2; exit 1; }
 if [ -n "$check" ]; then
@@ -38,7 +38,7 @@ fi
 echo "== build libreminedog_linux.so"
 cargo build --locked --release -p reminedog-hook-linux
 lib=$target/release/libreminedog_linux.so
-# The JVM looks the entry point up by name.
+# JVM は入口を名前で引く。
 if command -v nm >/dev/null && ! nm -D --defined-only "$lib" | grep -qw Agent_OnLoad; then
   echo "build.sh: $lib does not export Agent_OnLoad" >&2
   exit 1

@@ -2,52 +2,52 @@ package reminedog.installer
 
 import java.nio.file.Path
 
-/** A launcher's data folder (the one with its settings and instances). */
+/** ランチャーのデータのフォルダ（設定とインスタンスがあるもの）。 */
 abstract class Launcher(val label: String, val root: Path) {
-    /** The instances (profiles) of this launcher, read from its files now. */
+    /** このランチャーのインスタンス（プロファイル）。今そのファイルから読む。 */
     abstract fun instances(): List<Instance>
 
     /**
-     * Whether the launcher seems to be running. A running launcher keeps its settings in memory
-     * and writes them back later, which would undo our changes.
+     * ランチャーが動いていそうか。動いているランチャーは設定をメモリに持って後で書き戻すので、
+     * こちらの変更を元に戻してしまう。
      */
     abstract fun isRunning(processes: Processes): Boolean
 
-    /** Identifies the launcher's files, to avoid listing the same folder twice. */
+    /** ランチャーのファイルを識別する。同じフォルダを 2 回並べないため。 */
     open val key: String
         get() = "$label|" + root.toAbsolutePath().normalize().toString().lowercase()
 }
 
 /**
- * An instance (or a profile of the official launcher) whose JVM arguments can load reminedog.
- * [place] tells it apart from the launcher's other instances (its folder, or the profile's id):
- * names can repeat.
+ * JVM 引数で reminedog を読み込めるインスタンス（か公式ランチャーのプロファイル）。
+ * [place] はランチャーのほかのインスタンスと見分けるもの（フォルダかプロファイルの id）：
+ * 名前は重なりうる。
  */
 abstract class Instance(val launcher: Launcher, val name: String, val detail: String, val place: String) {
-    /** The JVM arguments the launcher would start this instance with now. */
+    /** ランチャーが今このインスタンスを起動するときの JVM 引数。 */
     abstract fun read(): Args
 
-    /** Makes the instance load reminedog from [dllPath]. */
+    /** インスタンスが [dllPath] から reminedog を読み込むようにする。 */
     abstract fun install(dllPath: String): Change
 
-    /** Takes reminedog out of the instance's JVM arguments. */
+    /** インスタンスの JVM 引数から reminedog を外す。 */
     abstract fun remove(): Change
 
     val title: String get() = "${launcher.label} / $name"
 
-    /** Identifies the instance among every launcher's. */
+    /** すべてのランチャーのインスタンスの中でインスタンスを識別する。 */
     val key: String get() = launcher.key + "|" + place
 }
 
 /**
- * The JVM arguments of an instance. [shared] means they come from the launcher-wide settings
- * (the instance does not override them), so changing them would change other instances too.
+ * インスタンスの JVM 引数。[shared] は、ランチャー全体の設定から来ている（インスタンスが上書き
+ * していない）ことを表し、変えるとほかのインスタンスも変わる。
  */
 class Args(val text: String, val shared: Boolean) {
     val agents: List<FoundAgent> get() = AgentArg.find(text)
 }
 
-/** What install or remove did, for the log. */
+/** インストールか取り外しでしたこと（ログ用）。 */
 sealed class Change(val message: String) {
     class Installed(args: String) : Change("追加しました（JVM 引数：$args）")
 

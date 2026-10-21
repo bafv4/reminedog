@@ -1,16 +1,16 @@
-# Builds the Windows agent (reminedog.dll and its .pdb) in release and checks it with
-# ci/check-dll.ps1, optionally with the installer's jar, into dist\windows.
-# Needs Rust and Visual Studio Build Tools (C++ desktop development); the installer needs a JDK
-# 17 or later. Runs in Windows PowerShell 5.1 and PowerShell 7.
+﻿# Windows のエージェント（reminedog.dll とその .pdb）をリリースでビルドして ci/check-dll.ps1 で
+# 確かめ、必要ならインストーラーの jar と一緒に dist\windows に出す。
+# Rust と Visual Studio Build Tools（C++ によるデスクトップ開発）が要る。インストーラーには JDK 17
+# 以降が要る。Windows PowerShell 5.1 と PowerShell 7 で動く。
 #
-# Usage: scripts\windows\build.ps1 [-Check] [-Installer] [-Out DIR] [-InstallDir DIR]
-#   -Check       first fmt (check only), clippy (warnings are errors) and the tests, as the CI
-#   -Installer   also build the installer (its tests and reminedog-installer.jar)
-#   -Out         where the files go (default: dist\windows in the repository)
-#   -InstallDir  also copy them there, e.g. C:\reminedog for -agentpath:C:\reminedog\reminedog.dll
-#                (fails while a game has the DLL loaded)
-# REMINEDOG_VERSION, when set, is the version in the DLL and the jar (as the release workflow
-# sets it); the library keeps its plain name, the jar is reminedog-installer-<version>.jar.
+# 使い方：scripts\windows\build.ps1 [-Check] [-Installer] [-Out DIR] [-InstallDir DIR]
+#   -Check       CI と同じく、先に fmt（確認だけ）、clippy（警告はエラー）、テスト
+#   -Installer   インストーラーもビルドする（そのテストと reminedog-installer.jar）
+#   -Out         ファイルの出力先（既定：リポジトリの dist\windows）
+#   -InstallDir  そこにもコピーする。例：-agentpath:C:\reminedog\reminedog.dll なら C:\reminedog
+#                （ゲームが DLL を読み込んでいる間は失敗する）
+# REMINEDOG_VERSION を設定すれば、それが DLL と jar の版になる（リリースのワークフローと同じ）。
+# ライブラリの名前はそのまま、jar は reminedog-installer-<version>.jar。
 param(
     [switch] $Check,
     [switch] $Installer,
@@ -22,7 +22,7 @@ $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 if (-not $Out) { $Out = Join-Path $repo 'dist\windows' }
 
-# Runs a native command and stops when it fails.
+# ネイティブのコマンドを動かし、失敗したら止まる。
 function Invoke-Step([string] $Name, [scriptblock] $Command) {
     Write-Host "== $Name"
     & $Command
@@ -38,7 +38,7 @@ try {
     }
 
     Invoke-Step 'build reminedog.dll' { cargo build --locked --release -p reminedog-hook-win }
-    # Cargo's output folder, wherever its settings put it (CARGO_TARGET_DIR, build.target-dir).
+    # Cargo の出力のフォルダ（設定がどこに置いていても。CARGO_TARGET_DIR、build.target-dir）。
     $metadata = cargo metadata --format-version 1 --no-deps
     if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed (exit $LASTEXITCODE)" }
     $target = ($metadata | ConvertFrom-Json).target_directory

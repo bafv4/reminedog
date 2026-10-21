@@ -1,13 +1,13 @@
 name: Release
 
-# Run by hand from the Actions tab on main, with a version, once the CI passed on that commit.
-# Builds the DLL and the installer with that version in their names and inside them (the
-# DLL's version resource and log, the installer's manifest and window title), and creates a
-# draft release v<version> on the commit it ran on. Publishing the draft (on GitHub) creates
-# the tag. The version numbers in the repository (Cargo.toml) are not changed.
+# main で Actions のタブから版を入れて手で動かす。そのコミットで CI が通ってから。
+# DLL とインストーラーを、その版を名前と中身（DLL のバージョン情報のリソースとログ、
+# インストーラーの manifest とウィンドウのタイトル）に入れてビルドし、動かしたコミットに
+# 下書きのリリース v<version> を作る。下書きを（GitHub で）公開するとタグができる。
+# リポジトリの版の番号（Cargo.toml）は変えない。
 #
-# What is released is built without caches, with the CI's pinned toolchain and the locked
-# dependencies. Actions are pinned to full commit hashes (the tag in the comment).
+# リリースするものは、キャッシュなしで、CI の固定したツールチェーンと固定した依存でビルドする。
+# アクションはコミットのハッシュで固定する（タグはコメントに）。
 on:
   workflow_dispatch:
     inputs:
@@ -25,7 +25,7 @@ concurrency:
 
 env:
   VERSION: ${{ inputs.version }}
-  # As in ci.yml.
+  # ci.yml と同じ。
   RUST_TOOLCHAIN: "1.99.0"
 
 jobs:
@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      # To find the CI's run on this commit.
+      # このコミットの CI の実行を探すため。
       actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -53,7 +53,7 @@ jobs:
             echo "::error::releases are made from main, not $GITHUB_REF"
             exit 1
           fi
-          # Only "not found" lets the release go on; any other failure stops it.
+          # 「見つからない」だけはリリースを続ける。ほかの失敗では止める。
           if output=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" 2>&1); then
             echo "::error::the tag v$VERSION exists already"
             exit 1
@@ -61,7 +61,7 @@ jobs:
             echo "::error::cannot look up the tag v$VERSION: $output"
             exit 1
           fi
-          # A published release (drafts are checked again by the job that can see them).
+          # 公開済みのリリース（下書きは、それを見られるジョブがもう一度確かめる）。
           if output=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" 2>&1); then
             echo "::error::a release v$VERSION exists already"
             exit 1
@@ -96,7 +96,7 @@ jobs:
           rustc -Vv
           "``````text`n$(rustc -Vv | Out-String)``````" >> $env:GITHUB_STEP_SUMMARY
 
-      # Clippy and the tests ran in the CI on this commit (the check job asks for that).
+      # clippy とテストは、このコミットの CI で動いた（check のジョブがそれを求める）。
       - name: Build agent DLL
         env:
           REMINEDOG_VERSION: ${{ env.VERSION }}
@@ -137,7 +137,7 @@ jobs:
           distribution: temurin
           java-version: "21"
       - name: Build and test
-        # Through sh: a commit from Windows may not carry gradlew's executable bit.
+        # sh を通す：Windows からのコミットには gradlew の実行のビットがないことがある。
         run: sh ./gradlew build --no-daemon "-PreminedogVersion=$VERSION"
       - name: Check the jar's version
         run: |
@@ -157,7 +157,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
-      # Build provenance for the files (public repositories only).
+      # ファイルのビルドの来歴（公開のリポジトリだけ）。
       id-token: write
       attestations: write
     steps:
@@ -169,7 +169,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Drafts are only listed for a token that can write the repository, as this job's.
+          # 下書きは、このジョブのものと同じく、リポジトリに書けるトークンにだけ一覧に出る。
           found=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName \
             --jq "[.[] | select(.tagName == \"v$VERSION\")] | length")
           if [ "$found" -ne 0 ]; then
@@ -185,7 +185,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -l dist
-          # A version like 1.2.0-beta.1 is a pre-release, which the installer's "latest" skips.
+          # 1.2.0-beta.1 のような版はプレリリースで、インストーラーの「最新」は飛ばす。
           prerelease=()
           if [[ "$VERSION" == *-* ]]; then prerelease=(--prerelease); fi
           gh release create "v$VERSION" \

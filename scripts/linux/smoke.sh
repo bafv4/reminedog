@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Inside the Linux container (scripts/linux/run.sh): run the LWJGL smoke harness (ci/smoke) on
-# Xvfb with Mesa llvmpipe, optionally with an agent library loaded via -agentpath:.
+# Linux のコンテナ（scripts/linux/run.sh）の中で：Mesa の llvmpipe の Xvfb で LWJGL のスモークの
+# テスト用プログラム（ci/smoke）を動かす。必要ならエージェントのライブラリを -agentpath: で読み込む。
 #
-# Usage: smoke.sh [--agent SO] [--agent-options STR] [--lwjgl VERSION] [--sdl]
+# 使い方：smoke.sh [--agent SO] [--agent-options STR] [--lwjgl VERSION] [--sdl]
 #                 [--xdotool CMDS] [--xdotool-delay S] [-- ARGS...]
-#   --agent SO           load SO with -agentpath:
-#   --agent-options STR  options passed to Agent_OnLoad (-agentpath:SO=STR)
-#   --lwjgl VERSION      LWJGL version (default 3.3.3; --sdl needs 3.4.0 or later)
-#   --sdl                run SmokeSdl (an SDL3 window, like Minecraft 26.x) instead of Smoke
-#   --xdotool CMDS       once the window is up (after --xdotool-delay seconds, default 3),
-#                        focus it and run "xdotool CMDS", e.g. "keydown z sleep 1 keyup z"
-#   ARGS                 the harness's own arguments (default: --seconds=5 --mc)
-# The run directory (game dir, output, the agent's log) is /target/smoke-run, on the
-# container's volume so it outlives the container: read it with, for example,
+#   --agent SO           SO を -agentpath: で読み込む
+#   --agent-options STR  Agent_OnLoad に渡すオプション（-agentpath:SO=STR）
+#   --lwjgl VERSION      LWJGL の版（既定は 3.3.3。--sdl には 3.4.0 以降が要る）
+#   --sdl                Smoke の代わりに SmokeSdl（Minecraft 26.x と同じく SDL3 のウィンドウ）を動かす
+#   --xdotool CMDS       ウィンドウが出たら（--xdotool-delay 秒後。既定は 3）、そこにフォーカスを
+#                        移して "xdotool CMDS" を動かす。例："keydown z sleep 1 keyup z"
+#   ARGS                 テスト用プログラム自身の引数（既定：--seconds=5 --mc）
+# 実行のフォルダ（ゲームのフォルダ、出力、エージェントのログ）は /target/smoke-run。コンテナの
+# ボリュームにあるので、コンテナが消えても残る。例えばこう読む：
 #   scripts/linux/run.sh cat /target/smoke-run/reminedog/reminedog.log
-# Environment: SMOKE_SRC (the repository, default /src), SMOKE_CACHE (jars and classes,
-# default /target/smoke-cache), SMOKE_RUN (the run directory), SMOKE_TIMEOUT (seconds, 120).
+# 環境変数：SMOKE_SRC（リポジトリ。既定は /src）、SMOKE_CACHE（jar とクラス。既定は
+# /target/smoke-cache）、SMOKE_RUN（実行のフォルダ）、SMOKE_TIMEOUT（秒。120）。
 set -euo pipefail
 
 agent='' agent_options='' lwjgl=3.3.3 harness=Smoke xdotool='' delay=3
@@ -53,7 +53,7 @@ if [ -n "$agent" ]; then
   java_args+=("-agentpath:$agent${agent_options:+=$agent_options}")
 fi
 
-# An X server of our own, so xdotool can reach the window.
+# xdotool がウィンドウに届くように、自前の X サーバー。
 export DISPLAY=:99
 Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp >/dev/null 2>&1 &
 xvfb=$!
@@ -65,14 +65,15 @@ LIBGL_ALWAYS_SOFTWARE=1 timeout "${SMOKE_TIMEOUT:-120}" \
 java=$!
 if [ -n "$xdotool" ]; then
   sleep "$delay"
-  # GLFW's window by its name, to focus it (there is no window manager). SDL3 takes the focus
-  # itself, and names its windows in _NET_WM_NAME only, which xdotool does not read.
+  # フォーカスを移すために、GLFW のウィンドウを名前で探す（ウィンドウマネージャがない）。SDL3 は
+  # 自分でフォーカスを取り、ウィンドウの名前を _NET_WM_NAME にしか付けないので、xdotool からは
+  # 見えない。
   window=$(xdotool search --onlyvisible --name 'reminedog smoke' 2>/dev/null | tail -n 1) || true
   if [ -n "$window" ]; then
     timeout 5 xdotool windowfocus "$window" || true
   fi
   sleep 0.3
-  # shellcheck disable=SC2086 # the commands are word-split on purpose
+  # shellcheck disable=SC2086 # コマンドはわざと単語に分ける
   timeout 60 xdotool $xdotool || echo "smoke.sh: xdotool failed ($?)" >&2
 fi
 status=0

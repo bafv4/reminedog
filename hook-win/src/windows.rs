@@ -1,4 +1,4 @@
-//! What the agent needs from Windows ([`reminedog_agent::os::Os`]).
+//! エージェントが Windows に頼ること（[`reminedog_agent::os::Os`]）。
 
 use std::ffi::{CStr, c_void};
 
@@ -35,12 +35,12 @@ impl Os for Windows {
         Some(SdlProperty::Pointer(c"SDL.window.win32.hwnd"))
     }
 
-    /// The window's device context. GLFW's and SDL's window classes have CS_OWNDC, so this is
-    /// the very DC the game's context renders to and the swap presents, whichever context is
-    /// current right now (neither swap function requires the window's own context to be).
+    /// ウィンドウのデバイスコンテキスト。GLFW と SDL のウィンドウのクラスは CS_OWNDC を持つので、
+    /// 今どのコンテキストが今のものでも（どちらのスワップの関数も、ウィンドウ自身のコンテキストが
+    /// 今のものであることを求めない）、これはゲームのコンテキストが描き、スワップが見せる DC そのもの。
     fn window_surface(&self, native_window: Option<usize>) -> usize {
         if let Some(hwnd) = native_window {
-            // SAFETY: a valid window handle; the DC of a CS_OWNDC window needs no release.
+            // SAFETY: 有効なウィンドウのハンドル。CS_OWNDC のウィンドウの DC は解放しなくてよい。
             let dc = unsafe { GetDC(hwnd as HWND) };
             if !dc.is_null() {
                 return dc as usize;
@@ -49,10 +49,10 @@ impl Os for Windows {
         self.current_gl().0
     }
 
-    /// The window as the OS has it now: a minimized window's GetDC hands out a new temporary
-    /// DC on every call, and SDL3's flag lags until the game polls.
+    /// OS が今持っているウィンドウ：最小化したウィンドウの GetDC は呼ぶたびに新しい一時的な DC を
+    /// 返し、SDL3 のフラグはゲームがポーリングするまで遅れる。
     fn window_minimized(&self, native_window: Option<usize>) -> Option<bool> {
-        // SAFETY: a window handle (a stale one only answers false).
+        // SAFETY: ウィンドウのハンドル（古いものは false を答えるだけ）。
         native_window.map(|hwnd| unsafe { IsIconic(hwnd as HWND) } != 0)
     }
 

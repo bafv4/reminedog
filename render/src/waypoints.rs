@@ -1,6 +1,5 @@
-//! Waypoints in the overlay: what the platform hook passes in and gets back, the menu
-//! section, the notices above the crosshair, and the Japanese texts for directions and
-//! distances.
+//! オーバーレイの中のウェイポイント：各 OS のフックが渡すものと受け取るもの、メニューの欄、
+//! 照準の上の通知、方角と距離の日本語の文言。
 
 use std::sync::Arc;
 
@@ -10,63 +9,63 @@ use reminedog_core::{Cardinal, Guide, Location, Waypoint, guide};
 
 use crate::overlay::Hotkeys;
 
-/// The world the player is in, for the menu.
+/// メニューのための、プレイヤーがいるワールド。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum WorldLabel {
-    /// At the title screen: no world entered yet, or the integrated server stopped.
+    /// タイトル画面：まだワールドに入っていないか、内蔵サーバーが止まった。
     #[default]
     NotInWorld,
-    /// In a world whose name could not be found out.
+    /// 名前が分からなかったワールドの中。
     Unknown,
-    /// A singleplayer world, by its display name.
+    /// 表示名でのシングルプレイのワールド。
     Singleplayer(String),
-    /// A server, by its address.
+    /// アドレスでのサーバー。
     Multiplayer(String),
 }
 
-/// The waypoint state the platform hook shows in the menu.
+/// 各 OS のフックがメニューに出すウェイポイントの状態。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WaypointView {
     pub world: WorldLabel,
-    /// On a server: the label that tells apart worlds behind its address (a network's lobby
-    /// and survival), `None` for the address alone.
+    /// サーバーで：そのアドレスの裏のワールド（ネットワークのロビーとサバイバル）を見分けるラベル。
+    /// アドレスだけなら `None`。
     pub label: Option<String>,
-    /// Shared with the platform hook, which builds it again only when the waypoints change.
+    /// 各 OS のフックと共有する。フックは、ウェイポイントが変わったときだけ作り直す。
     pub waypoints: Arc<[Waypoint]>,
-    /// The destination.
+    /// 目的地。
     pub selected: Option<u64>,
-    /// The player's last known position.
+    /// 最後に分かったプレイヤーの位置。
     pub location: Option<Location>,
-    /// How old `location` is, in seconds.
+    /// `location` の古さ（秒）。
     pub location_age: Option<f64>,
-    /// The game has captured the cursor (no Minecraft screen is open).
+    /// ゲームがカーソルを捕まえている（Minecraft の画面は開いていない）。
     pub playing: bool,
-    /// A position request is in flight.
+    /// 位置の要求が途中。
     pub busy: bool,
-    /// The game refused F3+C in this world; requests wait for the menu's retry button.
+    /// このワールドではゲームが F3+C を断った。要求はメニューの試し直しのボタンを待つ。
     pub blocked: bool,
-    /// Warnings to show (the waypoint file, Minecraft's key bindings).
+    /// 出す警告（ウェイポイントのファイル、Minecraft のキーの割り当て）。
     pub problems: Vec<String>,
 }
 
-/// A message shown above the crosshair for a few seconds, with or without the menu.
+/// メニューがあってもなくても、照準の上に数秒出すメッセージ。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Notice {
     pub text: String,
-    /// Shown in the warning colour.
+    /// 警告の色で出す。
     pub warn: bool,
     pub seconds: f64,
-    /// An arrow before the text, turned this many degrees right of up (see [`turn_to`]).
+    /// 文字の前の矢印。上から右にこの角度だけ回す（[`turn_to`] を参照）。
     pub arrow: Option<f32>,
-    /// A notice of the same kind still showing is replaced, not stacked under this one (the
-    /// way to the destination from an older position, an older position of a video).
+    /// まだ出ている同じ種類の通知は、この下に積まずに置き換える（古い位置からの目的地への道、
+    /// 動画の古い位置）。
     pub replaces: Option<&'static str>,
 }
 
 impl Notice {
-    /// The kind of the way to the destination.
+    /// 目的地への道の種類。
     pub const NAVIGATION: &'static str = "navigation";
-    /// The kind of a video's state.
+    /// 動画の状態の種類。
     pub const MEDIA: &'static str = "media";
 
     pub fn new(text: impl Into<String>, warn: bool, seconds: f64) -> Self {
@@ -79,50 +78,49 @@ impl Notice {
         }
     }
 
-    /// Replaces a notice of `kind` that still shows.
+    /// まだ出ている `kind` の通知を置き換える。
     pub fn replacing(mut self, kind: &'static str) -> Self {
         self.replaces = Some(kind);
         self
     }
 }
 
-/// What the menu asks the platform hook to do with the waypoints.
+/// メニューが各 OS のフックにウェイポイントについて頼むこと。
 #[derive(Clone, Debug, PartialEq)]
 pub enum WaypointCommand {
-    /// Record a waypoint at the player's position.
+    /// プレイヤーの位置にウェイポイントを記録する。
     Record,
-    /// Refresh the player's position.
+    /// プレイヤーの位置を更新する。
     Refresh,
-    /// Choose the destination; `None` clears it.
+    /// 目的地を選ぶ。`None` なら外す。
     Select(Option<u64>),
     Rename {
         id: u64,
         name: String,
     },
     Delete(u64),
-    /// Allow F3+C again in the world where the game refused it.
+    /// ゲームが F3+C を断ったワールドで、また F3+C を許す。
     Unblock,
-    /// On a server: keep the waypoints under this label from now on (`None`: the address
-    /// alone).
+    /// サーバーで：これからはこのラベルの下にウェイポイントを置く（`None`：アドレスだけ）。
     SetLabel(Option<String>),
 }
 
-/// Longest waypoint name the menu lets the user type, in characters.
+/// メニューで打てるウェイポイントの名前のいちばん長い文字数。
 const NAME_LIMIT: usize = 64;
-/// Longest label of a server's world, in characters.
+/// サーバーのワールドのラベルのいちばん長い文字数。
 const LABEL_LIMIT: usize = 32;
-/// A second click on 「もう一度押すと削除」 closer than this (seconds) is the same double
-/// click, not a confirmation.
+/// 「もう一度押すと削除」の 2 回目のクリックがこれ（秒）より近ければ、確認ではなく同じダブル
+/// クリック。
 const CONFIRM_DELAY: f64 = 0.5;
-/// Height of the waypoint list before it scrolls, in points.
+/// スクロールが始まるまでのウェイポイントの一覧の高さ（ポイント）。
 const LIST_HEIGHT: f32 = 220.0;
-/// Closer than this (horizontally, in blocks) the player is at the waypoint.
+/// これより近ければ（水平にブロックで）、プレイヤーはウェイポイントにいる。
 const NEAR: f64 = 1.0;
-/// Arrows: on the left of the screen, and beside a line of text (points).
+/// 矢印：画面の左のものと、文字の行の横のもの（ポイント）。
 const ARROW_HUD: f32 = 36.0;
 const ARROW_TEXT: f32 = 16.0;
 
-/// The eight directions in Japanese.
+/// 日本語の 8 方位。
 pub fn cardinal_name(cardinal: Cardinal) -> &'static str {
     match cardinal {
         Cardinal::N => "北",
@@ -136,8 +134,8 @@ pub fn cardinal_name(cardinal: Cardinal) -> &'static str {
     }
 }
 
-/// The vanilla dimensions in Japanese (with or without the `minecraft:` namespace); other
-/// ids as they are.
+/// 日本語のバニラのディメンション（`minecraft:` の namespace があってもなくても）。ほかの id は
+/// そのまま。
 pub fn dimension_label(id: &str) -> String {
     let full = if id.contains(':') {
         id.to_owned()
@@ -152,7 +150,7 @@ pub fn dimension_label(id: &str) -> String {
     }
 }
 
-/// `128 m` below a kilometre, `1.3 km` from there.
+/// 1 km 未満は `128 m`、そこからは `1.3 km`。
 pub fn format_distance(meters: f64) -> String {
     let rounded = meters.round();
     if rounded < 1000.0 {
@@ -162,13 +160,13 @@ pub fn format_distance(meters: f64) -> String {
     }
 }
 
-/// Rounded coordinates, e.g. `12, 64, -7`.
+/// 丸めた座標（例：`12, 64, -7`）。
 pub fn format_xyz(x: f64, y: f64, z: f64) -> String {
     format!("{}, {}, {}", round(x), round(y), round(z))
 }
 
-/// Direction and distance to a waypoint for a notice, with the turn from where the player
-/// looked, e.g. `地点 3：北東 128 m（右に 35°・12 m 上）`.
+/// 通知のためのウェイポイントへの方角と距離。プレイヤーが見ていた向きからの回転付き。
+/// 例：`地点 3：北東 128 m（右に 35°・12 m 上）`。
 pub fn navigation_text(name: &str, from: &Location, wp: &Waypoint) -> String {
     let (bearing, converted) = match guide(from, &wp.dimension, [wp.x, wp.y, wp.z]) {
         Guide::Bearing { bearing, converted } => (bearing, converted),
@@ -203,8 +201,8 @@ pub fn navigation_text(name: &str, from: &Location, wp: &Waypoint) -> String {
     text
 }
 
-/// Direction and distance to a waypoint for the menu's list, without the turn (the player
-/// has looked around since the position was taken), e.g. `北東 128 m・12 m 上`.
+/// メニューの一覧のためのウェイポイントへの方角と距離。回転なし（位置を取ってからプレイヤーは
+/// 見回している）。例：`北東 128 m・12 m 上`。
 pub fn row_guidance(from: &Location, wp: &Waypoint) -> String {
     let (bearing, converted) = match guide(from, &wp.dimension, [wp.x, wp.y, wp.z]) {
         Guide::Bearing { bearing, converted } => (bearing, converted),
@@ -227,9 +225,9 @@ pub fn row_guidance(from: &Location, wp: &Waypoint) -> String {
     text
 }
 
-/// The turn from where the player looked when the position was taken to a waypoint, in
-/// degrees (positive = right), for an arrow; `None` in another dimension or at the waypoint.
-/// The player's view is only known from F3+C, so the arrow changes only with a new position.
+/// 位置を取ったときにプレイヤーが見ていた方向から、ウェイポイントへの回転の角度（正 = 右）。
+/// 矢印のため。別のディメンションやウェイポイントにいるなら `None`。プレイヤーの向きは F3+C から
+/// しか分からないので、矢印は新しい位置でしか変わらない。
 pub fn turn_to(from: &Location, wp: &Waypoint) -> Option<f32> {
     match guide(from, &wp.dimension, [wp.x, wp.y, wp.z]) {
         Guide::Bearing { bearing, .. } if bearing.horizontal_distance >= NEAR => {
@@ -239,12 +237,11 @@ pub fn turn_to(from: &Location, wp: &Waypoint) -> Option<f32> {
     }
 }
 
-/// An arrow's head (a triangle) and shaft (a quad) in a `size` square around `center`,
-/// pointing `turn` degrees clockwise from up. Both are convex and clockwise, as egui fills
-/// them.
+/// `center` の周りの `size` の四角の中の、矢印の頭（三角）と軸（四角）。上から時計回りに
+/// `turn` 度向く。どちらも凸で時計回り（egui がそう塗るため）。
 fn arrow_shape(center: egui::Pos2, size: f32, turn: f32) -> ([egui::Pos2; 3], [egui::Pos2; 4]) {
     let (sin, cos) = turn.to_radians().sin_cos();
-    // Screen y grows downwards, so this rotation turns clockwise on screen.
+    // 画面の y は下向きに増えるので、この回転は画面で時計回りになる。
     let at = |x: f32, y: f32| center + egui::vec2(x * cos - y * sin, x * sin + y * cos) * size;
     (
         [at(0.0, -0.5), at(0.38, -0.02), at(-0.38, -0.02)],
@@ -257,7 +254,7 @@ fn arrow_shape(center: egui::Pos2, size: f32, turn: f32) -> ([egui::Pos2; 3], [e
     )
 }
 
-/// An arrow in a `size` square of `ui`, turned `turn` degrees right of up.
+/// `ui` の `size` の四角の中の、上から右に `turn` 度回した矢印。
 fn arrow(ui: &mut egui::Ui, turn: f32, size: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
     paint_arrow(ui, rect.center(), size, turn);
@@ -280,11 +277,11 @@ fn paint_arrow(ui: &egui::Ui, center: egui::Pos2, size: f32, turn: f32) {
 }
 
 fn round(v: f64) -> i64 {
-    // `as` saturates and turns -0.0 into 0.
+    // `as` は飽和し、-0.0 を 0 にする。
     v.round() as i64
 }
 
-/// `（ネザーでは 16, -1）`: a waypoint's x and z in the player's dimension.
+/// `（ネザーでは 16, -1）`：プレイヤーのいるディメンションでのウェイポイントの x と z。
 fn converted_text(from: &Location, x: f64, z: f64) -> String {
     format!(
         "（{}では {}, {}）",
@@ -294,7 +291,7 @@ fn converted_text(from: &Location, x: f64, z: f64) -> String {
     )
 }
 
-/// Which way to turn; positive = right.
+/// どちらに回るか。正 = 右。
 fn turn_text(relative_yaw: f32) -> String {
     let degrees = relative_yaw.abs();
     if degrees < 10.0 {
@@ -307,7 +304,7 @@ fn turn_text(relative_yaw: f32) -> String {
     }
 }
 
-/// `12 m 上` / `12 m 下`, or nothing within 3 blocks.
+/// `12 m 上`／`12 m 下`。3 ブロック以内ならなし。
 fn height_text(dy: f64) -> Option<String> {
     (dy.abs() >= 3.0).then(|| {
         let side = if dy > 0.0 { "上" } else { "下" };
@@ -343,7 +340,7 @@ fn location_text(location: Option<&Location>, age: Option<f64>) -> String {
     )
 }
 
-/// The notices on screen, oldest first.
+/// 画面の通知（古い順）。
 #[derive(Default)]
 pub(crate) struct NoticeList {
     shown: Vec<Shown>,
@@ -354,18 +351,18 @@ struct Shown {
     notice: Notice,
     serial: u64,
     until: f64,
-    /// Added this frame (egui has not measured it yet).
+    /// このフレームで足した（egui はまだ測っていない）。
     fresh: bool,
 }
 
 impl NoticeList {
     const MAX: usize = 3;
-    /// Distinct egui areas cycled through; more than `MAX`, so shown notices never share one.
+    /// 順に使う別々の egui の領域。`MAX` より多いので、出ている通知が領域を共有することはない。
     const AREAS: u64 = 8;
 
-    /// Drops the expired notices and adds `new` ones for their `seconds` from `now`, keeping
-    /// the newest three. A new notice replaces one of its kind ([`Notice::replaces`]); one
-    /// with the same text as a notice still showing only keeps that one longer.
+    /// 期限の切れた通知を捨て、新しい通知を `now` から `seconds` の間足し、新しい 3 つを残す。
+    /// 新しい通知は同じ種類のものを置き換える（[`Notice::replaces`]）。まだ出ている通知と同じ文字の
+    /// ものは、それを長く残すだけ。
     pub(crate) fn update(&mut self, new: Vec<Notice>, now: f64) {
         self.shown.retain(|shown| shown.until > now);
         for shown in &mut self.shown {
@@ -401,8 +398,8 @@ impl NoticeList {
     }
 }
 
-/// The notices, stacked downwards from about a fifth of the screen: under boss bars and the
-/// player list, above the crosshair. On top of the menu too.
+/// 画面の上から約 5 分の 1 から下に積む通知：ボスバーとプレイヤーの一覧の下、照準の上。
+/// メニューの上にも。
 pub(crate) fn draw_notices(ctx: &egui::Context, notices: &NoticeList) {
     const TOP: f32 = 0.22;
     const GAP: f32 = 6.0;
@@ -437,9 +434,8 @@ pub(crate) fn draw_notices(ctx: &egui::Context, notices: &NoticeList) {
     }
 }
 
-/// The destination on the left of the screen while the menu is closed: its name and place,
-/// and the way there from the last known position, with an arrow relative to where the
-/// player looked then.
+/// メニューを閉じている間の、画面の左の目的地：名前と場所、最後に分かった位置からの道と、
+/// そのとき見ていた方向に対する矢印。
 pub(crate) fn draw_destination(ctx: &egui::Context, view: &WaypointView, keys: &Hotkeys) {
     let Some(wp) = view
         .selected
@@ -452,13 +448,12 @@ pub(crate) fn draw_destination(ctx: &egui::Context, view: &WaypointView, keys: &
         .anchor(egui::Align2::LEFT_CENTER, [12.0, 0.0])
         .interactable(false)
         .show(ctx, |ui| {
-            // The area keeps its first width; lines must not wrap when they get longer (an
-            // arrow or a longer name comes later).
+            // 領域は最初の幅を保つ。行が長くなっても折り返してはならない（矢印や長い名前は後で来る）。
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             frame.show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let turn = view.location.as_ref().and_then(|from| turn_to(from, wp));
-                    // Room for the arrow, which is drawn once the lines' height is known.
+                    // 矢印のための場所。矢印は、行の高さが分かってから描く。
                     let slot = turn.map(|_| {
                         ui.allocate_exact_size(egui::vec2(ARROW_HUD, 0.0), egui::Sense::hover())
                             .0
@@ -496,18 +491,17 @@ fn destination_lines(ui: &mut egui::Ui, view: &WaypointView, wp: &Waypoint, keys
     }
 }
 
-/// The menu's own state in the waypoint section. Cleared when the menu closes and when the
-/// world changes, so a rename or delete never lands on another world's waypoint with the
-/// same id.
+/// ウェイポイントの欄でのメニュー自身の状態。メニューを閉じたときとワールドが変わったときに
+/// 消すので、名前の変更や削除が、同じ id の別のワールドのウェイポイントに当たることはない。
 #[derive(Default)]
 pub(crate) struct WaypointMenu {
-    /// The waypoint being renamed, and the name typed so far.
+    /// 名前を変えているウェイポイントと、ここまでに打った名前。
     renaming: Option<(u64, String)>,
-    /// Put the cursor in the name field on the next frame.
+    /// 次のフレームで、名前の欄にカーソルを置く。
     focus_name: bool,
-    /// The waypoint whose delete button was pressed once, and when (seconds).
+    /// 削除のボタンを 1 回押したウェイポイントと、その時刻（秒）。
     confirm_delete: Option<(u64, f64)>,
-    /// The server's world label being edited.
+    /// 書き換えているサーバーのワールドのラベル。
     label: Option<String>,
     world: WorldLabel,
 }
@@ -531,7 +525,7 @@ impl WaypointMenu {
     }
 }
 
-/// The 「ウェイポイント」 section of the menu.
+/// メニューの「ウェイポイント」の欄。
 pub(crate) fn waypoint_section(
     ui: &mut egui::Ui,
     menu: &mut WaypointMenu,
@@ -564,7 +558,7 @@ pub(crate) fn waypoint_section(
             label_row(ui, menu, view, commands);
         }
     }
-    // The menu keeps the game's cursor captured, so these work with it open.
+    // メニューはゲームのカーソルを捕まえたままにするので、これらはメニューを開いていても働く。
     let usable = view.playing && !view.busy;
     ui.horizontal(|ui| {
         if ui
@@ -617,9 +611,8 @@ pub(crate) fn waypoint_section(
         });
 }
 
-/// A server's world label: what it is, and a field to change it. Worlds behind the same
-/// address (a network's lobby and survival) cannot be told apart from the log; a label keeps
-/// their waypoints apart.
+/// サーバーのワールドのラベル：それが何かと、変える欄。同じアドレスの裏のワールド（ネットワークの
+/// ロビーとサバイバル）はログから見分けられない。ラベルがそれぞれのウェイポイントを分ける。
 fn label_row(
     ui: &mut egui::Ui,
     menu: &mut WaypointMenu,
@@ -718,7 +711,7 @@ fn waypoint_row(
         };
         if ui.button(label).clicked() {
             match confirming {
-                // The second click of a double click: not a confirmation yet.
+                // ダブルクリックの 2 回目のクリック：まだ確かめではない。
                 Some((_, at)) if now - at < CONFIRM_DELAY => {}
                 Some(_) => {
                     commands.push(WaypointCommand::Delete(wp.id));
@@ -730,8 +723,8 @@ fn waypoint_row(
     });
 }
 
-/// The name field of the waypoint being renamed. Enter or 「決定」 commits (not with an
-/// empty name), 「取り消し」 cancels; Esc closes the whole menu, which cancels too.
+/// 名前を変えているウェイポイントの名前の欄。Enter か「決定」で確定し（名前が空なら確定しない）、
+/// 「取り消し」で取り消す。Esc はメニュー全体を閉じ、それでも取り消す。
 fn rename_row(
     ui: &mut egui::Ui,
     menu: &mut WaypointMenu,
@@ -762,7 +755,7 @@ fn rename_row(
             }
             done = true;
         } else if entered {
-            // Enter on an empty name: keep editing.
+            // 空の名前で Enter：書き換えを続ける。
             menu.focus_name = true;
         }
         if ui.button("取り消し").clicked() {
@@ -837,7 +830,7 @@ mod tests {
         assert_eq!(format_distance(0.2), "0 m");
         assert_eq!(format_distance(128.4), "128 m");
         assert_eq!(format_distance(999.4), "999 m");
-        // Would read "1000 m" when rounded.
+        // 丸めると "1000 m" になってしまう。
         assert_eq!(format_distance(999.6), "1.0 km");
         assert_eq!(format_distance(1000.0), "1.0 km");
         assert_eq!(format_distance(12_345.0), "12.3 km");
@@ -851,7 +844,7 @@ mod tests {
 
     #[test]
     fn navigation_in_the_same_dimension() {
-        // Facing south (yaw 0); the waypoint is north-east, behind on the left.
+        // 南を向いている（yaw 0）。ウェイポイントは北東で、左の後ろ。
         let from = location(OVERWORLD, 0.0, 64.0, 0.0, 0.0);
         let wp = waypoint(3, OVERWORLD, 90.0, 76.0, -90.0);
         assert_eq!(
@@ -859,13 +852,13 @@ mod tests {
             "地点 3：北東 127 m（左に 135°・12 m 上）"
         );
         assert_eq!(row_guidance(&from, &wp), "北東 127 m・12 m 上");
-        // Facing east (yaw -90): north-east is 45 degrees to the left.
+        // 東を向いている（yaw -90）：北東は 45 度左。
         let from = location(OVERWORLD, 0.0, 64.0, 0.0, -90.0);
         assert_eq!(
             navigation_text("地点 3", &from, &wp),
             "地点 3：北東 127 m（左に 45°・12 m 上）"
         );
-        // Facing north (yaw 180): north-east is 45 degrees to the right.
+        // 北を向いている（yaw 180）：北東は 45 度右。
         let from = location(OVERWORLD, 0.0, 70.0, 0.0, 180.0);
         assert_eq!(
             navigation_text("地点 3", &from, &wp),
@@ -875,11 +868,11 @@ mod tests {
 
     #[test]
     fn arrows_turn_with_the_way() {
-        // Facing south (yaw 0); the waypoint is north-east, 135 degrees to the left.
+        // 南を向いている（yaw 0）。ウェイポイントは北東で、135 度左。
         let from = location(OVERWORLD, 0.0, 64.0, 0.0, 0.0);
         let turn = turn_to(&from, &waypoint(3, OVERWORLD, 90.0, 76.0, -90.0)).unwrap();
         assert!((turn + 135.0).abs() < 1e-3, "{turn}");
-        // No arrow at the waypoint or in another dimension.
+        // ウェイポイントにいるときと別のディメンションでは矢印なし。
         assert_eq!(
             turn_to(&from, &waypoint(4, OVERWORLD, 0.5, 90.0, 0.0)),
             None
@@ -893,12 +886,12 @@ mod tests {
         let tip = |turn: f32| arrow_shape(center, 20.0, turn).0[0] - center;
         let close =
             |v: egui::Vec2, x: f32, y: f32| (v.x - x).abs() < 1e-3 && (v.y - y).abs() < 1e-3;
-        // Up is straight ahead; positive turns right (clockwise on screen, y downwards).
+        // 上はまっすぐ前。正は右に回る（画面で時計回り。y は下向き）。
         assert!(close(tip(0.0), 0.0, -10.0), "{:?}", tip(0.0));
         assert!(close(tip(90.0), 10.0, 0.0), "{:?}", tip(90.0));
         assert!(close(tip(-90.0), -10.0, 0.0), "{:?}", tip(-90.0));
         assert!(close(tip(180.0), 0.0, 10.0), "{:?}", tip(180.0));
-        // The tail stays opposite the tip.
+        // 尾は先の反対に残る。
         let (_, shaft) = arrow_shape(center, 20.0, 90.0);
         assert!(shaft[2].x < center.x && shaft[3].x < center.x);
     }
@@ -916,7 +909,7 @@ mod tests {
         assert_eq!(height_text(-2.9), None);
         assert_eq!(height_text(3.0).as_deref(), Some("3 m 上"));
         assert_eq!(height_text(-12.4).as_deref(), Some("12 m 下"));
-        // Straight ahead, level: no height.
+        // まっすぐ前で同じ高さ：高さなし。
         let from = location(OVERWORLD, 0.0, 64.0, 0.0, 0.0);
         let wp = waypoint(1, OVERWORLD, 0.0, 65.0, 50.0);
         assert_eq!(navigation_text("家", &from, &wp), "家：南 50 m（正面）");
@@ -935,7 +928,7 @@ mod tests {
 
     #[test]
     fn navigation_converts_between_overworld_and_nether() {
-        // In the nether, an overworld waypoint at (128, 70, -8) is at (16, -1).
+        // ネザーでは、オーバーワールドの (128, 70, -8) のウェイポイントは (16, -1)。
         let from = location(THE_NETHER, 16.0, 70.0, 19.0, 180.0);
         let wp = waypoint(3, OVERWORLD, 128.0, 70.0, -8.0);
         assert_eq!(
@@ -943,7 +936,7 @@ mod tests {
             "地点 3（ネザーでは 16, -1）：北 20 m（正面）"
         );
         assert_eq!(row_guidance(&from, &wp), "北 20 m（ネザーでは 16, -1）");
-        // A nether waypoint seen from the overworld.
+        // オーバーワールドから見たネザーのウェイポイント。
         let from = location(OVERWORLD, 0.0, 64.0, 0.0, 0.0);
         let wp = waypoint(4, THE_NETHER, 2.0, 40.0, 0.0);
         assert_eq!(
@@ -994,11 +987,11 @@ mod tests {
         list.update(vec![way("北 120 m"), notice("記録した", 6.0)], 0.0);
         list.update(vec![way("北 100 m")], 2.0);
         assert_eq!(list.texts(), ["記録した", "北 100 m"]);
-        // The same warning again only keeps the one showing longer.
+        // 同じ警告がまた来ても、出ているものを長く残すだけ。
         list.update(vec![notice("取得できない", 6.0)], 3.0);
         list.update(vec![notice("取得できない", 6.0)], 5.0);
         assert_eq!(list.texts(), ["記録した", "北 100 m", "取得できない"]);
-        // 9 s: the first notice (6 s) is gone, the warning kept on (until 11 s) is not.
+        // 9 秒：最初の通知（6 秒）は消え、延ばした警告（11 秒まで）は残る。
         list.update(vec![], 9.0);
         assert_eq!(list.texts(), ["北 100 m", "取得できない"]);
     }
@@ -1031,7 +1024,7 @@ mod tests {
         assert_eq!(list.texts(), ["d", "e", "f"]);
         let fresh: Vec<_> = list.shown.iter().map(|s| s.fresh).collect();
         assert_eq!(fresh, [false, false, true]);
-        // Shown notices never share an egui area.
+        // 出ている通知が egui の領域を共有することはない。
         let areas: Vec<_> = list
             .shown
             .iter()
@@ -1062,16 +1055,16 @@ mod tests {
         menu.confirm_delete = Some((2, 0.0));
         menu.sync(true, &view(world_a.clone(), &[1, 2]));
         assert!(menu.renaming.is_some() && menu.confirm_delete.is_some());
-        // The menu closed.
+        // メニューを閉じた。
         menu.sync(false, &view(world_a.clone(), &[1, 2]));
         assert!(menu.renaming.is_none() && menu.confirm_delete.is_none());
-        // Another world with the same ids.
+        // 同じ id の別のワールド。
         menu.sync(true, &view(world_a.clone(), &[1, 2]));
         menu.renaming = Some((1, "x".into()));
         menu.confirm_delete = Some((2, 0.0));
         menu.sync(true, &view(world_b, &[1, 2]));
         assert!(menu.renaming.is_none() && menu.confirm_delete.is_none());
-        // The waypoint went away.
+        // ウェイポイントがなくなった。
         menu.renaming = Some((1, "x".into()));
         menu.confirm_delete = Some((1, 0.0));
         let world_b = WorldLabel::Singleplayer("B".into());

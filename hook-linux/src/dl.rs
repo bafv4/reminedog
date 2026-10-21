@@ -1,26 +1,26 @@
-//! The dynamic linker: symbols of the libraries LWJGL loaded, and libraries the agent uses
-//! itself (libGL, libX11) once the game has loaded them.
+//! 動的リンカ：LWJGL が読み込んだライブラリのシンボルと、ゲームが読み込んだ後にエージェント自身が
+//! 使うライブラリ（libGL、libX11）。
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
-/// The address of `name` in `library`, a `dlopen` handle.
+/// `dlopen` のハンドル `library` の中の `name` のアドレス。
 pub fn symbol(library: usize, name: &CStr) -> Option<*const c_void> {
-    // SAFETY: a handle LWJGL got from dlopen; a NUL-terminated name.
+    // SAFETY: LWJGL が dlopen で得たハンドル。NUL で終わる名前。
     let p = unsafe { libc::dlsym(library as *mut c_void, name.as_ptr()) };
     (!p.is_null()).then_some(p.cast_const())
 }
 
-/// glibc's `struct link_map`, as far as it is read.
+/// glibc の `struct link_map`（読むところまで）。
 #[repr(C)]
 struct LinkMap {
     l_addr: usize,
     l_name: *const c_char,
 }
 
-/// Where the library of a `dlopen` handle was loaded from.
+/// `dlopen` のハンドルのライブラリを読み込んだ場所。
 pub fn path(library: usize) -> Option<String> {
     let mut map: *mut LinkMap = std::ptr::null_mut();
-    // SAFETY: RTLD_DI_LINKMAP writes a pointer to the library's link map.
+    // SAFETY: RTLD_DI_LINKMAP はライブラリのリンクマップへのポインタを書く。
     let ok = unsafe {
         libc::dlinfo(
             library as *mut c_void,
@@ -31,9 +31,9 @@ pub fn path(library: usize) -> Option<String> {
     if !ok || map.is_null() {
         return None;
     }
-    // SAFETY: the dynamic linker's link map, alive while the library is loaded.
+    // SAFETY: 動的リンカのリンクマップ。ライブラリを読み込んでいる間は生きている。
     let name = unsafe { (*map).l_name };
-    // SAFETY: as above, a NUL-terminated path.
+    // SAFETY: 上と同じ。NUL で終わるパス。
     (!name.is_null()).then(|| {
         unsafe { CStr::from_ptr(name) }
             .to_string_lossy()
@@ -41,15 +41,15 @@ pub fn path(library: usize) -> Option<String> {
     })
 }
 
-/// Whether a loaded library other than this one exports `symbol` (another copy of the agent,
-/// from another folder: the dynamic linker loads each path as its own library).
+/// このライブラリ以外の読み込み済みのライブラリが `symbol` を export しているか（別のフォルダの
+/// エージェントの別のコピー：動的リンカはパスごとに別のライブラリとして読み込む）。
 pub fn loaded_elsewhere(symbol: &CStr, ours: *const c_void) -> bool {
     unsafe extern "C" fn collect(
         info: *mut libc::dl_phdr_info,
         _size: usize,
         names: *mut c_void,
     ) -> c_int {
-        // SAFETY: the linker's entry for one object, during the call; `names` is ours.
+        // SAFETY: 呼び出しの間の、1 つのオブジェクトのリンカの項目。`names` は自分のもの。
         unsafe {
             let name = (*info).dlpi_name;
             if !name.is_null() && *name != 0 {
@@ -59,10 +59,10 @@ pub fn loaded_elsewhere(symbol: &CStr, ours: *const c_void) -> bool {
         0
     }
     let mut names: Vec<CString> = Vec::new();
-    // SAFETY: the callback only reads each entry and adds to `names`.
+    // SAFETY: コールバックは各項目を読んで `names` に足すだけ。
     unsafe { libc::dl_iterate_phdr(Some(collect), (&raw mut names).cast()) };
     names.iter().any(|name| {
-        // SAFETY: RTLD_NOLOAD only looks the library up; the reference is dropped again.
+        // SAFETY: RTLD_NOLOAD はライブラリを探すだけ。参照はまた手放す。
         unsafe {
             let handle = libc::dlopen(name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
             if handle.is_null() {
@@ -75,10 +75,10 @@ pub fn loaded_elsewhere(symbol: &CStr, ours: *const c_void) -> bool {
     })
 }
 
-/// A library the process has already loaded (never loads one), as a handle.
+/// プロセスがもう読み込んだライブラリ（読み込みはしない）のハンドル。
 pub fn loaded(name: &CStr) -> Option<usize> {
-    // SAFETY: RTLD_NOLOAD only looks the library up; the handle stays valid for the process
-    // (the reference taken is never dropped).
+    // SAFETY: RTLD_NOLOAD はライブラリを探すだけ。ハンドルはプロセスの間有効
+    // （取った参照は手放さない）。
     let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD) };
     (!handle.is_null()).then_some(handle as usize)
 }

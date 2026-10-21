@@ -25,17 +25,16 @@ use crate::waypoints::{
 };
 use crate::zoom::Zoom;
 
-/// A font file added as a fallback for glyphs egui's built-in fonts lack (Japanese).
+/// egui に組み込まれたフォントにない字形（日本語）のために、代わりとして足すフォントのファイル。
 pub struct FontSource {
     pub name: String,
-    /// Borrowed when the caller keeps the file for the process (so a new overlay copies
-    /// nothing).
+    /// 呼び出し側がファイルをプロセスの間持つときは借りる（新しいオーバーレイは何も写さない）。
     pub data: Cow<'static, [u8]>,
-    /// Face index inside a font collection (`.ttc`); 0 for plain `.ttf`/`.otf`.
+    /// フォントのコレクション（`.ttc`）の中の面の番号。ただの `.ttf`/`.otf` は 0。
     pub index: u32,
 }
 
-/// One row of diagnostic text in the status window.
+/// 状態の窓の、診断の文字の 1 行。
 #[derive(Debug, Clone)]
 pub struct StatusLine {
     pub label: String,
@@ -51,106 +50,104 @@ impl StatusLine {
     }
 }
 
-/// Per-frame inputs from the platform hook.
+/// 各 OS のフックからの、フレームごとの入力。
 pub struct FrameParams<'a> {
-    /// Size of the default framebuffer in physical pixels.
+    /// 物理のピクセルでの、既定のフレームバッファの大きさ。
     pub framebuffer_size: [u32; 2],
-    /// Physical pixels per egui point (window content scale times the user's UI scale).
+    /// egui の 1 ポイントあたりの物理のピクセル（ウィンドウの中身の拡大率と、利用者の UI の拡大率を掛けたもの）。
     pub pixels_per_point: f32,
-    /// Monotonic time in seconds.
+    /// 単調に増える時刻（秒）。
     pub time: f64,
     pub status: &'a [StatusLine],
     pub input: FrameInput,
 }
 
-/// How the zoom shows this frame.
+/// このフレームでズームをどう見せるか。
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ZoomView {
     #[default]
     Off,
-    /// The overlay enlarges the centre of the game's normal frame.
+    /// オーバーレイが、ゲームのふつうのフレームの中央を拡大する。
     Magnify,
-    /// The game rendered a taller frame and the platform hook already put its centre on
-    /// the screen, enlarged `factor` times.
+    /// ゲームが縦に長いフレームを描き、各 OS のフックがもうその中央を `factor` 倍に拡大して画面に
+    /// 置いた。
     HighRes { factor: f32 },
 }
 
-/// This frame's input state, from [`crate::InputRouter`].
+/// [`crate::InputRouter`] からの、このフレームの入力の状態。
 #[derive(Default)]
 pub struct FrameInput {
     pub events: Vec<egui::Event>,
     pub modifiers: Modifiers,
     pub ui_open: bool,
     pub zoom: ZoomView,
-    /// Where to draw the overlay's own cursor (points), when the game hides the real one.
+    /// ゲームが本物のカーソルを隠しているときに、オーバーレイの自前のカーソルを描く場所（ポイント）。
     pub software_cursor: Option<Pos2>,
-    /// The key captured after [`FrameOutput::start_capture`].
+    /// [`FrameOutput::start_capture`] の後に取ったキー。
     pub captured: Option<Captured>,
-    /// Why the high-resolution zoom cannot be used, shown in the menu.
+    /// 高精細のズームを使えない理由（メニューに出す）。
     pub high_res_note: Option<String>,
     pub waypoints: WaypointView,
-    /// New notices this frame; the overlay keeps them until they expire.
+    /// このフレームの新しい通知。オーバーレイは期限が切れるまでそれを持つ。
     pub notices: Vec<Notice>,
-    /// Minecraft's debug modifier, copy-location and crash keys, which the waypoint and
-    /// navigate hotkeys must not take.
+    /// Minecraft のデバッグの修飾キー、座標のコピーのキー、クラッシュのキー。ウェイポイントと
+    /// 案内のホットキーはこれを取ってはならない。
     pub reserved_keys: Vec<egui::Key>,
-    /// The game's mappings on each key, as `reminedog_core::bindings_by_key` reads them from
-    /// options.txt (mapping ids; labels work too), shown with the rebinding's outputs.
+    /// `reminedog_core::bindings_by_key` が options.txt から読んだ、各キーのゲームの割り当て
+    /// （割り当ての id。ラベルでもよい）。置き換えの出力と一緒に出す。
     pub game_bindings: Vec<(InputId, Vec<String>)>,
-    /// Why some rebinding rules cannot work now (e.g. keys as sources), shown in the menu.
+    /// 置き換えのルールの一部が今は働かない理由（例：元のキーとしてのキー）。メニューに出す。
     pub rebind_note: Option<String>,
-    /// A problem with the settings file (unreadable, moved aside, not saved), shown at the
-    /// top of the menu.
+    /// 設定ファイルの問題（読めない、脇に移した、保存していない）。メニューの上に出す。
     pub settings_note: Option<String>,
-    /// Keys and buttons of the rebinding rules that the game's window library cannot report
-    /// (as a source) or give the game (as an output); the menu notes the rules that use them.
+    /// 置き換えのルールのキーとボタンのうち、ゲームのウィンドウのライブラリが報告できない（元のキー
+    /// として）か、ゲームに渡せない（出力として）もの。メニューは、それを使うルールに注記を付ける。
     pub unsupported_inputs: Vec<InputId>,
     pub browser: BrowserView,
 }
 
-/// What the platform hook has to act on after a frame.
+/// フレームの後に、各 OS のフックが行うべきこと。
 #[derive(Debug, Default, PartialEq)]
 pub struct FrameOutput {
-    /// The UI's close button was clicked.
+    /// UI の閉じるボタンを押した。
     pub close_ui: bool,
-    /// Capture the next key for a hotkey ([`crate::InputRouter::start_capture`]).
+    /// ホットキーのために次のキーを取る（[`crate::InputRouter::start_capture`]）。
     pub start_capture: bool,
-    /// Capture the next key or mouse button for the rebinding
-    /// ([`crate::InputRouter::start_input_capture`]).
+    /// 置き換えのために次のキーかマウスのボタンを取る（[`crate::InputRouter::start_input_capture`]）。
     pub start_input_capture: bool,
     pub cancel_capture: bool,
-    /// The settings changed: apply the hotkeys and save.
+    /// 設定が変わった：ホットキーを当てはめて保存する。
     pub settings: Option<Settings>,
-    /// Asked for in the menu's waypoint section, in order.
+    /// メニューのウェイポイントの欄で頼まれたこと（順に）。
     pub waypoint_commands: Vec<WaypointCommand>,
-    /// For the browser, in order.
+    /// ブラウザのため（順に）。
     pub browser_commands: Vec<BrowserCommand>,
-    /// Text the UI copied (Ctrl+C, Ctrl+X in a text field), for the system clipboard.
+    /// UI がコピーした文字（入力欄での Ctrl+C、Ctrl+X）。システムのクリップボードのため。
     pub copied_text: Option<String>,
-    /// A widget of the UI has the keyboard ([`crate::InputRouter::set_text_focus`]).
+    /// UI の部品がキーボードを持っている（[`crate::InputRouter::set_text_focus`]）。
     pub text_focus: bool,
 }
 
-/// The user's hotkeys.
+/// 利用者のホットキー。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hotkeys {
-    /// Opens and closes the menu.
+    /// メニューを開閉する。
     pub menu: Hotkey,
-    /// Zooms while held.
+    /// 押している間ズームする。
     pub zoom: Hotkey,
-    /// Records a waypoint at the player's position.
+    /// プレイヤーの位置にウェイポイントを記録する。
     pub waypoint: Hotkey,
-    /// Refreshes the player's position and shows the way to the selected waypoint.
+    /// プレイヤーの位置を更新し、選んだウェイポイントへの道を示す。
     pub navigate: Hotkey,
     pub browser: BrowserKeys,
 }
 
-/// The browser's hotkeys; each may be unassigned.
+/// ブラウザのホットキー。どれも割り当てなしでよい。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BrowserKeys {
-    /// Shows and hides the browser.
+    /// ブラウザを出し入れする。
     pub toggle: Option<Hotkey>,
-    /// The rest work while the browser shows.
+    /// 残りは、ブラウザを出している間に働く。
     pub page_up: Option<Hotkey>,
     pub page_down: Option<Hotkey>,
     pub play_pause: Option<Hotkey>,
@@ -174,7 +171,7 @@ impl Hotkeys {
         },
     };
 
-    /// The action's key; `None` only for an unassigned browser key.
+    /// 操作のキー。割り当てのないブラウザのキーのときだけ `None`。
     pub(crate) fn get(&self, action: Action) -> Option<Hotkey> {
         match action {
             Action::Menu => Some(self.menu),
@@ -185,7 +182,7 @@ impl Hotkeys {
         }
     }
 
-    /// Sets the action's key; `None` unassigns a browser key (the others keep theirs).
+    /// 操作のキーを入れる。`None` ならブラウザのキーの割り当てを外す（ほかのものは自分のキーを保つ）。
     fn set(&mut self, action: Action, hotkey: Option<Hotkey>) {
         match (action, hotkey) {
             (Action::Menu, Some(hotkey)) => self.menu = hotkey,
@@ -228,16 +225,15 @@ impl Default for Hotkeys {
     }
 }
 
-/// The hotkeys in `settings`. Unreadable ones fall back to the defaults, and so does one an
-/// earlier hotkey would hide (see `hides`), which only a hand-edited or older settings file
-/// can have. A browser key may be empty: unassigned. Logs what fell back; for the settings
-/// as loaded (changes from the menu use [`hotkeys_quiet`]).
+/// `settings` のホットキー。読めないものは既定に戻し、前のホットキーが隠してしまうもの（`hides`
+/// を参照。手で書き換えたか古い設定ファイルにしかない）も同じ。ブラウザのキーは空でよい：割り当て
+/// なし。戻したものをログに出す。読んだときの設定のため（メニューからの変更は [`hotkeys_quiet`] を使う）。
 pub fn hotkeys(settings: &Settings) -> Hotkeys {
     resolve_hotkeys(settings, true)
 }
 
-/// [`hotkeys`] without its warnings, for the settings the menu changed (a slider moving would
-/// repeat them every frame).
+/// 警告を出さない [`hotkeys`]。メニューが変えた設定のため（スライダーを動かすと、毎フレーム警告を
+/// 繰り返してしまう）。
 pub fn hotkeys_quiet(settings: &Settings) -> Hotkeys {
     resolve_hotkeys(settings, false)
 }
@@ -316,15 +312,15 @@ fn resolve_hotkeys(settings: &Settings, log: bool) -> Hotkeys {
     keys
 }
 
-/// For the log.
+/// ログのため。
 fn label_or_none(hotkey: Option<Hotkey>) -> String {
     hotkey.map_or_else(|| "none".to_owned(), |hotkey| hotkey.to_string())
 }
 
-/// Whether `earlier`, which the input router checks first, takes every press of `later`:
-/// the same trigger, and no modifier `later` does not need too (extra modifiers still match).
-/// The zoom is checked last, so its match ignoring modifiers never hides another key. An
-/// unassigned key hides nothing and is never hidden.
+/// 入力の振り分けが先に確かめる `earlier` が、`later` の押下を全部取るか：同じトリガーで、
+/// `later` が要らない修飾キーを要らない（余分な修飾キーがあっても当てはまる）。ズームは最後に
+/// 確かめるので、修飾キーを無視して当てはめても、ほかのキーを隠すことはない。割り当てのない
+/// キーは何も隠さず、隠されもしない。
 fn hides(earlier: Option<Hotkey>, later: Option<Hotkey>) -> bool {
     let (Some(earlier), Some(later)) = (earlier, later) else {
         return false;
@@ -335,7 +331,7 @@ fn hides(earlier: Option<Hotkey>, later: Option<Hotkey>) -> bool {
         && (!earlier.alt || later.alt)
 }
 
-/// The action checked before `action` whose hotkey hides `action`'s.
+/// `action` より前に確かめる操作のうち、そのホットキーが `action` のものを隠すもの。
 fn hidden_by(keys: &Hotkeys, action: Action) -> Option<Action> {
     Action::ROUTER_ORDER
         .into_iter()
@@ -343,7 +339,7 @@ fn hidden_by(keys: &Hotkeys, action: Action) -> Option<Action> {
         .find(|&earlier| hides(keys.get(earlier), keys.get(action)))
 }
 
-/// Another action whose hotkey hides `action`'s, or is hidden by it.
+/// ホットキーが `action` のものを隠すか、それに隠されるほかの操作。
 fn conflict(keys: &Hotkeys, action: Action) -> Option<Action> {
     hidden_by(keys, action).or_else(|| {
         Action::ROUTER_ORDER
@@ -365,8 +361,8 @@ impl fmt::Display for OverlayError {
 
 impl std::error::Error for OverlayError {}
 
-/// The UI scale the overlay draws at (and the router maps the pointer with): pixels per point
-/// within 0.25 to 8, 1 when not a number.
+/// オーバーレイが描く（router がポインターを写す）UI の拡大率：ポイントあたりのピクセルで、
+/// 0.25〜8。数でなければ 1。
 pub(crate) fn clamp_pixels_per_point(pixels_per_point: f32) -> f32 {
     if pixels_per_point.is_finite() {
         pixels_per_point.clamp(0.25, 8.0)
@@ -375,7 +371,7 @@ pub(crate) fn clamp_pixels_per_point(pixels_per_point: f32) -> f32 {
     }
 }
 
-/// How long the hotkey hint shows after the first frame, in seconds.
+/// 最初のフレームの後に、ホットキーの案内を出す秒数。
 const HINT_SECONDS: f64 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,7 +384,7 @@ pub(crate) enum Action {
 }
 
 impl Action {
-    /// Every hotkey.
+    /// 全部のホットキー。
     pub(crate) const ALL: [Action; 10] = [
         Action::Menu,
         Action::Zoom,
@@ -401,14 +397,14 @@ impl Action {
         Action::Browser(BrowserAction::SeekBack),
         Action::Browser(BrowserAction::SeekForward),
     ];
-    /// As listed in the menu's keys.
+    /// メニューのキーの欄に並ぶとおり。
     pub(crate) const GENERAL: [Action; 4] = [
         Action::Menu,
         Action::Zoom,
         Action::Waypoint,
         Action::Navigate,
     ];
-    /// As listed in the menu's browser section.
+    /// メニューのブラウザの欄に並ぶとおり。
     pub(crate) const BROWSER: [Action; 6] = [
         Action::Browser(BrowserAction::Toggle),
         Action::Browser(BrowserAction::PageUp),
@@ -417,7 +413,7 @@ impl Action {
         Action::Browser(BrowserAction::SeekBack),
         Action::Browser(BrowserAction::SeekForward),
     ];
-    /// The order in which the input router matches the hotkeys.
+    /// 入力の振り分けがホットキーを照らし合わせる順。
     pub(crate) const ROUTER_ORDER: [Action; 10] = [
         Action::Menu,
         Action::Waypoint,
@@ -446,7 +442,7 @@ impl Action {
         }
     }
 
-    /// For the log.
+    /// ログのため。
     pub(crate) fn id(self) -> &'static str {
         match self {
             Action::Menu => "menu",
@@ -466,7 +462,7 @@ impl Action {
         Hotkeys::DEFAULT.get(self)
     }
 
-    /// The browser's keys can be unassigned.
+    /// ブラウザのキーは割り当てを外せる。
     pub(crate) fn optional(self) -> bool {
         matches!(self, Action::Browser(_))
     }
@@ -501,30 +497,29 @@ impl Action {
         }
     }
 
-    /// Records or refreshes the position with F3+C, so it cannot use F3+C's own keys.
+    /// F3+C で位置を記録するか更新するので、F3+C 自身のキーは使えない。
     fn uses_f3c(self) -> bool {
         matches!(self, Action::Waypoint | Action::Navigate)
     }
 }
 
-/// The settings and the menu's own state.
+/// 設定とメニュー自身の状態。
 struct UiState {
     settings: Settings,
     keys: Hotkeys,
-    /// [`FrameInput::reserved_keys`] of the current frame.
+    /// 今のフレームの [`FrameInput::reserved_keys`]。
     reserved_keys: Vec<egui::Key>,
-    /// Waiting for a key for this hotkey.
+    /// このホットキーのためにキーを待っている。
     capturing: Option<Action>,
-    /// Why the last captured key was not taken.
+    /// 最後に取ったキーを受け取らなかった理由。
     key_note: Option<String>,
-    /// The hotkey [`Self::key_note`] is about (it shows in the list that has it).
+    /// [`Self::key_note`] が話しているホットキー（それを持つ一覧に出る）。
     key_note_about: Action,
     waypoints: WaypointMenu,
     rebinds: RebindMenu,
     browser: BrowserMenu,
-    /// [`FrameInput::game_bindings`], [`FrameInput::rebind_note`],
-    /// [`FrameInput::settings_note`] and [`FrameInput::unsupported_inputs`] of the current
-    /// frame.
+    /// 今のフレームの [`FrameInput::game_bindings`]、[`FrameInput::rebind_note`]、
+    /// [`FrameInput::settings_note`]、[`FrameInput::unsupported_inputs`]。
     game_bindings: Vec<(InputId, Vec<String>)>,
     rebind_note: Option<String>,
     settings_note: Option<String>,
@@ -534,8 +529,8 @@ struct UiState {
 impl UiState {
     fn new(mut settings: Settings) -> Self {
         let keys = hotkeys(&settings);
-        // What the router uses: a key that fell back to its default must not come back when
-        // the key hiding it moves. The menu says which (the log says why).
+        // router が使うもの：既定に戻したキーは、それを隠していたキーが動いても戻ってきてはならない。
+        // メニューはどれかを言う（ログは理由を言う）。
         let mut changed = None;
         for action in Action::ALL {
             let text = setting_text(keys.get(action));
@@ -576,7 +571,7 @@ impl UiState {
         *action.setting_mut(&mut self.settings) = setting_text(self.keys.get(action));
     }
 
-    /// Unassigns a browser key.
+    /// ブラウザのキーの割り当てを外す。
     pub(crate) fn clear_hotkey(&mut self, action: Action) {
         if action.optional() {
             self.key_note = None;
@@ -584,10 +579,10 @@ impl UiState {
         }
     }
 
-    /// Assigns a captured key unless another hotkey would become unreachable (the router
-    /// checks them in order and matches with extra modifiers held), it is one of F3+C's keys
-    /// for an action that sends F3+C, or a rebinding rule's source (the router would take its
-    /// presses for the hotkey before the rule).
+    /// 取ったキーを割り当てる。ただし、ほかのホットキーに届かなくなる（router は順に確かめ、余分な
+    /// 修飾キーを押していても当てはめる）、F3+C を送る操作について F3+C のキーである、置き換えの
+    /// ルールの元のキーである（router はルールより先に、その押下をホットキーとして取ってしまう）なら
+    /// しない。
     fn assign(&mut self, action: Action, hotkey: Hotkey) {
         self.key_note_about = action;
         if action.uses_f3c()
@@ -602,7 +597,7 @@ impl UiState {
             ));
             return;
         }
-        // The key events would reach the game with Ctrl held (Ctrl+drop throws a whole stack).
+        // キーのイベントが、Ctrl を押したままゲームに届いてしまう（Ctrl+捨てるはスタックごと投げる）。
         if action.uses_f3c() && hotkey.ctrl {
             self.key_note = Some(format!(
                 "Ctrl との組み合わせ（{}）は「{}」に使えない",
@@ -631,9 +626,9 @@ impl UiState {
         self.set_hotkey(action, Some(hotkey));
     }
 
-    /// Puts the hotkeys of `actions` back to their defaults, but as [`assign`](Self::assign)
-    /// refuses a rebinding rule's source: an action whose default is one keeps its key (with a
-    /// note), and so does one whose default would then hide another key or be hidden by it.
+    /// `actions` のホットキーを既定に戻す。ただし [`assign`](Self::assign) と同じく、置き換えの
+    /// ルールの元のキーは断る：既定がそれである操作は自分のキーを保ち（注記付きで）、既定にすると
+    /// ほかのキーを隠すか、それに隠される操作も同じ。
     fn reset_hotkeys(&mut self, actions: &[Action]) {
         if let Some(&first) = actions.first() {
             self.key_note_about = first;
@@ -647,7 +642,7 @@ impl UiState {
             let Some(default) = action.default_hotkey() else {
                 continue;
             };
-            // Only a key that stays away from its default needs saying so.
+            // 既定から離れたままのキーだけ、そう言う必要がある。
             let moved = self.keys.get(action) != Some(default);
             if let Some(source) =
                 rule_sources(&self.settings).find(|&id| input_trigger(id) == Some(default.trigger))
@@ -708,13 +703,12 @@ impl UiState {
     }
 }
 
-/// A hotkey as the settings file has it; empty for none.
+/// 設定ファイルのとおりのホットキー。なければ空。
 fn setting_text(hotkey: Option<Hotkey>) -> String {
     hotkey.map_or_else(String::new, |hotkey| hotkey.to_string())
 }
 
-/// The keys of `list`, each a button that waits for a new key, then what the last change
-/// said and a button that puts them back.
+/// `list` のキー（それぞれ新しいキーを待つボタン）、次に最後の変更が言ったことと、それらを戻すボタン。
 fn key_grid(
     ui: &mut egui::Ui,
     state: &mut UiState,
@@ -772,15 +766,15 @@ fn key_grid(
     }
 }
 
-/// The hotkeys of `list` on keys the game uses too (options.txt): the game does not get them
-/// while reminedog takes them.
+/// ゲームも使うキー（options.txt）に割り当てた `list` のホットキー：reminedog が取っている間、
+/// ゲームはそれを受け取らない。
 fn game_key_notes(state: &UiState, list: &[Action]) -> Vec<String> {
     let mut notes = Vec::new();
     for &action in list {
         let Some(hotkey) = state.keys.get(action) else {
             continue;
         };
-        // A combination leaves the key alone to the game.
+        // 組み合わせなら、キーだけのものはゲームに任せる。
         if hotkey.ctrl || hotkey.shift || hotkey.alt {
             continue;
         }
@@ -807,28 +801,28 @@ fn game_key_notes(state: &UiState, list: &[Action]) -> Vec<String> {
     notes
 }
 
-/// What the menu asked for this frame.
+/// このフレームでメニューが頼んだこと。
 #[derive(Default)]
 struct MenuActions {
     close: bool,
     capture: Option<Action>,
-    /// Capture a key or button for the rebinding.
+    /// 置き換えのためにキーかボタンを取る。
     capture_input: bool,
     cancel_capture: bool,
     waypoint_commands: Vec<WaypointCommand>,
     browser_commands: Vec<BrowserCommand>,
 }
 
-/// egui running on the agent's own GL context, drawing into the default framebuffer.
+/// エージェント自前の GL のコンテキストで動き、既定のフレームバッファに描く egui。
 pub struct Overlay {
     ctx: egui::Context,
     painter: egui_glow::Painter,
     zoom: Zoom,
     state: UiState,
     notices: NoticeList,
-    /// The browser's page.
+    /// ブラウザのページ。
     page: PageTexture,
-    /// The settings as last handed to the platform hook, to tell a change.
+    /// 変更を見分けるための、最後に各 OS のフックに渡した設定。
     saved_settings: Settings,
     first_time: Option<f64>,
     last_time: Option<f64>,
@@ -837,7 +831,7 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    /// Must be called with the agent's GL context current.
+    /// エージェントの GL のコンテキストを今のものにして呼ぶこと。
     pub fn new(
         gl: Arc<glow::Context>,
         fonts: Vec<FontSource>,
@@ -849,8 +843,7 @@ impl Overlay {
         let ctx = egui::Context::default();
         ctx.set_theme(egui::Theme::Dark);
         ctx.set_fonts(font_definitions(fonts));
-        // Ctrl+= and Ctrl+- would scale egui alone, away from the scale the router maps the
-        // pointer with.
+        // Ctrl+= と Ctrl+- は egui だけを拡大し、router がポインターを写す拡大率からずれてしまう。
         ctx.options_mut(|options| options.zoom_with_keyboard = false);
         let state = UiState::new(settings);
         Ok(Self {
@@ -868,23 +861,23 @@ impl Overlay {
         })
     }
 
-    /// Number of frames rendered so far.
+    /// ここまでに描いたフレームの数。
     pub fn frames(&self) -> u64 {
         self.frames
     }
 
-    /// Uploads the browser's newest picture (`None` keeps the last one), before
-    /// [`render`](Self::render); the caller can let go of the picture right after.
+    /// [`render`](Self::render) の前に、ブラウザの最新の絵を上げる（`None` なら前のものを残す）。
+    /// 呼び出し側は、すぐ後に絵を手放してよい。
     ///
     /// # Safety
-    /// The agent's GL context must be current.
+    /// エージェントの GL のコンテキストが今のものであること。
     pub unsafe fn upload_page(&mut self, pixels: Option<BrowserPixels<'_>>) {
-        // SAFETY: guaranteed by the caller.
+        // SAFETY: 呼び出し側が保証する。
         unsafe { self.page.update(&mut self.painter, pixels) };
     }
 
-    /// Draws one frame into the default framebuffer. Must be called with the agent's GL
-    /// context current on the game's drawable, right before the buffer swap.
+    /// 既定のフレームバッファに 1 フレームを描く。エージェントの GL のコンテキストをゲームの描画先で
+    /// 今のものにして、バッファのスワップの直前に呼ぶこと。
     pub fn render(&mut self, params: FrameParams<'_>) -> FrameOutput {
         let [width, height] = params.framebuffer_size;
         if width == 0 || height == 0 {
@@ -928,7 +921,7 @@ impl Overlay {
         let notices = &self.notices;
         let zoom_supported = self.zoom.supported();
         if input.zoom == ZoomView::Magnify {
-            // SAFETY: the caller guarantees our context is current on the game's drawable.
+            // SAFETY: 呼び出し側が、自前のコンテキストがゲームの描画先で今のものであることを保証する。
             unsafe {
                 self.zoom.draw(
                     self.painter.gl(),
@@ -970,7 +963,7 @@ impl Overlay {
             ppp,
             zoom_supported,
         };
-        // The status window has the corner the hint would take.
+        // 案内が使う隅には、状態の窓がある。
         let show_hint = !input.ui_open
             && !state.settings.show_status
             && params.time - first_time < HINT_SECONDS;
@@ -978,7 +971,7 @@ impl Overlay {
         let mut actions = MenuActions::default();
         let mut output = self.ctx.run_ui(raw, |ui| {
             if input.ui_open {
-                // Dim the game so it is clear the overlay has the input.
+                // オーバーレイが入力を持っていることが分かるように、ゲームを暗くする。
                 ui.painter()
                     .rect_filled(ui.max_rect(), 0.0, Color32::from_black_alpha(90));
                 actions = main_window(
@@ -1035,8 +1028,8 @@ impl Overlay {
             .ctx
             .tessellate(std::mem::take(&mut output.shapes), output.pixels_per_point);
 
-        // Nothing but the zoom (which rebinds 0 when done) binds another framebuffer in our
-        // dedicated context, so this paints into the window's default framebuffer.
+        // 専用の自前のコンテキストでほかのフレームバッファを結び付けるのはズームだけ（終わったら 0 を
+        // 結び付け直す）なので、これはウィンドウの既定のフレームバッファに描く。
         self.painter.paint_and_update_textures(
             [width, height],
             output.pixels_per_point,
@@ -1069,17 +1062,17 @@ impl Overlay {
         out
     }
 
-    /// Frees GL resources. Must be called with the agent's GL context current.
+    /// GL の資源を解放する。エージェントの GL のコンテキストを今のものにして呼ぶこと。
     pub fn destroy(&mut self) {
-        // SAFETY: the caller guarantees our context is current.
+        // SAFETY: 呼び出し側が、自前のコンテキストが今のものであることを保証する。
         unsafe { self.zoom.destroy(self.painter.gl()) };
         self.painter.destroy();
     }
 }
 
-/// "version | renderer | vendor" of the current context, for diagnostics.
+/// 今のコンテキストの "version | renderer | vendor"（診断のため）。
 pub fn gl_summary(gl: &glow::Context) -> String {
-    // SAFETY: plain queries on the current context.
+    // SAFETY: 今のコンテキストへのただの問い合わせ。
     unsafe {
         format!(
             "{} | {} | {}",
@@ -1093,8 +1086,8 @@ pub fn gl_summary(gl: &glow::Context) -> String {
 fn font_definitions(fonts: Vec<FontSource>) -> FontDefinitions {
     let mut defs = FontDefinitions::default();
     for font in fonts {
-        // egui panics on a font it cannot parse (on the first frame, which turns the overlay
-        // off for the process): a wrong face index, a format it does not read.
+        // egui は読めないフォントでパニックする（最初のフレームで。それでオーバーレイはプロセスの間
+        // 止まる）：間違った面の番号、読めない形式。
         if let Err(e) = skrifa::FontRef::from_index(&font.data, font.index) {
             log::warn!(
                 "font {} (face {}) cannot be read ({e}); egui's fonts only",
@@ -1103,7 +1096,7 @@ fn font_definitions(fonts: Vec<FontSource>) -> FontDefinitions {
             );
             continue;
         }
-        // Japanese fonts sit high in egui's rows (above the check boxes) without this.
+        // これがないと、日本語フォントは egui の行の上の方に（チェックボックスより上に）出る。
         let tweak = font_metrics::centering_tweak(&font.data, font.index);
         log::debug!(
             "font {}: glyphs shifted down by {:.3} em",
@@ -1118,9 +1111,9 @@ fn font_definitions(fonts: Vec<FontSource>) -> FontDefinitions {
                 tweak,
             }),
         );
-        // Proportional text uses this font first: mixing it with egui's own Latin font put
-        // digits and kana on different baselines ("プロトタイプ 1" with a sunken "1").
-        // Monospace keeps egui's font and only falls back to this one.
+        // プロポーショナルの文字は最初にこのフォントを使う：egui 自身の欧文のフォントと混ぜると、
+        // 数字と仮名のベースラインがずれた（"プロトタイプ 1" の "1" が沈む）。
+        // 等幅は egui のフォントのままで、このフォントは代わりの字形にだけ使う。
         defs.families
             .entry(FontFamily::Proportional)
             .or_default()
@@ -1138,7 +1131,7 @@ struct FrameInfo {
     fps: f32,
     size: [u32; 2],
     ppp: f32,
-    /// OpenGL 3.0 or later: the zoom works.
+    /// OpenGL 3.0 以降：ズームが働く。
     zoom_supported: bool,
 }
 
@@ -1162,7 +1155,7 @@ fn status_grid(ui: &mut egui::Ui, info: &FrameInfo, status: &[StatusLine]) {
         });
 }
 
-/// Read-only status in the corner while the UI is closed (opt-in).
+/// UI を閉じている間に隅に出す、読むだけの状態（選んだときだけ）。
 fn status_window(ctx: &egui::Context, info: &FrameInfo, status: &[StatusLine]) {
     let frame = egui::Frame::window(&ctx.global_style()).fill(Color32::from_black_alpha(200));
     egui::Window::new("reminedog")
@@ -1176,7 +1169,7 @@ fn status_window(ctx: &egui::Context, info: &FrameInfo, status: &[StatusLine]) {
         .show(ctx, |ui| status_grid(ui, info, status));
 }
 
-/// The menu.
+/// メニュー。
 fn main_window(
     ctx: &egui::Context,
     state: &mut UiState,
@@ -1188,18 +1181,17 @@ fn main_window(
 ) -> MenuActions {
     let mut actions = MenuActions::default();
     let mut open = true;
-    // Room for the contents up to the screen's height (egui keeps the window inside the
-    // screen), from the screen of this frame: egui only ever lowers a size it remembers, so
-    // the menu would not grow back after the window got bigger. The window's own scrolling
-    // would fill this room, so the scroll area is ours: it shrinks to the contents and scrolls
-    // what does not fit.
+    // このフレームの画面から求めた、画面の高さまでの中身のための場所（egui は窓を画面の中に保つ）：
+    // egui は覚えた大きさを小さくすることしかしないので、ウィンドウが大きくなった後もメニューは
+    // 大きくならない。窓自身のスクロールはこの場所を埋めてしまうので、スクロールの領域は自前の
+    // もの：中身に合わせて縮み、収まらないものをスクロールする。
     let room = ctx.content_rect().height();
     egui::Window::new("reminedog")
         .id(egui::Id::new("reminedog-main"))
         .open(&mut open)
         .default_pos([40.0, 40.0])
         .resizable(false)
-        // Folded, the menu would keep waiting for a key for a hotkey or a rule unseen.
+        // 畳むと、メニューは見えないままホットキーかルールのキーを待ち続けてしまう。
         .collapsible(false)
         .resize(move |r| r.min_height(room))
         .show(ctx, |ui| {
@@ -1260,7 +1252,7 @@ fn menu_contents(
     if let Some(note) = high_res_note.filter(|_| state.settings.zoom_high_res) {
         ui.label(RichText::new(note).weak());
     }
-    // Used when high resolution is off or not available.
+    // 高精細がオフか、使えないときに使う。
     ui.add_enabled_ui(
         !state.settings.zoom_high_res || high_res_note.is_some(),
         |ui| {
@@ -1347,7 +1339,7 @@ fn hint(ctx: &egui::Context, menu_key: Hotkey) {
         });
 }
 
-/// An arrow cursor, drawn on top of everything while the game hides the real cursor.
+/// 矢印のカーソル。ゲームが本物のカーソルを隠している間、全部の上に描く。
 fn draw_cursor(ctx: &egui::Context, pos: Pos2) {
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Debug,
@@ -1366,7 +1358,7 @@ fn draw_cursor(ctx: &egui::Context, pos: Pos2) {
     ));
 }
 
-/// Frames per second, averaged over half-second windows.
+/// 0.5 秒の区間でならした、1 秒あたりのフレーム数。
 #[derive(Default)]
 struct Fps {
     window_start: Option<f64>,
@@ -1376,7 +1368,7 @@ struct Fps {
 
 impl Fps {
     fn tick(&mut self, now: f64) {
-        // The tick that opens a window marks its start and is not counted in it.
+        // 区間を開く tick はその始まりの印で、その中には数えない。
         let Some(start) = self.window_start else {
             self.window_start = Some(now);
             return;
@@ -1388,7 +1380,7 @@ impl Fps {
             self.window_start = Some(now);
             self.frames = 0;
         } else if elapsed < 0.0 {
-            // Clock went backwards; start over.
+            // 時計が戻った。やり直す。
             self.window_start = Some(now);
             self.frames = 0;
         }
@@ -1421,7 +1413,7 @@ mod tests {
         assert_eq!(keys.browser.toggle, Hotkey::parse("Ctrl+B"));
         assert_eq!(keys.browser.page_up, None);
         assert_eq!(keys.browser.seek_back, Hotkeys::DEFAULT.browser.seek_back);
-        // The settings keep what the router uses.
+        // 設定は router が使うものを持つ。
         let state = UiState::new(settings);
         assert_eq!(state.settings.browser_toggle_key, "Ctrl+B");
         assert_eq!(state.settings.browser_page_up_key, "");
@@ -1431,7 +1423,7 @@ mod tests {
 
     #[test]
     fn a_browser_key_hidden_by_another_falls_back_or_goes() {
-        // The waypoint key on Page Down hides the browser's: the default comes back.
+        // Page Down のウェイポイントのキーはブラウザのものを隠す：既定が戻る。
         let settings = Settings {
             waypoint_key: "PageDown".into(),
             browser_page_down_key: "Shift+PageDown".into(),
@@ -1440,7 +1432,7 @@ mod tests {
         let keys = hotkeys(&settings);
         assert_eq!(keys.waypoint, Hotkey::parse("PageDown").unwrap());
         assert_eq!(keys.browser.page_down, None, "the default is hidden too");
-        // The menu's key on End hides an unassigned-by-default toggle on End: none.
+        // End のメニューのキーは、既定で割り当てのない End の切り替えを隠す：なし。
         let settings = Settings {
             menu_key: "End".into(),
             browser_toggle_key: "End".into(),
@@ -1457,7 +1449,7 @@ mod tests {
         state.assign(action, toggle);
         assert_eq!(state.keys.browser.toggle, Some(toggle));
         assert_eq!(state.settings.browser_toggle_key, "Ctrl+B");
-        // Taken by another browser key.
+        // ほかのブラウザのキーが取っている。
         let note = refused(
             &mut state,
             Action::Browser(BrowserAction::PlayPause),
@@ -1465,17 +1457,17 @@ mod tests {
         );
         assert!(note.is_some_and(|note| note.contains("ブラウザの表示／非表示")));
         assert!(Action::BROWSER.contains(&state.key_note_about));
-        // A browser key cannot take the zoom's.
+        // ブラウザのキーはズームのものを取れない。
         assert!(refused(&mut state, Action::Browser(BrowserAction::PageUp), "Z").is_some());
-        // Cleared.
+        // 外した。
         let page_up = Action::Browser(BrowserAction::PageUp);
         state.clear_hotkey(page_up);
         assert_eq!(state.keys.browser.page_up, None);
         assert_eq!(state.settings.browser_page_up_key, "");
-        // The general keys cannot be cleared.
+        // 全般のキーは外せない。
         state.clear_hotkey(Action::Zoom);
         assert_eq!(state.keys.zoom, Hotkey::DEFAULT_ZOOM);
-        // Resetting the browser's keys leaves the others alone.
+        // ブラウザのキーを戻しても、ほかには触れない。
         state.assign(Action::Zoom, Hotkey::parse("X").unwrap());
         state.reset_hotkeys(&Action::BROWSER);
         assert_eq!(state.keys.browser, Hotkeys::DEFAULT.browser);
@@ -1493,7 +1485,7 @@ mod tests {
         assert!((fps.value - 120.0).abs() < 1.0, "{}", fps.value);
     }
 
-    /// A font egui reads: one of its own.
+    /// egui が読めるフォント：egui 自身のもの。
     fn readable_font() -> Cow<'static, [u8]> {
         let defs = FontDefinitions::default();
         let data = defs.font_data.values().next().expect("egui has fonts");
@@ -1521,7 +1513,7 @@ mod tests {
         let defaults = FontDefinitions::default();
         for (data, index) in [
             (Cow::Borrowed(&b"not a font"[..]), 0),
-            // A plain font has face 0 only (fontconfig's named instances carry more bits).
+            // ただのフォントには面 0 しかない（fontconfig の名前付きインスタンスは、もっと多くのビットを持つ）。
             (readable_font(), 0x10000),
         ] {
             let defs = font_definitions(vec![FontSource {
@@ -1555,14 +1547,14 @@ mod tests {
     #[test]
     fn a_hotkey_that_would_hide_the_zoom_is_refused() {
         let mut state = state();
-        // The menu on plain Z would swallow every zoom press.
+        // ただの Z のメニューは、ズームの押下を全部飲み込んでしまう。
         state.assign(Action::Menu, Hotkey::parse("Z").unwrap());
         assert_eq!(state.settings.menu_key, "Ctrl+I");
         assert!(state.key_note.is_some());
-        // Same for the zoom on the menu's own key.
+        // メニュー自身のキーのズームも同じ。
         state.assign(Action::Zoom, Hotkey::parse("Ctrl+I").unwrap());
         assert_eq!(state.settings.zoom_key, "Z");
-        // Plain I for the zoom is fine: Ctrl+I opens the menu, I zooms.
+        // ただの I のズームはよい：Ctrl+I がメニューを開き、I がズームする。
         state.assign(Action::Zoom, Hotkey::parse("I").unwrap());
         assert_eq!(state.settings.zoom_key, "I");
         assert_eq!(state.key_note, None);
@@ -1578,7 +1570,7 @@ mod tests {
     #[test]
     fn waypoint_hotkeys_must_not_hide_or_be_hidden() {
         let mut state = state();
-        // Checked before the zoom: J would take every zoom press, with or without Ctrl.
+        // ズームより先に確かめる：J は、Ctrl があってもなくても、ズームの押下を全部取ってしまう。
         let note = refused(&mut state, Action::Zoom, "J");
         assert_eq!(
             note.as_deref(),
@@ -1587,7 +1579,7 @@ mod tests {
         refused(&mut state, Action::Zoom, "Ctrl+K");
         refused(&mut state, Action::Waypoint, "Z");
         refused(&mut state, Action::Navigate, "Z");
-        // The menu comes first (on a key without Ctrl, which these two cannot use).
+        // メニューが先（Ctrl なしのキーで。この 2 つは Ctrl を使えない）。
         state.assign(Action::Menu, Hotkey::parse("Alt+I").unwrap());
         let note = refused(&mut state, Action::Waypoint, "Alt+I");
         assert_eq!(
@@ -1601,11 +1593,11 @@ mod tests {
             note.as_deref(),
             Some("K は「現在地を更新」と重なるので使えない")
         );
-        // The waypoint key comes before the navigate key.
+        // ウェイポイントのキーは、案内のキーより先。
         refused(&mut state, Action::Navigate, "J");
         refused(&mut state, Action::Waypoint, "K");
         refused(&mut state, Action::Navigate, "Alt+J");
-        // Needing more modifiers than the earlier key is fine.
+        // 前のキーより多くの修飾キーが要るのはよい。
         state.assign(Action::Waypoint, Hotkey::parse("Alt+K").unwrap());
         assert_eq!(state.key_note, None);
         assert_eq!(state.settings.waypoint_key, "Alt+K");
@@ -1613,7 +1605,7 @@ mod tests {
         assert_eq!(state.settings.zoom_key, "J");
         state.assign(Action::Waypoint, Hotkey::parse("Shift+J").unwrap());
         assert_eq!(state.settings.waypoint_key, "Shift+J");
-        // Mouse buttons follow the same rule.
+        // マウスのボタンも同じ決まりに従う。
         state.assign(Action::Menu, Hotkey::parse("Mouse5").unwrap());
         refused(&mut state, Action::Navigate, "Mouse5");
         state.assign(Action::Navigate, Hotkey::parse("Shift+Mouse5").unwrap());
@@ -1632,10 +1624,10 @@ mod tests {
             Some("Ctrl との組み合わせ（Ctrl+L）は「ウェイポイントを記録」に使えない")
         );
         refused(&mut state, Action::Navigate, "Ctrl+Shift+L");
-        // Other hotkeys may.
+        // ほかのホットキーはよい。
         state.assign(Action::Zoom, Hotkey::parse("Ctrl+L").unwrap());
         assert_eq!(state.settings.zoom_key, "Ctrl+L");
-        // A saved one falls back to the default.
+        // 保存したものは既定に戻る。
         let settings = Settings {
             waypoint_key: "Ctrl+L".into(),
             ..Settings::default()
@@ -1645,7 +1637,7 @@ mod tests {
 
     #[test]
     fn the_menu_and_the_router_agree_on_fallen_back_keys() {
-        // The zoom on J falls back to Z; moving the waypoint key off J must not bring J back.
+        // J のズームは Z に戻る。ウェイポイントのキーを J から動かしても、J が戻ってきてはならない。
         let mut state = UiState::new(Settings {
             zoom_key: "J".into(),
             ..Settings::default()
@@ -1664,7 +1656,7 @@ mod tests {
         let note = refused(&mut state, Action::Waypoint, "Ctrl+C");
         assert_eq!(note.as_deref(), Some("C は F3+C に使うキーなので使えない"));
         refused(&mut state, Action::Navigate, "F3");
-        // The zoom may: the router hands its key to the game while F3 is held.
+        // ズームはよい：F3 を押している間、router はそのキーをゲームに渡す。
         state.assign(Action::Zoom, Hotkey::parse("C").unwrap());
         assert_eq!(state.settings.zoom_key, "C");
     }
@@ -1684,7 +1676,7 @@ mod tests {
             ],
             ..Settings::default()
         });
-        // The hooks give keypad 1 as 1: a hotkey on 1 would take its presses.
+        // フックはテンキーの 1 を 1 として渡す：1 のホットキーは、その押下を取ってしまう。
         let note = refused(&mut state, Action::Zoom, "1");
         assert_eq!(note.as_deref(), Some("テンキー 1 は置き換えに使っている"));
         let note = refused(&mut state, Action::Waypoint, "Shift+Mouse4");
@@ -1696,12 +1688,12 @@ mod tests {
         assert_eq!(state.settings.zoom_key, "Mouse5");
     }
 
-    /// The menu's window after a few frames on a screen of `size` points.
+    /// `size` ポイントの画面での、いくつかのフレームの後のメニューの窓。
     fn menu_rect(size: egui::Vec2, state: &mut UiState, waypoints: &WaypointView) -> Rect {
         menu_rect_in(&egui::Context::default(), size, state, waypoints)
     }
 
-    /// [`menu_rect`] in `ctx`, which remembers the earlier frames.
+    /// 前のフレームを覚えている `ctx` の中の [`menu_rect`]。
     fn menu_rect_in(
         ctx: &egui::Context,
         size: egui::Vec2,
@@ -1760,14 +1752,14 @@ mod tests {
     fn the_menu_scrolls_inside_a_small_window() {
         let waypoints = many_waypoints();
         let mut state = state();
-        // Minecraft's default 854×480, at a UI scale of 1.5 and 1.
+        // UI の拡大率 1.5 と 1 での、Minecraft の既定の 854×480。
         for small in [vec2(854.0 / 1.5, 480.0 / 1.5), vec2(854.0, 480.0)] {
             let rect = menu_rect(small, &mut state, &waypoints);
             let screen = Rect::from_min_size(Pos2::ZERO, small);
             assert!(screen.contains_rect(rect), "{rect:?} on {small:?}");
             assert!(rect.height() > small.y - 20.0, "uses the height: {rect:?}");
         }
-        // On a large screen the window is as tall as its contents.
+        // 大きな画面では、窓は中身と同じ高さ。
         let large = vec2(1920.0, 1080.0);
         let rect = menu_rect(large, &mut state, &waypoints);
         assert!(rect.height() < 900.0, "{rect:?}");
@@ -1780,7 +1772,7 @@ mod tests {
         let mut state = state();
         let large = vec2(1920.0, 1080.0);
         let fresh = menu_rect(large, &mut state, &waypoints);
-        // Opened in a small window, which is then maximized (and back).
+        // 小さいウィンドウで開き、それから最大化した（そして戻した）。
         let ctx = egui::Context::default();
         let small = vec2(854.0, 480.0);
         let rect = menu_rect_in(&ctx, small, &mut state, &waypoints);
@@ -1797,7 +1789,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = state();
         let rect = menu_rect_in(&ctx, vec2(1920.0, 1080.0), &mut state, &many_waypoints());
-        // A double click on the title bar folds a collapsible window.
+        // タイトルバーのダブルクリックは、畳める窓を畳む。
         let title = rect.min + vec2(rect.width() / 2.0, 12.0);
         let click = |pressed| egui::Event::PointerButton {
             pos: title,
@@ -1854,7 +1846,7 @@ mod tests {
         let mut state = state();
         state.assign(Action::Zoom, Hotkey::parse("Mouse5").unwrap());
         state.assign(Action::Menu, Hotkey::parse("F6").unwrap());
-        // Z is free now: a rule may use it.
+        // 今は Z が空いている：ルールが使ってよい。
         state
             .settings
             .rebinds
@@ -1864,13 +1856,12 @@ mod tests {
         assert_eq!(state.settings.menu_key, "Ctrl+I");
         assert_eq!(state.key_note.as_deref(), Some("Z は置き換えに使っている"));
         assert_eq!(hotkeys(&state.settings), state.keys);
-        // Nothing in the way: all back, no note.
+        // 邪魔するものはない：全部戻り、注記なし。
         state.settings.rebinds.clear();
         state.reset_hotkeys(&Action::GENERAL);
         assert_eq!(state.keys, Hotkeys::DEFAULT);
         assert_eq!(state.key_note, None);
-        // A rule on the default's key that changes nothing (the menu is on Ctrl+I already):
-        // no note either.
+        // 既定のキーへのルールで、何も変えないもの（メニューはもう Ctrl+I）：やはり注記なし。
         state
             .settings
             .rebinds
@@ -1890,7 +1881,7 @@ mod tests {
             .rebinds
             .push(rule("key.keyboard.z", "key.keyboard.c"));
         state.reset_hotkeys(&Action::GENERAL);
-        // The zoom stays on J, so the waypoint key cannot go back to J.
+        // ズームが J のままなので、ウェイポイントのキーは J に戻れない。
         assert_eq!(state.settings.zoom_key, "J");
         assert_eq!(state.settings.waypoint_key, "M");
         assert_eq!(state.settings.navigate_key, "K");
@@ -1917,7 +1908,7 @@ mod tests {
 
     #[test]
     fn saved_hotkeys_that_would_be_hidden_fall_back_to_the_defaults() {
-        // An older settings file with the zoom on J, now the waypoint key's default.
+        // ズームが J の古い設定ファイル。今は J はウェイポイントのキーの既定。
         let settings = Settings {
             zoom_key: "J".into(),
             ..Settings::default()
@@ -1930,11 +1921,11 @@ mod tests {
             ..Settings::default()
         };
         let keys = hotkeys(&settings);
-        // The waypoint key went back to J, which then hides the navigate key.
+        // ウェイポイントのキーは J に戻り、それが案内のキーを隠す。
         assert_eq!(keys.waypoint, Hotkey::DEFAULT_WAYPOINT);
         assert_eq!(keys.navigate, Hotkey::DEFAULT_NAVIGATE);
-        // A menu on J (allowed before there was a waypoint key) hides the default too: the
-        // default is kept (and logged) and the menu shows both on J.
+        // J のメニュー（ウェイポイントのキーができる前は許していた）も既定を隠す：既定のまま残し
+        // （ログに出す）、メニューは J に両方を出す。
         let settings = Settings {
             menu_key: "J".into(),
             ..Settings::default()

@@ -1,24 +1,24 @@
-//! The in-game browser: a WebView2 (Microsoft Edge) that draws off screen on a thread of its
-//! own, shown by the overlay as a picture of the page.
+//! ゲーム内ブラウザ：専用のスレッドで画面の外に描く WebView2（Microsoft Edge）。オーバーレイは
+//! それをページの絵として見せる。
 //!
-//! The browser thread ([`thread`]) owns the WebView ([`webview`]) and copies what it draws
-//! into [`FRAME`] ([`capture`]); the game's thread uploads the newest picture to a texture
-//! each frame. The game's thread never waits for the browser: it queues commands in the
-//! thread's [`Mailbox`] and wakes it with a window message.
+//! ブラウザのスレッド（[`thread`]）が WebView（[`webview`]）を持ち、描いたものを [`FRAME`] に
+//! 写す（[`capture`]）。ゲームのスレッドは、毎フレーム最新の絵をテクスチャに上げる。ゲームの
+//! スレッドはブラウザを待たない：命令をスレッドの [`Mailbox`] に並べ、ウィンドウのメッセージで
+//! 起こす。
 //!
-//! Nothing exists until the browser is first shown. Each start gets a new generation; the
-//! thread of an older one (still closing) no longer writes [`FRAME`] or [`SHARED`].
+//! 最初に見せるまでは何もない。起動のたびに新しい世代になる。古い世代のスレッド（まだ閉じる途中）
+//! は、もう [`FRAME`] にも [`SHARED`] にも書かない。
 //!
-//! The last page opened is kept in `browser.json` next to WebView2's data (not in the game
-//! folder's settings: an address can hold tokens), and the next start opens it.
+//! 最後に開いたページは、WebView2 のデータの隣の `browser.json` に残し（ゲームフォルダの設定には
+//! 残さない：アドレスはトークンを含みうる）、次の起動でそれを開く。
 //!
-//! Locks: [`SHARED`], [`FRAME`] and a mailbox's queue are leaves: none is held while taking
-//! another one, or while calling into WebView2. [`CONTROL`] is held while a command goes into
-//! the mailbox's queue and its window is woken (never the other way round).
+//! ロック：[`SHARED`]、[`FRAME`]、メールボックスのキューは末端：どれも、別のものを取る間や
+//! WebView2 を呼ぶ間は持たない。[`CONTROL`] は、命令をメールボックスのキューに入れてその
+//! ウィンドウを起こす間は持つ（逆はない）。
 //!
-//! Only the MSVC build has the browser itself. Its thread imports Direct3D 11, WinRT and
-//! COM (CoreMessaging, combase), which an agent built for Wine (GNU) could not load with:
-//! a missing import keeps the whole agent, and so the game, from starting.
+//! ブラウザそのものがあるのは MSVC のビルドだけ。そのスレッドは Direct3D 11、WinRT、COM
+//! （CoreMessaging、combase）を import し、Wine 向け（GNU）にビルドしたエージェントはそれを
+//! 読み込めない：import が足りないと、エージェント全体が、つまりゲームが起動しない。
 #![cfg_attr(not(target_env = "msvc"), allow(dead_code))]
 
 #[cfg(target_env = "msvc")]
@@ -28,7 +28,7 @@ mod thread;
 #[cfg(target_env = "msvc")]
 mod webview;
 
-/// The GNU build's stand-in: the browser cannot start.
+/// GNU のビルドの代わり：ブラウザは始められない。
 #[cfg(not(target_env = "msvc"))]
 mod thread {
     use std::io;
@@ -58,20 +58,20 @@ use reminedog_render::{
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
-/// Wakes the browser thread to run its mailbox.
+/// ブラウザのスレッドを起こして、メールボックスを動かす。
 const WM_APP_COMMAND: u32 = WM_APP + 1;
-/// A picture of the page is ready to be copied.
+/// ページの絵を写す用意ができた。
 const WM_APP_FRAME: u32 = WM_APP + 2;
 
-/// The newest picture of the page.
+/// ページの最新の絵。
 pub struct FrameSlot {
-    /// The browser it came from (0: none).
+    /// それが来たブラウザ（0：なし）。
     pub generation: u64,
-    /// Pixels.
+    /// ピクセル。
     pub size: [u32; 2],
-    /// `size[0] * size[1]` pixels, top row first, 4 bytes each (blue, green, red, alpha).
+    /// `size[0] * size[1]` のピクセル。上の行から、それぞれ 4 バイト（青、緑、赤、アルファ）。
     pub bgra: Vec<u8>,
-    /// Counts the pictures of this generation (0: none yet).
+    /// この世代の絵を数える（0：まだない）。
     pub seq: u64,
 }
 
@@ -82,20 +82,20 @@ static FRAME: Mutex<FrameSlot> = Mutex::new(FrameSlot {
     seq: 0,
 });
 
-/// Counts the changes of [`FRAME`] (made with it locked), so the game's thread locks it only
-/// for a new picture.
+/// [`FRAME`] の変更を数える（ロックしたまま変える）ので、ゲームのスレッドは新しい絵のときだけ
+/// それをロックする。
 static FRAME_VERSION: AtomicU64 = AtomicU64::new(0);
 
-/// Notes a change of [`FRAME`]; call with it locked.
+/// [`FRAME`] の変更を書き留める。ロックしたまま呼ぶこと。
 fn frame_changed() {
     FRAME_VERSION.fetch_add(1, Ordering::Release);
 }
 
-/// What the browser thread reports.
+/// ブラウザのスレッドが報告すること。
 #[derive(Debug, Clone)]
 struct Shared {
     generation: u64,
-    /// All but `shown`, which the game's thread knows ([`Control::shown`]).
+    /// `shown` 以外の全部（それはゲームのスレッドが知っている。[`Control::shown`]）。
     view: BrowserView,
     notices: Vec<Notice>,
 }
@@ -119,7 +119,7 @@ impl Shared {
 
 static SHARED: Mutex<Shared> = Mutex::new(Shared::new(0, BrowserState::Off));
 
-/// Updates the shared state if `generation` is still the current browser.
+/// `generation` がまだ今のブラウザなら、共有の状態を更新する。
 fn report(generation: u64, update: impl FnOnce(&mut Shared)) {
     let mut shared = lock(&SHARED);
     if shared.generation == generation {
@@ -127,26 +127,26 @@ fn report(generation: u64, update: impl FnOnce(&mut Shared)) {
     }
 }
 
-/// How long the browser's notices show, in seconds.
+/// ブラウザの通知を出す秒数。
 const NOTICE_SECONDS: f64 = 2.5;
 
 fn notice(text: impl Into<String>, warn: bool) -> Notice {
     Notice::new(text, warn, NOTICE_SECONDS)
 }
 
-/// Locks one of the module's statics (a panic while holding it left nothing half done).
+/// このモジュールの static の 1 つをロックする（持っている間のパニックは、何も途中のままに残さない）。
 fn lock<T>(mutex: &'static Mutex<T>) -> MutexGuard<'static, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Posts `message` to a window of the browser thread; once the window is gone the call fails
-/// harmlessly.
+/// `message` をブラウザのスレッドのウィンドウに送る。ウィンドウがもうなければ、呼び出しは害なく
+/// 失敗する。
 fn post(window: usize, message: u32) {
-    // SAFETY: plain call; the system checks the handle.
+    // SAFETY: ただの呼び出し。システムがハンドルを確かめる。
     let _ = unsafe { PostMessageW(Some(HWND(window as *mut _)), message, WPARAM(0), LPARAM(0)) };
 }
 
-/// What the browser thread is asked to do.
+/// ブラウザのスレッドに頼むこと。
 #[derive(Debug)]
 pub enum Command {
     Show,
@@ -158,21 +158,21 @@ pub enum Command {
     Layout(PageLayout),
     Input(PageInput),
     Media(MediaCommand),
-    /// Scrolls by this many pages (negative: up).
+    /// このページ数だけスクロールする（負なら上）。
     Scroll(f32),
     Quit,
-    /// Runs a script and sends back its value as JSON.
+    /// スクリプトを動かし、その値を JSON で返す。
     #[cfg(test)]
     Eval(String, std::sync::mpsc::Sender<String>),
-    /// Sends back whether the page is muted.
+    /// ページがミュートかを返す。
     #[cfg(test)]
     IsMuted(std::sync::mpsc::Sender<bool>),
 }
 
-/// Commands for one browser thread.
+/// 1 つのブラウザのスレッドへの命令。
 struct Mailbox {
     queue: Mutex<VecDeque<Command>>,
-    /// The thread's window (0 until it exists).
+    /// スレッドのウィンドウ（あるまでは 0）。
     window: AtomicUsize,
 }
 
@@ -208,7 +208,7 @@ static CONTROL: Mutex<Control> = Mutex::new(Control {
     generation: 0,
     mailbox: None,
     shown: false,
-    // Until the overlay sends the page's.
+    // オーバーレイがページのものを送るまで。
     layout: PageLayout {
         size: [800, 450],
         scale: 1.0,
@@ -220,19 +220,19 @@ fn control() -> MutexGuard<'static, Control> {
     lock(&CONTROL)
 }
 
-/// What the browser thread needs to start.
+/// ブラウザのスレッドが始めるのに要るもの。
 struct Start {
-    /// The page to open when `last_page` has none.
+    /// `last_page` になければ開くページ。
     url: String,
     layout: PageLayout,
-    /// WebView2's user data folder (cookies, cache).
+    /// WebView2 のユーザーデータのフォルダ（クッキー、キャッシュ）。
     data_dir: PathBuf,
-    /// Where the last page opened is kept ([`last_page`]).
+    /// 最後に開いたページを残す場所（[`last_page`]）。
     last_page: PathBuf,
 }
 
-/// Shows the browser, starting it if it is not running: on the last page opened, else on
-/// `url`. `dir`: the browser's folder ([`browser_dir`]).
+/// ブラウザを見せる。動いていなければ始める：最後に開いたページで、なければ `url` で。
+/// `dir`：ブラウザのフォルダ（[`browser_dir`]）。
 pub fn show(url: &str, dir: PathBuf) {
     let mut control = control();
     control.shown = true;
@@ -273,7 +273,7 @@ pub fn show(url: &str, dir: PathBuf) {
     }
 }
 
-/// Hides the browser; it keeps running (with its video paused).
+/// ブラウザを隠す。動き続ける（動画は止める）。
 pub fn hide() {
     let mut control = control();
     control.shown = false;
@@ -282,7 +282,7 @@ pub fn hide() {
     }
 }
 
-/// Stops the browser (its processes exit).
+/// ブラウザを止める（そのプロセスは終わる）。
 pub fn quit() {
     let mut control = control();
     control.shown = false;
@@ -294,7 +294,7 @@ pub fn quit() {
     }
 }
 
-/// Sets the page's size and scale, now or for the next start.
+/// ページの大きさと拡大率を、今か次の起動のために入れる。
 pub fn set_layout(layout: PageLayout) {
     let mut control = control();
     if control.layout == layout {
@@ -306,20 +306,20 @@ pub fn set_layout(layout: PageLayout) {
     }
 }
 
-/// Hands the running browser a command; without one it is dropped.
+/// 動いているブラウザに命令を渡す。なければ捨てる。
 pub fn send(command: Command) {
     if let Some(mailbox) = &control().mailbox {
         mailbox.post(command);
     }
 }
 
-/// Whether the browser is to be seen (it may still be starting).
+/// ブラウザを見せるか（まだ始まる途中かもしれない）。
 pub fn shown() -> bool {
     control().shown
 }
 
-/// The newest picture if it changed since `version` (which it updates), unless the browser
-/// thread is writing it right now (then the last one uploaded stays).
+/// `version` から変わっていれば最新の絵（`version` も更新する）。ただし、ブラウザのスレッドが
+/// いまそれを書いていれば別（そのときは最後に上げたものが残る）。
 pub fn frame_if_new(version: &mut u64) -> Option<MutexGuard<'static, FrameSlot>> {
     let current = FRAME_VERSION.load(Ordering::Acquire);
     if current == *version {
@@ -334,7 +334,7 @@ pub fn frame_if_new(version: &mut u64) -> Option<MutexGuard<'static, FrameSlot>>
     Some(frame)
 }
 
-/// What the overlay shows of the browser this frame, and the browser's new notices.
+/// このフレームでオーバーレイが見せるブラウザと、ブラウザの新しい通知。
 pub fn before_frame() -> (BrowserView, Vec<Notice>) {
     let shown = shown();
     let mut shared = lock(&SHARED);
@@ -345,7 +345,7 @@ pub fn before_frame() -> (BrowserView, Vec<Notice>) {
     (view, std::mem::take(&mut shared.notices))
 }
 
-/// The picture for the overlay, from a [`frame`] guard.
+/// [`frame`] のガードからの、オーバーレイのための絵。
 pub fn pixels(frame: &FrameSlot) -> BrowserPixels<'_> {
     BrowserPixels {
         generation: frame.generation,
@@ -355,7 +355,7 @@ pub fn pixels(frame: &FrameSlot) -> BrowserPixels<'_> {
     }
 }
 
-/// Carries out what the overlay and the browser's hotkeys asked for, in order.
+/// オーバーレイとブラウザのホットキーが頼んだことを、順に行う。
 pub fn after_frame(
     commands: Vec<BrowserCommand>,
     actions: Vec<BrowserAction>,
@@ -389,8 +389,8 @@ pub fn after_frame(
     }
 }
 
-/// The browser's own folder, shared by every instance of the game: `%LOCALAPPDATA%\reminedog`
-/// (WebView2's user data with cookies, so logins, and the cache; the last page).
+/// ゲームのどのインスタンスも共有する、ブラウザ自身のフォルダ：`%LOCALAPPDATA%\reminedog`
+/// （クッキー、つまりログインと、キャッシュを持つ WebView2 のユーザーデータ。最後のページ）。
 fn browser_dir(game_dir: &Path) -> PathBuf {
     match std::env::var_os("LOCALAPPDATA") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("reminedog"),
@@ -398,10 +398,10 @@ fn browser_dir(game_dir: &Path) -> PathBuf {
     }
 }
 
-/// The longest address kept as the last page.
+/// 最後のページとして残す、いちばん長いアドレス。
 const MAX_LAST_PAGE: usize = 8 * 1024;
 
-/// The last page opened, from `path` (`{"url": "https://..."}`).
+/// `path` の、最後に開いたページ（`{"url": "https://..."}`）。
 fn last_page(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
@@ -409,7 +409,7 @@ fn last_page(path: &Path) -> Option<String> {
     (is_web(url) && url.len() <= MAX_LAST_PAGE).then(|| url.to_owned())
 }
 
-/// Keeps `url` as the last page in `path`, if it is a web page of a sensible length.
+/// `url` が分別のある長さのウェブのページなら、`path` に最後のページとして残す。
 fn keep_last_page(path: &Path, url: &str) {
     if !is_web(url) || url.len() > MAX_LAST_PAGE {
         return;
@@ -425,7 +425,7 @@ fn is_web(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://")
 }
 
-/// Generation `generation` is over: the picture goes and the state says `state`.
+/// 世代 `generation` は終わった：絵は消え、状態は `state` を言う。
 fn stopped(generation: u64, state: BrowserState) {
     {
         let mut frame = lock(&FRAME);
@@ -438,13 +438,13 @@ fn stopped(generation: u64, state: BrowserState) {
     }
     let mut shared = lock(&SHARED);
     if shared.generation == generation {
-        // Generation 0: the ending thread can no longer write here.
+        // 世代 0：終わるスレッドはもうここに書けない。
         *shared = Shared::new(0, state);
     }
 }
 
-/// The browser thread `generation` ended on its own (it failed): forget it, so the next
-/// show starts a new one.
+/// ブラウザのスレッド `generation` が自分で終わった（失敗した）：忘れるので、次に見せるときは
+/// 新しいものを始める。
 fn thread_ended(generation: u64, state: BrowserState) {
     {
         let mut control = control();
@@ -458,7 +458,7 @@ fn thread_ended(generation: u64, state: BrowserState) {
 #[cfg(all(test, target_env = "msvc"))]
 mod tests;
 
-/// The overlay's side of the browser ([`reminedog_agent::os::Browser`]).
+/// オーバーレイの側のブラウザ（[`reminedog_agent::os::Browser`]）。
 pub struct WebView2;
 
 pub static WEBVIEW2: WebView2 = WebView2;

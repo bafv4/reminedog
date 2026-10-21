@@ -1,12 +1,12 @@
-//! A Japanese font for egui's fallbacks: Hiragino Sans, which every macOS has, else other
-//! fonts with Japanese in the usual places. The agent reads it once, on a thread of its own,
-//! and keeps it for the process.
+//! egui の代わりの字形に使う日本語フォント：どの macOS にもあるヒラギノ角ゴシック、なければ
+//! よくある場所の日本語を持つほかのフォント。エージェントは専用のスレッドで 1 回だけ読み、
+//! プロセスの間持つ。
 
 use std::path::Path;
 
 use reminedog_agent::os::FontFile;
 
-/// Files tried in order, with the face of Japanese in collections.
+/// 順に試すファイルと、コレクションの中の日本語の面。
 const CANDIDATES: &[(&str, u32)] = &[
     ("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", 0),
     ("/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc", 0),
@@ -15,7 +15,7 @@ const CANDIDATES: &[(&str, u32)] = &[
     ("/Library/Fonts/Arial Unicode.ttf", 0),
 ];
 
-/// The first of the candidates that can be read.
+/// 候補のうち、読める最初のもの。
 pub fn read() -> Option<FontFile> {
     for &(path, index) in CANDIDATES {
         let path = Path::new(path);

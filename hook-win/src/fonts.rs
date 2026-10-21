@@ -1,16 +1,16 @@
-//! Japanese fonts from the Windows installation, used as egui fallbacks. The agent reads the
-//! file (Yu Gothic is 14 MB) once, on a thread of its own, and keeps it for the process.
+//! egui の代わりの字形に使う、Windows に入っている日本語フォント。エージェントはファイル
+//! （游ゴシックは 14 MB）を専用のスレッドで 1 回だけ読み、プロセスの間持つ。
 
 use std::path::PathBuf;
 
 use reminedog_agent::os::FontFile;
 use windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW;
 
-/// Font collections tried in order; the first readable one wins. Face 0 of each is the
-/// regular (non-UI) variant.
+/// 順に試すフォントのコレクション。最初に読めたものを使う。それぞれの面 0 がふつうの
+/// （UI 用でない）もの。
 const CANDIDATES: &[&str] = &["YuGothM.ttc", "YuGothR.ttc", "meiryo.ttc", "msgothic.ttc"];
 
-/// The first Japanese font of the Windows installation that can be read.
+/// Windows に入っている、読める最初の日本語フォント。
 pub fn read() -> Option<FontFile> {
     let dir = fonts_dir();
     for file in CANDIDATES {
@@ -40,7 +40,7 @@ pub fn read() -> Option<FontFile> {
 
 fn fonts_dir() -> PathBuf {
     let mut buf = [0u16; 260];
-    // SAFETY: the buffer holds `buf.len()` u16s.
+    // SAFETY: バッファは `buf.len()` 個の u16 を持つ。
     let len = unsafe { GetWindowsDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
     let windows = if len > 0 && len < buf.len() {
         PathBuf::from(String::from_utf16_lossy(&buf[..len]))

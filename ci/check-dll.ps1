@@ -1,16 +1,16 @@
-# Checks a built reminedog.dll: it is x64, exports Agent_OnLoad, imports only DLLs every
-# Windows has (the CRT is linked statically: Java 8 ships no vcruntime140.dll, see
-# .cargo/config.toml; WebView2's loader is linked in too) and carries a version in its version
-# resource (with -Version, that version). Used by the CI and release workflows.
+﻿# ビルドした reminedog.dll を確かめる：x64 で、Agent_OnLoad を export し、どの Windows にもある
+# DLL だけを import し（CRT は静的にリンクする：Java 8 には vcruntime140.dll がない。
+# .cargo/config.toml を参照。WebView2 のローダーもリンクする）、バージョン情報のリソースに版を
+# 持つ（-Version を付ければその版）。CI とリリースのワークフローが使う。
 param(
     [Parameter(Mandatory)] [string] $Dll,
     [string] $Version
 )
 $ErrorActionPreference = 'Stop'
 
-# What the DLL may import: Windows' own DLLs. A new import fails the check until it is added
-# here, after making sure the DLL is on every Windows 10 and 11 (a missing one keeps the agent,
-# and so the game, from starting).
+# DLL が import してよいもの：Windows 自身の DLL。新しい import は、その DLL がどの Windows 10・11
+# にもあることを確かめてここに足すまで、確認に落ちる（ない DLL があるとエージェントが、つまり
+# ゲームが起動しない）。
 $allowed = @(
     'advapi32.dll', 'bcryptprimitives.dll', 'combase.dll', 'coremessaging.dll', 'd3d11.dll',
     'gdi32.dll', 'kernel32.dll', 'ntdll.dll', 'ole32.dll', 'oleaut32.dll', 'user32.dll'
@@ -37,7 +37,7 @@ $imports = $deps | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Objec
     Sort-Object -Unique
 $crt = $imports | Where-Object { $_ -match '^(vcruntime|msvcp|ucrtbase|api-ms-win-crt-)' }
 if ($crt) { throw "$Dll imports the dynamic CRT: $($crt -join ', ')" }
-# API sets of the core system (api-ms-win-core-*) are in every Windows 10 and 11.
+# コアのシステムの API セット（api-ms-win-core-*）は、どの Windows 10・11 にもある。
 $unexpected = $imports | Where-Object { $_ -notin $allowed -and $_ -notmatch '^api-ms-win-core-' }
 if ($unexpected) { throw "$Dll imports DLLs not on every PC: $($unexpected -join ', ')" }
 

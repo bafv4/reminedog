@@ -1,8 +1,8 @@
-//! Overlay rendering (zoom and UI) on top of an OpenGL context owned by the agent.
+//! エージェントが持つ OpenGL のコンテキストの上での、オーバーレイの描画（ズームと UI）。
 //!
-//! The platform hook makes its own GL context current on the game's drawable, calls
-//! [`Overlay::render`] and switches back before the real buffer swap, so nothing here
-//! ever touches the game's GL state.
+//! 各 OS のフックは、ゲームの描画先で自前の GL のコンテキストを今のものにして
+//! [`Overlay::render`] を呼び、本物のバッファのスワップの前に戻すので、ここではゲームの GL の
+//! 状態に触れることはない。
 
 mod browser;
 mod font_metrics;

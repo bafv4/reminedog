@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
-# On macOS (a GitHub Actions runner or a Mac): run the LWJGL smoke harness (ci/smoke) in a
-# window of the logged-in session, optionally with an agent library loaded via -agentpath:.
-# GLFW and SDL3 want the main thread on macOS, so Java starts with -XstartOnFirstThread, as
-# Minecraft's launchers do.
+# macOS（GitHub Actions のランナーか Mac）で：ログインしているセッションのウィンドウで LWJGL の
+# スモークのテスト用プログラム（ci/smoke）を動かす。必要ならエージェントのライブラリを
+# -agentpath: で読み込む。macOS の GLFW と SDL3 はメインスレッドを求めるので、Minecraft の
+# ランチャーと同じく Java を -XstartOnFirstThread で起動する。
 #
-# Usage: smoke.sh [--agent DYLIB] [--agent-options STR] [--lwjgl VERSION] [--sdl]
+# 使い方：smoke.sh [--agent DYLIB] [--agent-options STR] [--lwjgl VERSION] [--sdl]
 #                 [--grab SECONDS] [-- ARGS...]
-#   --agent DYLIB        load DYLIB with -agentpath:
-#   --agent-options STR  options passed to Agent_OnLoad (-agentpath:DYLIB=STR)
-#   --lwjgl VERSION      LWJGL version (3.3.3 or 3.4.3, default 3.3.3; --sdl needs 3.4.3). GLFW
-#                        needs a GPU: it asks for an accelerated pixel format, which a virtual
-#                        machine with only the software renderer lacks
-#   --sdl                run SmokeSdl (an SDL3 window, like Minecraft 26.x) instead of Smoke
-#   --grab SECONDS       that long after start, save the screen as screen.png in the run
-#                        directory (screencapture; the overlay is only checked this way)
-#   ARGS                 the harness's own arguments (default: --seconds=5 --mc)
-# The run directory (game dir, output, logs) is /tmp/smoke-run, printed at the end.
-# Environment: SMOKE_SRC (the repository, default: this script's), SMOKE_CACHE (jars and
-# classes, default /tmp/smoke-cache), SMOKE_RUN (the run directory), SMOKE_TIMEOUT (seconds,
-# 120).
+#   --agent DYLIB        DYLIB を -agentpath: で読み込む
+#   --agent-options STR  Agent_OnLoad に渡すオプション（-agentpath:DYLIB=STR）
+#   --lwjgl VERSION      LWJGL の版（3.3.3 か 3.4.3。既定は 3.3.3。--sdl には 3.4.3 が要る）。GLFW
+#                        には GPU が要る：Accelerated のピクセルフォーマットを求めるが、ソフトウェア
+#                        レンダラーしかない仮想マシンにはない
+#   --sdl                Smoke の代わりに SmokeSdl（Minecraft 26.x と同じく SDL3 のウィンドウ）を動かす
+#   --grab SECONDS       起動からその秒数の後、画面を実行のフォルダに screen.png として保存する
+#                        （screencapture。オーバーレイはこれでしか確かめない）
+#   ARGS                 テスト用プログラム自身の引数（既定：--seconds=5 --mc）
+# 実行のフォルダ（ゲームのフォルダ、出力、ログ）は /tmp/smoke-run。最後に出す。
+# 環境変数：SMOKE_SRC（リポジトリ。既定はこのスクリプトのもの）、SMOKE_CACHE（jar とクラス。
+# 既定は /tmp/smoke-cache）、SMOKE_RUN（実行のフォルダ）、SMOKE_TIMEOUT（秒。120）。
 set -euo pipefail
 
 agent='' agent_options='' lwjgl=3.3.3 harness=Smoke grab=''
@@ -59,9 +58,9 @@ if [ -n "$agent" ]; then
   java_args+=("-agentpath:$agent${agent_options:+=$agent_options}")
 fi
 
-# macOS has no timeout(1): a watchdog ends Java if it hangs (TERM, then KILL if Java does not
-# end), and leaves a file saying so. Its output goes elsewhere, so its sleep does not hold this
-# script's stdout (a pipe to tee) open after it is ended.
+# macOS には timeout(1) がない：見張りが、止まった Java を終わらせ（TERM、Java が終わらなければ
+# KILL）、そう書いたファイルを残す。見張りの出力は別のところへ送るので、見張りを終わらせた後に
+# その sleep がこのスクリプトの標準出力（tee へのパイプ）を開いたままにすることはない。
 java "${java_args[@]}" -cp "$cp:$classes" "$harness" "${args[@]}" >smoke.txt 2>&1 &
 java=$!
 (
@@ -76,7 +75,7 @@ if [ -n "$grab" ]; then
 fi
 status=0
 wait "$java" || status=$?
-# The watchdog first (so it goes no further), then its sleep.
+# 先に見張り（それ以上進まないように）、それからその sleep。
 { kill "$watchdog"; pkill -P "$watchdog" sleep; wait "$watchdog"; } 2>/dev/null || true
 cat smoke.txt
 if [ -e "$run/timed-out" ]; then

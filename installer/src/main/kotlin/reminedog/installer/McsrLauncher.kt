@@ -8,13 +8,12 @@ import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 
 /**
- * MCSR Launcher. Its data folder is the "launcher" folder next to MCSRLauncher.jar, with the
- * launcher's settings (options.json) and instances/<id>/instance.json.
+ * MCSR Launcher。データのフォルダは MCSRLauncher.jar の隣の "launcher" のフォルダで、
+ * ランチャーの設定（options.json）と instances/<id>/instance.json がある。
  *
- * An instance takes the launcher's Java settings (the Java, the memory and the JVM arguments
- * together) unless its "options.useLauncherJavaOption" is false. Adding reminedog to an instance
- * that takes the launcher's settings copies them into the instance first, so that only the
- * arguments change.
+ * インスタンスは、"options.useLauncherJavaOption" が false でない限り、ランチャーの Java の設定
+ * （Java、メモリ、JVM 引数をまとめて）を使う。ランチャーの設定を使うインスタンスに reminedog を
+ * 足すときは、引数だけが変わるように、先にそれらをインスタンスに写す。
  */
 class McsrLauncher(root: Path) : Launcher("MCSR Launcher", root) {
     private fun options(): Map<String, Any?> {
@@ -34,7 +33,7 @@ class McsrLauncher(root: Path) : Launcher("MCSR Launcher", root) {
             val json = try {
                 JsonDoc.load(file).root
             } catch (e: IOException) {
-                // Listed by its folder; reading it again shows the error.
+                // フォルダで並べる。読み直すとエラーが出る。
                 emptyMap<String, Any?>()
             }
             val name = (json["displayName"] as? String).orEmpty().ifEmpty { file.parent.fileName.toString() }
@@ -42,7 +41,7 @@ class McsrLauncher(root: Path) : Launcher("MCSR Launcher", root) {
         }
     }
 
-    /** The launcher holds a lock on launcher/_app.lock while it runs. */
+    /** ランチャーは動いている間 launcher/_app.lock をロックしている。 */
     override fun isRunning(processes: Processes): Boolean {
         val lockFile = root.resolve("_app.lock")
         if (!Files.isRegularFile(lockFile)) return false
@@ -64,7 +63,7 @@ class McsrLauncher(root: Path) : Launcher("MCSR Launcher", root) {
 
         private fun usesLauncher(options: Map<String, Any?>) = options["useLauncherJavaOption"] != false
 
-        /** The instance's own arguments; without "jvmArguments" it gets the launcher's. */
+        /** インスタンス自身の引数。"jvmArguments" がなければランチャーのものを使う。 */
         private fun own(options: Map<String, Any?>) = options["jvmArguments"] as? String ?: globalArgs()
 
         override fun read(): Args {
@@ -86,7 +85,7 @@ class McsrLauncher(root: Path) : Launcher("MCSR Launcher", root) {
                 doc.save()
                 return Change.Installed(args)
             }
-            // The instance follows the launcher's Java settings: copy them into the instance.
+            // インスタンスはランチャーの Java の設定に従う：それをインスタンスに写す。
             val launcher = options()
             val javaPath = launcher["javaPath"] as? String
             val minMemory = launcher["minMemory"] as? JsonNumber

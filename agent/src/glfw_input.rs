@@ -1,18 +1,18 @@
-//! GLFW input: the game's callbacks are wrapped so the overlay sees every event first.
+//! GLFW の入力：オーバーレイがどのイベントも先に見られるように、ゲームのコールバックを包む。
 //!
-//! The `glfwSet*Callback` functions are hooked ([`crate::hook`]). GLFW gets our wrapper instead
-//! of the game's callback, and the game's pointer is kept here. Each setter hands back the
-//! game's previous pointer, never the wrapper: LWJGL frees whatever the setters return
-//! (`Callbacks.glfwFreeCallbacks` at shutdown), so returning a wrapper would crash on exit.
-//! Wrappers never call game code while holding a lock.
+//! `glfwSet*Callback` の関数をフックする（[`crate::hook`]）。GLFW にはゲームのコールバックの
+//! 代わりに自前の包みを渡し、ゲームのポインタはここに覚える。各設定の関数は、包みではなく
+//! ゲームの前のポインタを返す：LWJGL は設定の関数が返したものを解放する（終了時の
+//! `Callbacks.glfwFreeCallbacks`）ので、包みを返すと終了時に落ちる。
+//! 包みは、ロックを持ったままゲームのコードを呼ばない。
 //!
-//! The key rebinding gives the game's callbacks the router's output in place of the event, key
-//! or mouse button alike; `glfwGetKey` and the modifier bits of key events report what the
-//! game got ([`rebind_state`]).
+//! キーの置き換えは、キーでもマウスのボタンでも、イベントの代わりに router の出力をゲームの
+//! コールバックに渡す。`glfwGetKey` とキーのイベントの修飾キーのビットは、ゲームが受け取った
+//! ものを答える（[`rebind_state`]）。
 //!
-//! F3+C for waypoints ([`f3c`]) goes straight to the game's key callback after a swap
-//! ([`run_f3c`]); `glfwSetClipboardString` is hooked to catch the location, and
-//! `glfwGetKey` to report the modifier as held meanwhile (Minecraft 1.16 reads F3 that way).
+//! ウェイポイントのための F3+C（[`f3c`]）は、スワップの後にゲームのキーのコールバックへ直接
+//! 送る（[`run_f3c`]）。座標を捕まえるために `glfwSetClipboardString` を、その間は修飾キーを
+//! 押していると答えるために `glfwGetKey` をフックする（Minecraft 1.16 は F3 をそう読む）。
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
@@ -53,10 +53,10 @@ const MOD_SHIFT: c_int = 0x1;
 const MOD_CONTROL: c_int = 0x2;
 const MOD_ALT: c_int = 0x4;
 const MOD_SUPER: c_int = 0x8;
-/// The modifier bits the rebinding may change; Caps Lock's and Num Lock's stay.
+/// 置き換えが変えてよい修飾キーのビット。Caps Lock と Num Lock のものは残す。
 const MOD_KEYS: c_int = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
-/// The modifier keys and their bits: the left Shift, Control, Alt and Super, then the right
-/// ones. A bit is set while either of its keys is held.
+/// 修飾キーとそのビット：左の Shift、Control、Alt、Super、その後に右のもの。ビットは、
+/// どちらかのキーを押している間立つ。
 const MODIFIER_KEYS: [(c_int, c_int); 8] = [
     (340, MOD_SHIFT),
     (341, MOD_CONTROL),
@@ -67,9 +67,9 @@ const MODIFIER_KEYS: [(c_int, c_int); 8] = [
     (346, MOD_ALT),
     (347, MOD_SUPER),
 ];
-/// GLFW key codes are below this (`GLFW_KEY_LAST` + 1).
+/// GLFW のキーコードはこれより小さい（`GLFW_KEY_LAST` + 1）。
 const KEY_COUNT: usize = 349;
-/// The rebinding's key id (SDL scancode) of each GLFW key code; 0 for none.
+/// 各 GLFW のキーコードの、置き換えのキーの id（SDL のスキャンコード）。なければ 0。
 const KEY_IDS: [u16; KEY_COUNT] = {
     let mut ids = [0; KEY_COUNT];
     let mut key = 0;
@@ -85,7 +85,7 @@ const CURSOR: c_int = 0x0003_3001;
 const CURSOR_DISABLED: c_int = 0x0003_4003;
 const RAW_MOUSE_MOTION: c_int = 0x0003_3005;
 
-/// The game's callbacks of one window.
+/// 1 つのウィンドウのゲームのコールバック。
 #[derive(Default, Clone, Copy)]
 struct GameCallbacks {
     key: Option<KeyFn>,
@@ -98,22 +98,22 @@ struct GameCallbacks {
     framebuffer_size: Option<FramebufferSizeFn>,
 }
 
-// SAFETY: plain function pointers.
+// SAFETY: ただの関数ポインタ。
 unsafe impl Send for GameCallbacks {}
 
 static GAME: Mutex<Option<HashMap<usize, GameCallbacks>>> = Mutex::new(None);
 static GET_INPUT_MODE: OnceLock<GetInputModeFn> = OnceLock::new();
-/// GLFW 3.3 and later: raw input is the GLFW_RAW_MOUSE_MOTION input mode, which Minecraft's
-/// "Raw Input" setting switches.
+/// GLFW 3.3 以降：生の入力は GLFW_RAW_MOUSE_MOTION の入力のモードで、Minecraft の
+/// 「Raw Input」の設定がこれを切り替える。
 static RAW_MOTION_OPTIONAL: AtomicBool = AtomicBool::new(false);
 static SET_CLIPBOARD_STRING: Original<SetClipboardStringFn> = Original::new();
-/// The real glfwGetKey: the real key state, never spoofed.
+/// 本物の glfwGetKey：本当のキーの状態。偽装しない。
 static GET_KEY: Original<GetKeyFn> = Original::new();
-/// glfwGetKey itself: the real key state, for the agent (the game's calls go through the hook).
+/// glfwGetKey そのもの：エージェントのための本当のキーの状態（ゲームの呼び出しはフックを通る）。
 static GET_KEY_EXPORT: OnceLock<GetKeyFn> = OnceLock::new();
 static GET_KEY_SCANCODE: OnceLock<GetKeyScancodeFn> = OnceLock::new();
-/// While F3+C is being sent, glfwGetKey reports `SPOOF_KEY` of this window as pressed
-/// (0 = off).
+/// F3+C を送っている間、glfwGetKey はこのウィンドウの `SPOOF_KEY` を押していると答える
+/// （0 = 偽装しない）。
 static SPOOF_WINDOW: AtomicUsize = AtomicUsize::new(0);
 static SPOOF_KEY: AtomicI32 = AtomicI32::new(0);
 
@@ -124,7 +124,7 @@ fn game_callbacks(window: *mut c_void) -> GameCallbacks {
         .unwrap_or_default()
 }
 
-/// Swaps in the game's new callback and returns its previous one.
+/// ゲームの新しいコールバックに入れ替え、前のものを返す。
 fn replace_game_callback<T>(
     window: *mut c_void,
     field: impl FnOnce(&mut GameCallbacks) -> &mut Option<T>,
@@ -138,28 +138,28 @@ fn replace_game_callback<T>(
     std::mem::replace(field(entry), callback)
 }
 
-/// Whether the game has grabbed the cursor (it is being played, not showing a menu).
+/// ゲームがカーソルを捕まえているか（プレイ中で、メニューを出していない）。
 pub fn captured(window: *mut c_void) -> bool {
     GET_INPUT_MODE.get().is_some_and(|get| {
-        // SAFETY: a window GLFW passed us, on its event thread.
+        // SAFETY: GLFW が渡したウィンドウを、そのイベントのスレッドで。
         unsafe { get(window, CURSOR) == CURSOR_DISABLED }
     })
 }
 
-/// Whether a captured cursor reports raw mouse counts rather than the system pointer's
-/// motion. GLFW builds without `glfwRawMouseMotionSupported` (the 3.3 pre-release in
-/// LWJGL 3.1.6, as Minecraft 1.13 ships) always use raw input for a disabled cursor.
+/// 捕まえたカーソルが、システムのポインターの動きではなく生のマウスの数を報告するか。
+/// `glfwRawMouseMotionSupported` のない GLFW のビルド（Minecraft 1.13 が使う LWJGL 3.1.6 の
+/// 3.3 の先行版）は、無効にしたカーソルでは必ず生の入力を使う。
 pub fn raw_motion(window: *mut c_void) -> bool {
     if !RAW_MOTION_OPTIONAL.load(Ordering::Relaxed) {
         return true;
     }
     GET_INPUT_MODE.get().is_none_or(|get| {
-        // SAFETY: a window GLFW passed us; the mode exists in this GLFW version.
+        // SAFETY: GLFW が渡したウィンドウ。この GLFW の版にはこのモードがある。
         unsafe { get(window, RAW_MOUSE_MOTION) != 0 }
     })
 }
 
-/// Defines the hook of one `glfwSet*Callback` function.
+/// 1 つの `glfwSet*Callback` の関数のフックを定義する。
 macro_rules! setter {
     ($hook:ident, $original:ident, $field:ident, $fn:ty, $wrapper:ident) => {
         static $original: Original<unsafe extern "C" fn(*mut c_void, Option<$fn>) -> Option<$fn>> =
@@ -172,7 +172,7 @@ macro_rules! setter {
             })
             .flatten();
             let ours: Option<$fn> = callback.map(|_| $wrapper as $fn);
-            // SAFETY: same window; our wrapper has the callback's signature.
+            // SAFETY: 同じウィンドウ。自前の包みはコールバックのシグネチャを持つ。
             unsafe { original(window, ours) };
             previous
         }
@@ -260,7 +260,7 @@ static HOOKS: LazyLock<[Hook; 10]> = LazyLock::new(|| {
             set_framebuffer_size_hook as *const c_void,
             &SET_FRAMEBUFFER_SIZE,
         ),
-        // F3+C: the game's clipboard writes, the real key state, and F3 as 1.16 reads it.
+        // F3+C：ゲームのクリップボードへの書き込み、本当のキーの状態、1.16 が読む F3。
         Hook::new(
             c"glfwSetClipboardString",
             set_clipboard_string_hook as *const c_void,
@@ -270,15 +270,15 @@ static HOOKS: LazyLock<[Hook; 10]> = LazyLock::new(|| {
     ]
 });
 
-/// The hooks of GLFW's input functions.
+/// GLFW の入力の関数のフック。
 pub fn hooks() -> &'static [Hook] {
     &*HOOKS
 }
 
-/// Hooks the callback setters. Failures only cost the overlay its input.
+/// コールバックの設定の関数をフックする。失敗しても、オーバーレイが入力を失うだけ。
 pub fn install(module: usize) {
     if let Some(f) = export(module, c"glfwGetInputMode") {
-        // SAFETY: glfwGetInputMode has this signature.
+        // SAFETY: glfwGetInputMode はこのシグネチャ。
         let _ =
             GET_INPUT_MODE.set(unsafe { std::mem::transmute::<*const c_void, GetInputModeFn>(f) });
     }
@@ -287,19 +287,19 @@ pub fn install(module: usize) {
         Ordering::Relaxed,
     );
     if let Some(f) = export(module, c"glfwGetKey") {
-        // SAFETY: glfwGetKey has this signature.
+        // SAFETY: glfwGetKey はこのシグネチャ。
         let _ = GET_KEY_EXPORT.set(unsafe { std::mem::transmute::<*const c_void, GetKeyFn>(f) });
     }
     if let Some(f) = export(module, c"glfwGetKeyScancode") {
-        // SAFETY: glfwGetKeyScancode has this signature (GLFW 3.3+; optional).
+        // SAFETY: glfwGetKeyScancode はこのシグネチャ（GLFW 3.3 以降。なくてもよい）。
         let _ = GET_KEY_SCANCODE
             .set(unsafe { std::mem::transmute::<*const c_void, GetKeyScancodeFn>(f) });
     }
     f3c::set_hooks(f3c_hooks_ready);
 }
 
-/// What F3+C needs: the game's key callback and clipboard writes through the hooks (LWJGL
-/// looks every GLFW function up at once), and the real key state.
+/// F3+C が要るもの：フックを通るゲームのキーのコールバックとクリップボードへの書き込み
+/// （LWJGL は GLFW の関数をまとめて引く）と、本当のキーの状態。
 fn f3c_hooks_ready() -> bool {
     SET_KEY.get().is_some()
         && SET_CLIPBOARD_STRING.get().is_some()
@@ -315,7 +315,7 @@ fn modifiers(mods: c_int) -> reminedog_render::Modifiers {
     )
 }
 
-/// The rebinding's key id of a GLFW key code (key -1 has none: GLFW keeps no state for it).
+/// GLFW のキーコードの、置き換えのキーの id（key -1 にはない：GLFW はその状態を持たない）。
 fn key_id(key: c_int) -> Option<InputId> {
     let id = *KEY_IDS.get(usize::try_from(key).ok()?)?;
     (id != 0).then_some(InputId::Key(id))
@@ -340,7 +340,7 @@ unsafe extern "C" fn key_wrapper(
             captured(window),
             key == -1,
         );
-        // GLFW updated its key state before calling us; the game reads ours from now on.
+        // GLFW は私たちを呼ぶ前に自分のキーの状態を更新した。ここからゲームはこちらのものを読む。
         rebind_state::apply(window as usize, &router.rebind_state());
         delivery
     });
@@ -351,35 +351,35 @@ unsafe extern "C" fn key_wrapper(
     }
 }
 
-/// Calls the game's key callback. The user's own F3+C: a location the game copies while
-/// handling the copy key's press is theirs.
+/// ゲームのキーのコールバックを呼ぶ。利用者自身の F3+C：コピーのキーの押下を処理する間に
+/// ゲームがコピーする座標は、利用者のもの。
 fn key_to_game(window: *mut c_void, key: c_int, scancode: c_int, action: c_int, mods: c_int) {
     let Some(game) = game_callbacks(window).key else {
         return;
     };
-    // Only with the debug modifier down as the game sees it: Ctrl+C in a text field may copy
-    // text that reads as a location (a /tp command).
+    // ゲームから見てデバッグの修飾キーを押しているときだけ：入力欄の Ctrl+C は、座標に読める
+    // 文字（/tp のコマンド）をコピーするかもしれない。
     let passive = action == PRESS && f3c::passive_key_glfw(key) && input::router().debug_held();
     if passive {
         crate::catch("GLFW F3+C", f3c::begin_passive);
     }
-    // SAFETY: a window GLFW passed us, on the thread that handles its events.
+    // SAFETY: GLFW が渡したウィンドウを、そのイベントを処理するスレッドで。
     unsafe { game(window, key, scancode, action, mods) };
     if passive {
         crate::catch("GLFW F3+C", f3c::end_passive);
     }
 }
 
-/// Gives the game the rebinding's `output` as GLFW would report it: a key with `key_mods`, a
-/// mouse button with `button_mods` (Minecraft takes a click's modifiers as they physically are).
+/// 置き換えの `output` を、GLFW が報告するようにゲームに渡す：キーなら `key_mods` で、マウスの
+/// ボタンなら `button_mods` で（Minecraft はクリックの修飾キーを物理のままで受け取る）。
 fn send_output(window: *mut c_void, output: Output, key_mods: c_int, button_mods: c_int) {
     match output.id {
         InputId::Key(_) => {
             let Some((key, scancode)) = glfw_key_of(output.id) else {
                 return;
             };
-            // What GLFW reports for the key, else the table's. Not asked for key -1 (GLFW would
-            // report an invalid key to the game's error callback).
+            // キーについて GLFW が答えるもの、なければ表のもの。key -1 については聞かない（GLFW は
+            // 無効なキーとしてゲームのエラーのコールバックに報告してしまう）。
             let scancode = match key {
                 -1 => scancode,
                 _ => match key_scancode(key) {
@@ -395,7 +395,7 @@ fn send_output(window: *mut c_void, output: Output, key_mods: c_int, button_mods
             key_to_game(window, key, scancode, action, key_mods);
         }
         InputId::Mouse(_) => {
-            // A mouse button never repeats; the game would take a repeat for a release.
+            // マウスのボタンはリピートしない。ゲームはリピートを解放と受け取ってしまう。
             let action = match output.phase {
                 Phase::Press => PRESS,
                 Phase::Release => RELEASE,
@@ -404,17 +404,17 @@ fn send_output(window: *mut c_void, output: Output, key_mods: c_int, button_mods
             if let Some(button) = glfw_button_of(output.id)
                 && let Some(game) = game_callbacks(window).mouse_button
             {
-                // SAFETY: as above.
+                // SAFETY: 上と同じ。
                 unsafe { game(window, button, action, button_mods) };
             }
         }
     }
 }
 
-/// The modifier bits of a key event for the game. While the rebinding has a say on a modifier
-/// key, Shift, Control, Alt and Super follow the key state the game reads (GLFW sets them from
-/// the physical keys, so a key rebound to Ctrl would not set Control, and Ctrl rebound to F3
-/// would turn F3+B into Ctrl+B).
+/// ゲームに渡すキーのイベントの修飾キーのビット。置き換えが修飾キーについて判断を持つ間は、
+/// Shift、Control、Alt、Super は、ゲームが読むキーの状態に従う（GLFW は物理のキーから立てる
+/// ので、Ctrl に置き換えたキーでは Control が立たず、F3 に置き換えた Ctrl は F3+B を Ctrl+B に
+/// してしまう）。
 fn adjust_mods(window: *mut c_void, mods: c_int) -> c_int {
     if !rebind_state::modifiers_forced() {
         return mods;
@@ -422,7 +422,7 @@ fn adjust_mods(window: *mut c_void, mods: c_int) -> c_int {
     let real = real_get_key();
     rebuild_mods(mods, |key| {
         let physically = || {
-            // SAFETY: a window GLFW passed us, on its event thread; a valid key code.
+            // SAFETY: GLFW が渡したウィンドウを、そのイベントのスレッドで。有効なキーコード。
             real.is_some_and(|get| unsafe { get(window, key) } == PRESS)
         };
         match key_id(key) {
@@ -432,7 +432,7 @@ fn adjust_mods(window: *mut c_void, mods: c_int) -> c_int {
     })
 }
 
-/// `mods` with the Shift, Control, Alt and Super bits set by which modifier keys are `held`.
+/// `mods` の Shift、Control、Alt、Super のビットを、`held` の修飾キーで立てたもの。
 fn rebuild_mods(mods: c_int, held: impl Fn(c_int) -> bool) -> c_int {
     MODIFIER_KEYS.iter().fold(
         mods & !MOD_KEYS,
@@ -442,7 +442,7 @@ fn rebuild_mods(mods: c_int, held: impl Fn(c_int) -> bool) -> c_int {
     )
 }
 
-/// The safety net's releases ([`rebind_state::lost_releases`]), after a swap of `window`.
+/// `window` のスワップの後の、安全網の解放（[`rebind_state::lost_releases`]）。
 pub fn release_lost_keys(window: *mut c_void) {
     for output in rebind_state::lost_releases(window as usize) {
         send_output(window, output, 0, 0);
@@ -462,7 +462,7 @@ unsafe extern "C" fn char_wrapper(window: *mut c_void, codepoint: c_uint) {
     if text_route(codepoint) != Some(Route::Consume)
         && let Some(game) = game_callbacks(window).char
     {
-        // SAFETY: as above.
+        // SAFETY: 上と同じ。
         unsafe { game(window, codepoint) };
     }
 }
@@ -471,7 +471,7 @@ unsafe extern "C" fn char_mods_wrapper(window: *mut c_void, codepoint: c_uint, m
     if text_route(codepoint) != Some(Route::Consume)
         && let Some(game) = game_callbacks(window).char_mods
     {
-        // SAFETY: as above.
+        // SAFETY: 上と同じ。
         unsafe { game(window, codepoint, mods) };
     }
 }
@@ -500,7 +500,7 @@ unsafe extern "C" fn mouse_button_wrapper(
     match delivery.unwrap_or(Delivery::Forward) {
         Delivery::Forward => {
             if let Some(game) = game_callbacks(window).mouse_button {
-                // SAFETY: as above.
+                // SAFETY: 上と同じ。
                 unsafe { game(window, button, action, mods) };
             }
         }
@@ -517,7 +517,7 @@ unsafe extern "C" fn cursor_pos_wrapper(window: *mut c_void, x: f64, y: f64) {
     if let Some((x, y)) = forward
         && let Some(game) = game_callbacks(window).cursor_pos
     {
-        // SAFETY: as above (with the position corrected for motion the overlay took).
+        // SAFETY: 上と同じ（オーバーレイが取った動きの分だけ位置を直して）。
         unsafe { game(window, x, y) };
     }
 }
@@ -527,15 +527,15 @@ unsafe extern "C" fn scroll_wrapper(window: *mut c_void, dx: f64, dy: f64) {
     if route != Some(Route::Consume)
         && let Some(game) = game_callbacks(window).scroll
     {
-        // SAFETY: as above.
+        // SAFETY: 上と同じ。
         unsafe { game(window, dx, dy) };
     }
 }
 
 unsafe extern "C" fn focus_wrapper(window: *mut c_void, focused: c_int) {
     if focused == 0 {
-        // GLFW sends the releases of held keys (but key -1) and buttons after this callback,
-        // which the router drops for rebound sources: their outputs are released here, first.
+        // GLFW はこのコールバックの後に、押しているキー（key -1 を除く）とボタンの解放を送り、
+        // router は置き換えた元のキーのものを捨てる：その出力は、ここで先に離す。
         let releases = crate::catch("GLFW focus", || {
             let mut router = router();
             let releases = router.focus_lost(|id| !matches!(glfw_key_of(id), Some((-1, _))));
@@ -544,18 +544,18 @@ unsafe extern "C" fn focus_wrapper(window: *mut c_void, focused: c_int) {
         })
         .unwrap_or_default();
         for output in releases {
-            // Without modifiers, as GLFW's own releases on focus loss.
+            // GLFW 自身のフォーカスを失ったときの解放と同じく、修飾キーなしで。
             send_output(window, output, 0, 0);
         }
     }
     if let Some(game) = game_callbacks(window).focus {
-        // SAFETY: as above.
+        // SAFETY: 上と同じ。
         unsafe { game(window, focused) };
     }
 }
 
-/// While the game renders at the zoom's tall size, a real resize is held back until the
-/// zoom ends (the game is then told the new size).
+/// ゲームがズームの縦長の大きさで描いている間は、本当の大きさの変更をズームが終わるまで
+/// 止めておく（そのときに新しい大きさを伝える）。
 unsafe extern "C" fn framebuffer_size_wrapper(window: *mut c_void, width: c_int, height: c_int) {
     let held = crate::catch("GLFW framebuffer size", || crate::tall::real_resize(window));
     if held != Some(true) {
@@ -563,42 +563,41 @@ unsafe extern "C" fn framebuffer_size_wrapper(window: *mut c_void, width: c_int,
     }
 }
 
-/// Calls the game's framebuffer size callback, as GLFW does on a resize.
+/// 大きさが変わったときの GLFW と同じく、ゲームのフレームバッファの大きさのコールバックを呼ぶ。
 pub fn send_framebuffer_size(window: *mut c_void, width: c_int, height: c_int) {
     if let Some(game) = game_callbacks(window).framebuffer_size {
         log::debug!("framebuffer size {width}x{height} to the game");
-        // SAFETY: a window GLFW passed us, on the thread that handles its events.
+        // SAFETY: GLFW が渡したウィンドウを、そのイベントを処理するスレッドで。
         unsafe { game(window, width, height) };
     }
 }
 
-/// Keeps the location Minecraft copies for our F3+C off the clipboard, and sees the user's
-/// own F3+C.
+/// 自前の F3+C で Minecraft がコピーする座標をクリップボードに入れず、利用者自身の F3+C を見る。
 unsafe extern "C" fn set_clipboard_string_hook(window: *mut c_void, text: *const c_char) {
     let Some(original) = SET_CLIPBOARD_STRING.get() else {
         return;
     };
-    // Other writes (the game's own copying) are passed on unread.
+    // ほかの書き込み（ゲーム自身のコピー）は読まずに通す。
     let ours = !text.is_null()
         && f3c::watching()
         && crate::catch("glfwSetClipboardString hook", || {
-            // SAFETY: NUL-terminated UTF-8, valid only during this call (LWJGL frees it right
-            // after); it is read here, before returning.
+            // SAFETY: NUL で終わる UTF-8 で、この呼び出しの間だけ有効（LWJGL はすぐ後に解放する）。
+            // 戻る前にここで読む。
             f3c::on_clipboard(&unsafe { CStr::from_ptr(text) }.to_string_lossy())
         })
         .unwrap_or(false);
     if !ours {
-        // SAFETY: the caller's arguments.
+        // SAFETY: 呼び出し側の引数。
         unsafe { original(window, text) };
     }
 }
 
-/// The key state the game should see: the modifier while F3+C is being sent (Minecraft 1.16
-/// asks glfwGetKey whether F3 is held when C's key event arrives), else the rebinding's say
-/// ([`rebind_state`]), else the real state. Lock-free: the game calls it often.
+/// ゲームが見るべきキーの状態：F3+C を送っている間は修飾キー（Minecraft 1.16 は、C のキーの
+/// イベントが来たときに F3 を押しているかを glfwGetKey に聞く）、そうでなければ置き換えの判断
+/// （[`rebind_state`]）、それもなければ本当の状態。ロックなし：ゲームは頻繁に呼ぶ。
 unsafe extern "C" fn get_key_hook(window: *mut c_void, key: c_int) -> c_int {
     let state = match GET_KEY.get() {
-        // SAFETY: the caller's arguments; GLFW reports its own errors.
+        // SAFETY: 呼び出し側の引数。エラーは GLFW が自分で報告する。
         Some(original) => unsafe { original(window, key) },
         None => RELEASE,
     };
@@ -613,16 +612,16 @@ unsafe extern "C" fn get_key_hook(window: *mut c_void, key: c_int) -> c_int {
     }
 }
 
-/// glfwGetKey without the spoof.
+/// 偽装なしの glfwGetKey。
 fn real_get_key() -> Option<GetKeyFn> {
     GET_KEY_EXPORT.get().copied()
 }
 
-/// The scancode GLFW would report with `key`; 0 if it cannot tell (Minecraft only looks at
-/// scancodes of keys without a key code). Asked when needed: GLFW must be initialized.
+/// `key` について GLFW が報告するスキャンコード。分からなければ 0（Minecraft がスキャンコードを
+/// 見るのは、キーコードのないキーだけ）。要るときに聞く：GLFW が初期化されていなければならない。
 fn key_scancode(key: c_int) -> c_int {
     GET_KEY_SCANCODE.get().map_or(0, |get| {
-        // SAFETY: glfwGetKeyScancode takes any key code.
+        // SAFETY: glfwGetKeyScancode はどのキーコードでも受け取る。
         match unsafe { get(key) } {
             -1 => 0,
             scancode => scancode,
@@ -630,19 +629,19 @@ fn key_scancode(key: c_int) -> c_int {
     })
 }
 
-/// Calls the game's current key callback as GLFW would, without modifiers; false if the game
-/// has none.
+/// GLFW がするように、修飾キーなしでゲームの今のキーのコールバックを呼ぶ。ゲームがコールバックを
+/// 持っていなければ false。
 fn send_key(window: *mut c_void, key: c_int, action: c_int) -> bool {
     let Some(game) = game_callbacks(window).key else {
         return false;
     };
-    // SAFETY: a window GLFW passed us, on the thread that handles its events.
+    // SAFETY: GLFW が渡したウィンドウを、そのイベントを処理するスレッドで。
     unsafe { game(window, key, key_scancode(key), action, 0) };
     true
 }
 
-/// Sends a waypoint request's F3+C to the game, if one waits for `window`. Called after the
-/// swap, outside every lock: the game handles the keys (and copies the location) right away.
+/// `window` へのウェイポイントの要求が待っていれば、その F3+C をゲームに送る。スワップの後、
+/// どのロックも持たずに呼ぶ：ゲームはすぐにキーを処理する（そして座標をコピーする）。
 pub fn run_f3c(window: *mut c_void) {
     let Some(job) = f3c::take_job(Some(window as usize)) else {
         return;
@@ -653,18 +652,18 @@ pub fn run_f3c(window: *mut c_void) {
     }
 }
 
-/// The modifier's and copy key's codes, if F3+C can be sent now.
+/// いま F3+C を送れるなら、修飾キーとコピーのキーのコード。
 fn check_f3c(window: *mut c_void, keys: &DebugKeys) -> Result<(c_int, c_int), Failure> {
     let codes = f3c::key_codes(keys, glfw_key)?;
     if !captured(window) {
         return Err(Failure::NotPlaying);
     }
     let get_key = real_get_key().ok_or(Failure::NoHooks)?;
-    // A held crash key would arm Minecraft's debug crash once the modifier is down, the real
-    // release of a held modifier would come after ours (and toggle the debug overlay), and,
-    // where the copy key also drops items, Ctrl would make a refused C drop a whole stack
-    // (only then: Ctrl is often held to sprint). Held as the game reads them: a key rebound
-    // to one of them counts, one rebound to another key does not.
+    // 押しているクラッシュのキーは、修飾キーが下りると Minecraft のデバッグのクラッシュを始めて
+    // しまう。押している修飾キーの本当の解放は自分のものの後に来る（デバッグの画面を切り替える）。
+    // コピーのキーがアイテムを捨てるキーでもあるときは、Ctrl があると断られた C がスタックごと
+    // 捨ててしまう（そのときだけ：Ctrl はダッシュでよく押している）。ゲームが読むとおりに押して
+    // いるか：それらに置き換えたキーは数え、別のキーに置き換えたものは数えない。
     let ctrl = keys.copy_drops_items();
     let crash = f3c::crash_key(keys, Naming::Glfw)
         .and_then(glfw_key_of)
@@ -681,7 +680,7 @@ fn check_f3c(window: *mut c_void, keys: &DebugKeys) -> Result<(c_int, c_int), Fa
         .into_iter()
         .flatten()
         .filter(|&key| {
-            // SAFETY: a window GLFW passed us, on its event thread; valid key codes.
+            // SAFETY: GLFW が渡したウィンドウを、そのイベントのスレッドで。有効なキーコード。
             let physically = || unsafe { get_key(window, key) } == PRESS;
             match key_id(key) {
                 Some(id) => rebind_state::held(id, physically),
@@ -699,22 +698,22 @@ fn check_f3c(window: *mut c_void, keys: &DebugKeys) -> Result<(c_int, c_int), Fa
     Ok((codes.modifier, codes.copy))
 }
 
-/// One F3+C on the game's key callback. However it ends, a panic included, dropping it clears
-/// the spoof, releases a modifier it left pressed and settles the job: the game is never left
-/// with the modifier held.
+/// ゲームのキーのコールバックへの 1 回の F3+C。どう終わっても（パニックも含めて）、捨てると
+/// 偽装を消し、押したまま残った修飾キーを離し、仕事を終わらせる：ゲームに修飾キーを押した
+/// まま残さない。
 struct Burst {
     window: *mut c_void,
     purpose: Purpose,
     modifier: c_int,
-    /// A modifier PRESS reached the game, and its RELEASE did not yet.
+    /// 修飾キーの PRESS はゲームに届き、RELEASE はまだ届いていない。
     modifier_down: bool,
-    /// `end_injected` ran (any failure is reported right after).
+    /// `end_injected` が動いた（失敗があれば、すぐ後に報告する）。
     settled: bool,
 }
 
 impl Burst {
     fn begin(window: *mut c_void, purpose: Purpose, modifier: c_int) -> Self {
-        // Made first, so it undoes the spoof whatever happens next.
+        // 最初に作るので、この後に何が起きても偽装を戻す。
         let burst = Self {
             window,
             purpose,
@@ -755,11 +754,12 @@ fn stop_spoof() {
     SPOOF_WINDOW.store(0, Ordering::Relaxed);
 }
 
-/// Modifier PRESS, copy PRESS, copy RELEASE, modifier RELEASE (the spoof ends before it).
-/// Refused, that RELEASE toggled the debug overlay; one more PRESS and RELEASE toggles it back.
+/// 修飾キーの PRESS、コピーの PRESS、コピーの RELEASE、修飾キーの RELEASE（偽装はその前に
+/// 終わる）。断られた場合、その RELEASE がデバッグの画面を切り替えた。もう 1 回の PRESS と
+/// RELEASE で戻す。
 fn send_f3c(window: *mut c_void, purpose: Purpose, modifier: c_int, copy: c_int) {
     let mut burst = Burst::begin(window, purpose, modifier);
-    // The callback disappears only at shutdown; the guard reports it.
+    // コールバックがなくなるのは終了時だけ。ガードが報告する。
     if !burst.press_modifier() || !send_key(window, copy, PRESS) {
         return;
     }
@@ -770,10 +770,10 @@ fn send_f3c(window: *mut c_void, purpose: Purpose, modifier: c_int, copy: c_int)
     burst.settled = true;
     match copied {
         Injected::Captured => {}
-        // The game handled the keys; only its text was not a location.
+        // ゲームはキーを処理した。その文字が座標でなかっただけ。
         Injected::Written => f3c::fail(purpose, Failure::Unreadable),
-        // The game's copy did not come through a hook: whatever it wrote, it did not refuse
-        // (and the debug overlay was not toggled).
+        // ゲームのコピーはフックを通らなかった：何を書いたにせよ、断ってはいない（デバッグの画面も
+        // 切り替わっていない）。
         Injected::Nothing if SET_CLIPBOARD_STRING.get().is_none() => {
             f3c::fail(purpose, Failure::NoHooks);
         }
@@ -786,8 +786,8 @@ fn send_f3c(window: *mut c_void, purpose: Purpose, modifier: c_int, copy: c_int)
     }
 }
 
-/// egui's name for a GLFW key code (the keys a text field or a hotkey can use). GLFW key
-/// codes name positions on a US keyboard.
+/// GLFW のキーコードの egui の名前（入力欄とホットキーが使えるキー）。GLFW のキーコードは
+/// US 配列のキーボードの位置を名付ける。
 fn egui_key(key: c_int) -> Option<Key> {
     const LETTERS: [Key; 26] = [
         Key::A,
@@ -834,7 +834,7 @@ fn egui_key(key: c_int) -> Option<Key> {
         48..=57 => DIGITS[(key - 48) as usize],
         32 => Key::Space,
         256 => Key::Escape,
-        257 | 335 => Key::Enter, // Enter, keypad Enter
+        257 | 335 => Key::Enter, // Enter、テンキーの Enter
         258 => Key::Tab,
         259 => Key::Backspace,
         260 => Key::Insert,
@@ -850,17 +850,17 @@ fn egui_key(key: c_int) -> Option<Key> {
         290..=314 => FUNCTION_KEYS[(key - 290) as usize],
         39 => Key::Quote,
         44 => Key::Comma,
-        45 | 333 => Key::Minus,  // keypad -
-        46 | 330 => Key::Period, // keypad .
-        47 | 331 => Key::Slash,  // keypad /
+        45 | 333 => Key::Minus,  // テンキーの -
+        46 | 330 => Key::Period, // テンキーの .
+        47 | 331 => Key::Slash,  // テンキーの /
         59 => Key::Semicolon,
-        61 | 336 => Key::Equals, // keypad =
+        61 | 336 => Key::Equals, // テンキーの =
         91 => Key::OpenBracket,
         92 => Key::Backslash,
         93 => Key::CloseBracket,
         96 => Key::Backtick,
-        320..=329 => DIGITS[(key - 320) as usize], // keypad digits
-        334 => Key::Plus,                          // keypad +
+        320..=329 => DIGITS[(key - 320) as usize], // テンキーの数字
+        334 => Key::Plus,                          // テンキーの +
         _ => return None,
     })
 }
@@ -873,17 +873,17 @@ mod tests {
     fn key_ids_of_glfw_key_codes() {
         assert_eq!(key_id(65), Some(InputId::Key(4))); // A
         assert_eq!(key_id(292), Some(InputId::Key(60))); // F3
-        assert_eq!(key_id(340), Some(InputId::Key(225))); // left Shift
-        assert_eq!(key_id(347), Some(InputId::Key(231))); // right Super
+        assert_eq!(key_id(340), Some(InputId::Key(225))); // 左の Shift
+        assert_eq!(key_id(347), Some(InputId::Key(231))); // 右の Super
         assert_eq!(key_id(348), Some(InputId::Key(101))); // Menu
-        // Both of GLFW's "world" keys are the ISO key.
+        // GLFW の 2 つの "world" のキーは、どちらも ISO 配列のキー。
         assert_eq!(key_id(161), Some(InputId::Key(100)));
         assert_eq!(key_id(162), Some(InputId::Key(100)));
-        // Key -1, codes GLFW does not use, F25 (SDL3 has none), out of range.
+        // key -1、GLFW が使わないコード、F25（SDL3 にはない）、範囲外。
         for key in [-1, i32::MIN, 0, 31, 64, 314, 349, i32::MAX] {
             assert_eq!(key_id(key), None, "{key}");
         }
-        // The modifier keys are the rebinding's modifier keys.
+        // 修飾キーは、置き換えの修飾キー。
         for (key, _) in MODIFIER_KEYS {
             let Some(InputId::Key(id)) = key_id(key) else {
                 panic!("{key}");
@@ -898,9 +898,9 @@ mod tests {
     #[test]
     fn modifier_bits_follow_the_held_keys() {
         const CAPS_LOCK: c_int = 0x10;
-        // Nothing held: only Caps Lock's bit stays.
+        // 何も押していない：Caps Lock のビットだけ残る。
         assert_eq!(rebuild_mods(MOD_KEYS | CAPS_LOCK, |_| false), CAPS_LOCK);
-        // Either side sets the bit.
+        // どちら側でもビットが立つ。
         assert_eq!(rebuild_mods(0, |key| key == 345), MOD_CONTROL);
         assert_eq!(rebuild_mods(0, |key| key == 340), MOD_SHIFT);
         assert_eq!(

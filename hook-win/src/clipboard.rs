@@ -1,5 +1,5 @@
-//! The system clipboard for the menu's text fields (paste, copy). Win32's own functions are
-//! used: the window libraries' clipboard functions are hooked for F3+C.
+//! メニューの入力欄（貼り付け、コピー）のためのシステムのクリップボード。Win32 自身の関数を使う：
+//! ウィンドウのライブラリのクリップボードの関数は、F3+C のためにフックしている。
 
 use windows_sys::Win32::Foundation::{GlobalFree, HWND};
 use windows_sys::Win32::System::DataExchange::{
@@ -10,32 +10,32 @@ use windows_sys::Win32::System::Memory::{
 };
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 
-/// The most UTF-16 units read (the router keeps fewer characters of a paste).
+/// 読む UTF-16 の単位の最大の数（router は貼り付けの文字をこれより少なく残す）。
 const MAX_UNITS: usize = 16 * 1024;
 
-/// The clipboard, open; closed when dropped.
+/// 開いたクリップボード。捨てると閉じる。
 struct Open;
 
 impl Open {
-    /// Fails while another program has the clipboard open.
+    /// ほかのプログラムがクリップボードを開いている間は失敗する。
     fn new(owner: HWND) -> Option<Self> {
-        // SAFETY: plain call.
+        // SAFETY: ただの呼び出し。
         (unsafe { OpenClipboard(owner) } != 0).then_some(Open)
     }
 }
 
 impl Drop for Open {
     fn drop(&mut self) {
-        // SAFETY: opened by `Open::new`.
+        // SAFETY: `Open::new` が開いた。
         unsafe { CloseClipboard() };
     }
 }
 
-/// The clipboard's text, if it has any.
+/// クリップボードの文字（あれば）。
 pub fn read_text(owner: HWND) -> Option<String> {
     let _open = Open::new(owner)?;
-    // SAFETY: the clipboard is open, so its data stays valid; it is read only while locked,
-    // within the size the system reports.
+    // SAFETY: クリップボードは開いているので、そのデータは有効なまま。ロックしている間だけ、
+    // システムが報告する大きさの中で読む。
     unsafe {
         let handle = GetClipboardData(u32::from(CF_UNICODETEXT));
         if handle.is_null() {
@@ -54,14 +54,14 @@ pub fn read_text(owner: HWND) -> Option<String> {
     }
 }
 
-/// Puts `text` on the clipboard, owned by `owner` (the game's window). False if it could not.
+/// `text` を、`owner`（ゲームのウィンドウ）が持つものとしてクリップボードに置く。置けなければ false。
 pub fn write_text(owner: HWND, text: &str) -> bool {
     let units: Vec<u16> = text.encode_utf16().chain([0]).collect();
     let Some(_open) = Open::new(owner) else {
         return false;
     };
-    // SAFETY: the clipboard is open. The memory is written only while locked, within its
-    // size; the clipboard owns it once `SetClipboardData` took it, else it is freed here.
+    // SAFETY: クリップボードは開いている。メモリはロックしている間だけ、その大きさの中で書く。
+    // `SetClipboardData` が受け取ったらクリップボードが持ち、そうでなければここで解放する。
     unsafe {
         if EmptyClipboard() == 0 {
             return false;

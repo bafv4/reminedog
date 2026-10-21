@@ -1,4 +1,4 @@
-//! The input router shared by the GLFW and SDL3 hooks and the frame code.
+//! GLFW と SDL3 のフックとフレームの処理が共有する入力の振り分け（router）。
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -6,12 +6,12 @@ use reminedog_render::{InputRouter, Modifiers};
 
 static ROUTER: Mutex<InputRouter> = Mutex::new(InputRouter::new());
 
-/// The router. Callers must not call game code while holding it.
+/// router。持っている間は、ゲームのコードを呼ばないこと。
 pub fn router() -> MutexGuard<'static, InputRouter> {
     ROUTER.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// egui modifiers from the three flags every platform reports.
+/// どの OS でも報告される 3 つのフラグから作る egui の修飾キー。
 pub fn modifiers(shift: bool, ctrl: bool, alt: bool) -> Modifiers {
     Modifiers {
         alt,
@@ -22,7 +22,7 @@ pub fn modifiers(shift: bool, ctrl: bool, alt: bool) -> Modifiers {
     }
 }
 
-/// F1 to F25, for the platforms' key tables.
+/// F1〜F25（各 OS のキーの表のため）。
 pub const FUNCTION_KEYS: [reminedog_render::Key; 25] = {
     use reminedog_render::Key::*;
     [

@@ -5,9 +5,9 @@ import java.nio.file.InvalidPathException
 import java.nio.file.Path
 import java.nio.file.Paths
 
-/** Finds the launchers' data folders. */
+/** ランチャーのデータのフォルダを探す。 */
 object Launchers {
-    /** The launchers in their usual places. */
+    /** いつもの場所にあるランチャー。 */
     fun detect(): List<Launcher> {
         val appData = System.getenv("APPDATA")
         val localAppData = System.getenv("LOCALAPPDATA")
@@ -23,7 +23,7 @@ object Launchers {
                 add(path(localAppData, "MultiMC"))
             }
             if (home != null) {
-                // MultiMC runs from wherever it was unzipped; these are the common places.
+                // MultiMC は展開した場所ならどこからでも動く。これはよくある場所。
                 for (folder in listOf("Desktop", "Downloads", "Documents")) add(path(home, folder, "MultiMC"))
                 add(path(home, "MultiMC"))
                 add(path(home, "scoop", "persist", "prismlauncher"))
@@ -34,8 +34,8 @@ object Launchers {
     }
 
     /**
-     * The launchers whose data folder is [folder] or holds it (up to three levels up, so that
-     * picking the instances folder or an instance works too).
+     * データのフォルダが [folder] であるか [folder] を含むランチャー（インスタンスのフォルダや
+     * インスタンスを選んでも見つかるように、3 階層上まで）。
      */
     fun find(folder: Path): List<Launcher> =
         generateSequence(folder.toAbsolutePath().normalize()) { it.parent }
@@ -44,7 +44,7 @@ object Launchers {
             .firstOrNull { it.isNotEmpty() }
             .orEmpty()
 
-    /** The launchers whose data folder is exactly [dir]. */
+    /** データのフォルダがちょうど [dir] のランチャー。 */
     fun at(dir: Path): List<Launcher> = buildList {
         for (file in listOf(MojangLauncher.FILE, MojangLauncher.STORE_FILE)) {
             if (Files.isRegularFile(dir.resolve(file))) add(MojangLauncher(dir, file))
@@ -54,7 +54,7 @@ object Launchers {
         } else if (Files.isRegularFile(dir.resolve(MultiMcLauncher.MULTIMC_CONFIG))) {
             add(MultiMcLauncher.multimc(dir))
         }
-        // MCSR Launcher: the install folder (MCSRLauncher.jar and launcher/) or its launcher/ folder.
+        // MCSR Launcher：インストールのフォルダ（MCSRLauncher.jar と launcher/）か、その launcher/ のフォルダ。
         val parent = dir.parent
         if (Files.isRegularFile(dir.resolve("MCSRLauncher.jar")) && Files.isDirectory(dir.resolve("launcher"))) {
             add(McsrLauncher(dir.resolve("launcher")))

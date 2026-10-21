@@ -1,17 +1,17 @@
-//! OS-independent logic shared by the platform hooks.
+//! 各 OS のフックが共有する、OS に依存しない処理。
 //!
-//! - [`browser`]: the in-game browser's page input (as CDP calls), address bar and video scripts
-//! - [`location`]: parsing the F3+C clipboard text (`/execute in ... run tp @s x y z yaw pitch`)
-//! - [`waypoint`]: per-world waypoint files with atomic saves
-//! - [`world`]: world ids and file names, `latest.log` parsing and tailing, singleplayer detection
-//! - [`session`]: the world the player is in, and that world's waypoints
-//! - [`nav`]: distance and direction to a waypoint, nether coordinate conversion
-//! - [`keybinds`]: Minecraft's key names and keys ([`InputId`]), and the key bindings in
-//!   `options.txt` (F3+C's, and every key's mappings)
-//! - [`options`]: the `-agentpath:...=<options>` string
-//! - [`gamedir`]: finding the game directory and reminedog's files in it
-//! - [`logfile`]: a file backend for the `log` crate
-//! - [`settings`]: the user's settings file
+//! - [`browser`]：ゲーム内ブラウザのページへの入力（CDP の呼び出しとして）、アドレス欄、動画のスクリプト
+//! - [`location`]：F3+C のクリップボードの文字（`/execute in ... run tp @s x y z yaw pitch`）の解析
+//! - [`waypoint`]：アトミックに保存する、ワールドごとのウェイポイントのファイル
+//! - [`world`]：ワールドの id とファイルの名前、`latest.log` の解析と追跡、シングルプレイの判定
+//! - [`session`]：プレイヤーがいるワールドと、そのワールドのウェイポイント
+//! - [`nav`]：ウェイポイントへの距離と方角、ネザーの座標の変換
+//! - [`keybinds`]：Minecraft のキーの名前とキー（[`InputId`]）、`options.txt` のキーの割り当て
+//!   （F3+C のものと、各キーの割り当て）
+//! - [`options`]：`-agentpath:...=<options>` の文字列
+//! - [`gamedir`]：ゲームフォルダと、その中の reminedog のファイルを探す
+//! - [`logfile`]：`log` crate のファイルへの出力
+//! - [`settings`]：利用者の設定ファイル
 
 pub mod browser;
 pub mod gamedir;

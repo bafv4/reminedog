@@ -1,11 +1,10 @@
-//! GLX: OpenGL contexts on X11, for [`crate::linux`] (the agent keeps its own context on the
-//! game's drawable with them).
+//! GLX：X11 の OpenGL のコンテキスト。[`crate::linux`] のため（エージェントはこれで、ゲームの
+//! 描画先の上に自前のコンテキストを持つ）。
 //!
-//! libGL and libX11 are the game's: GLFW and SDL3 load them, and the agent looks its functions
-//! up once they are there. The agent's own context is made with the game context's
-//! framebuffer configuration, so it can be current on the game's drawable. Xlib's default
-//! error handler ends the process, so the agent's GLX calls that can fail run under a handler
-//! of its own ([`trap_x_errors`]).
+//! libGL と libX11 はゲームのもの：GLFW と SDL3 が読み込み、エージェントは読み込まれてから関数を
+//! 引く。エージェント自前のコンテキストはゲームのコンテキストのフレームバッファの設定で作るので、
+//! ゲームの描画先で今のものにできる。Xlib の既定のエラー処理はプロセスを終えるので、エージェントの
+//! 失敗しうる GLX の呼び出しは自前のエラー処理の下で行う（[`trap_x_errors`]）。
 
 use std::ffi::{CStr, c_int, c_ulong, c_void};
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
@@ -16,7 +15,7 @@ use crate::dl;
 type Display = c_void;
 type GlxContext = *mut c_void;
 type GlxFbConfig = *mut c_void;
-/// An X resource id (`XID`, here a GLX drawable).
+/// X のリソースの id（`XID`。ここでは GLX の描画先）。
 type Xid = c_ulong;
 type Bool = c_int;
 
@@ -29,7 +28,7 @@ const GLX_SCREEN: c_int = 0x800C;
 const GLX_FBCONFIG_ID: c_int = 0x8013;
 const GLX_RGBA_TYPE: c_int = 0x8014;
 
-/// Xlib's `XErrorEvent`, as far as the handler reads it.
+/// Xlib の `XErrorEvent`（エラー処理が読むところまで）。
 #[repr(C)]
 struct XErrorEvent {
     kind: c_int,
@@ -63,15 +62,14 @@ struct Glx {
 }
 
 static GLX: OnceLock<Result<Glx, String>> = OnceLock::new();
-/// The game's X display, seen when its context was current.
+/// ゲームのコンテキストが今のものだったときに見た、ゲームの X のディスプレイ。
 static DISPLAY: AtomicUsize = AtomicUsize::new(0);
-/// The last X error caught by [`trap_x_errors`] (0: none).
+/// [`trap_x_errors`] が捕まえた最後の X のエラー（0：なし）。
 static X_ERROR: AtomicI32 = AtomicI32::new(0);
-/// Serializes [`trap_x_errors`] (the error handler is process-wide).
+/// [`trap_x_errors`] を 1 つずつにする（エラー処理はプロセス全体のもの）。
 static TRAP: Mutex<()> = Mutex::new(());
-/// The (drawable, context) pairs made current once without an X error: switching between them
-/// again on the drawable current now (twice a frame) skips the error trap and its round trip to
-/// the X server.
+/// X のエラーなしで一度今のものにできた（描画先、コンテキスト）の組：今の描画先でそれらを
+/// もう一度切り替えるとき（1 フレームに 2 回）は、エラーの捕捉と X サーバーとの往復を省く。
 static SWITCHED: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
 
 fn get() -> Result<&'static Glx, String> {
@@ -83,17 +81,17 @@ fn resolve() -> Result<Glx, String> {
         .or_else(|| dl::loaded(c"libGLX.so.0"))
         .ok_or("libGL is not loaded")?;
     let x11 = dl::loaded(c"libX11.so.6").ok_or("libX11 is not loaded")?;
-    /// The function `name` of `library` as `F`, the type of the field it fills.
+    /// `library` の関数 `name` を、それが埋めるフィールドの型 `F` として。
     ///
     /// # Safety
-    /// `F` is the function's type.
+    /// `F` はその関数の型。
     unsafe fn get<F>(library: usize, name: &CStr) -> Result<F, String> {
         let p =
             dl::symbol(library, name).ok_or_else(|| format!("no {}", name.to_string_lossy()))?;
-        // SAFETY: guaranteed by the caller.
+        // SAFETY: 呼び出し側が保証する。
         Ok(unsafe { std::mem::transmute_copy::<*const c_void, F>(&p) })
     }
-    // SAFETY: GLX's and Xlib's functions with their C signatures.
+    // SAFETY: GLX と Xlib の関数を C のシグネチャで。
     unsafe {
         Ok(Glx {
             get_current_context: get(gl, c"glXGetCurrentContext")?,
@@ -114,7 +112,7 @@ fn resolve() -> Result<Glx, String> {
 }
 
 unsafe extern "C" fn on_x_error(_display: *mut Display, event: *mut XErrorEvent) -> c_int {
-    // SAFETY: Xlib passes the error's event.
+    // SAFETY: Xlib はエラーのイベントを渡す。
     let code = if event.is_null() {
         -1
     } else {
@@ -124,11 +122,11 @@ unsafe extern "C" fn on_x_error(_display: *mut Display, event: *mut XErrorEvent)
     0
 }
 
-/// Runs `f` (GLX calls on `display`) with X errors caught instead of ending the process.
+/// `f`（`display` への GLX の呼び出し）を、X のエラーでプロセスを終えずに捕まえて動かす。
 fn trap_x_errors<R>(glx: &Glx, display: *mut Display, f: impl FnOnce() -> R) -> Result<R, String> {
     let _serial = TRAP.lock().unwrap_or_else(|e| e.into_inner());
     X_ERROR.store(0, Ordering::Relaxed);
-    // SAFETY: Xlib's functions; the previous handler is put back.
+    // SAFETY: Xlib の関数。前のエラー処理は戻す。
     unsafe {
         let previous = (glx.x_set_error_handler)(Some(on_x_error));
         let result = f();
@@ -150,12 +148,12 @@ fn display() -> Result<*mut Display, String> {
     }
 }
 
-/// The drawable and context current on this thread (0 if none).
+/// このスレッドで今の描画先とコンテキスト（なければ 0）。
 pub fn current() -> (usize, usize) {
     let Ok(glx) = get() else {
         return (0, 0);
     };
-    // SAFETY: plain queries.
+    // SAFETY: ただの問い合わせ。
     unsafe {
         let context = (glx.get_current_context)();
         if context.is_null() {
@@ -169,25 +167,25 @@ pub fn current() -> (usize, usize) {
     }
 }
 
-/// The context current on this thread (0 if none).
+/// このスレッドで今のコンテキスト（なければ 0）。
 pub fn current_context() -> usize {
     get().map_or(0, |glx| {
-        // SAFETY: a plain query.
+        // SAFETY: ただの問い合わせ。
         unsafe { (glx.get_current_context)() as usize }
     })
 }
 
-/// A GL function for the current context, null if there is none.
+/// 今のコンテキストの GL の関数。コンテキストがなければ null。
 pub fn function(name: &CStr) -> *const c_void {
     get().map_or(std::ptr::null(), |glx| {
-        // SAFETY: a NUL-terminated name.
+        // SAFETY: NUL で終わる名前。
         unsafe { (glx.get_proc_address)(name.as_ptr().cast()) }
     })
 }
 
-/// The framebuffer configuration of the game's current context, and its screen.
+/// ゲームの今のコンテキストのフレームバッファの設定と、そのスクリーン。
 fn game_config(glx: &Glx, display: *mut Display) -> Result<GlxFbConfig, String> {
-    // SAFETY: queries on the current context of `display`; the list is freed with XFree.
+    // SAFETY: `display` の今のコンテキストへの問い合わせ。一覧は XFree で解放する。
     unsafe {
         let context = (glx.get_current_context)();
         if context.is_null() {
@@ -208,13 +206,13 @@ fn game_config(glx: &Glx, display: *mut Display) -> Result<GlxFbConfig, String> 
     }
 }
 
-/// A context for the game's drawable, with the game context's configuration.
+/// ゲームの描画先のための、ゲームのコンテキストの設定のコンテキスト。
 pub fn create_context(_surface: usize) -> Result<usize, String> {
     let glx = get()?;
     let display = display()?;
     let config = game_config(glx, display)?;
     let context = trap_x_errors(glx, display, || {
-        // SAFETY: a configuration of `display`; direct rendering, no sharing.
+        // SAFETY: `display` の設定。直接描画、共有なし。
         unsafe { (glx.create_new_context)(display, config, GLX_RGBA_TYPE, std::ptr::null_mut(), 1) }
     })?;
     if context.is_null() {
@@ -223,12 +221,12 @@ pub fn create_context(_surface: usize) -> Result<usize, String> {
     Ok(context as usize)
 }
 
-/// Makes `context` current on `drawable` (0 and 0: none).
+/// `context` を `drawable` で今のものにする（0 と 0：なし）。
 pub fn make_current(drawable: usize, context: usize) -> Result<(), String> {
     let glx = get()?;
     let display = display()?;
     let switch = || {
-        // SAFETY: a context of `display` and a drawable it can draw on, or none.
+        // SAFETY: `display` のコンテキストと、それが描ける描画先、またはなし。
         unsafe {
             (glx.make_context_current)(
                 display,
@@ -240,10 +238,10 @@ pub fn make_current(drawable: usize, context: usize) -> Result<(), String> {
     };
     let pair = (drawable, context);
     let mut switched = SWITCHED.lock().unwrap_or_else(|e| e.into_inner());
-    // Only a switch on the drawable current now (the swap's, which exists) skips the trap: a
-    // pair known before may name a drawable since destroyed (the overlay's teardown after the
-    // game's drawable changed), and an untrapped X error ends the process.
-    // SAFETY: a plain query.
+    // 捕捉を省くのは今の描画先（スワップのもので、存在する）での切り替えだけ：前に知った組は、
+    // その後で消えた描画先を指すことがあり（ゲームの描画先が変わった後のオーバーレイの後片付け）、
+    // 捕まえない X のエラーはプロセスを終える。
+    // SAFETY: ただの問い合わせ。
     let on_current = drawable != 0 && unsafe { (glx.get_current_drawable)() } as usize == drawable;
     let made = if on_current && switched.contains(&pair) {
         switch()
@@ -260,7 +258,7 @@ pub fn make_current(drawable: usize, context: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// Deletes a context that is not current.
+/// 今のものでないコンテキストを消す。
 pub fn delete_context(context: usize) -> Result<(), String> {
     let glx = get()?;
     let display = display()?;
@@ -269,12 +267,12 @@ pub fn delete_context(context: usize) -> Result<(), String> {
         .unwrap_or_else(|e| e.into_inner())
         .retain(|&(_, c)| c != context);
     trap_x_errors(glx, display, || {
-        // SAFETY: the agent's context, not current.
+        // SAFETY: エージェントのコンテキスト。今のものではない。
         unsafe { (glx.destroy_context)(display, context as GlxContext) }
     })
 }
 
-/// The game context's framebuffer configuration, for the log.
+/// ゲームのコンテキストのフレームバッファの設定（ログ用）。
 pub fn describe(drawable: usize) -> String {
     let (Ok(glx), Ok(display)) = (get(), display()) else {
         return format!("drawable 0x{drawable:x}");
@@ -284,7 +282,7 @@ pub fn describe(drawable: usize) -> String {
     };
     let attribute = |name| {
         let mut value = 0;
-        // SAFETY: a configuration of `display`.
+        // SAFETY: `display` の設定。
         unsafe { (glx.get_fb_config_attrib)(display, config, name, &mut value) };
         value
     };

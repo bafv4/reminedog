@@ -8,8 +8,8 @@ import java.nio.file.StandardCopyOption
 fun readUtf8(file: Path): String = String(Files.readAllBytes(file), Charsets.UTF_8)
 
 /**
- * Replaces a file with new text through a temporary file next to it, so that a failure never
- * leaves a half-written settings file.
+ * 隣の一時ファイルを通してファイルを新しい文字で置き換える。失敗しても書きかけの設定ファイルを
+ * 残さないように。
  */
 fun writeAtomically(file: Path, text: String) {
     val temp = file.resolveSibling("${file.fileName}.reminedog-tmp")
@@ -21,7 +21,7 @@ fun writeAtomically(file: Path, text: String) {
     }
 }
 
-/** Moves [source] over [target], in one step where the file system can. */
+/** [source] を [target] の上に移す。ファイルシステムができるなら 1 回の操作で。 */
 fun moveReplacing(source: Path, target: Path) {
     try {
         Files.move(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)

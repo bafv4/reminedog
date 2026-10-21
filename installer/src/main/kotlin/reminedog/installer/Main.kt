@@ -9,8 +9,8 @@ import javax.swing.SwingUtilities
 import kotlin.system.exitProcess
 
 /**
- * The reminedog installer: puts reminedog.dll on the PC and adds `-agentpath:<dll>` to the JVM
- * arguments of launcher instances.
+ * reminedog のインストーラー：reminedog.dll を PC に置き、ランチャーのインスタンスの JVM 引数に
+ * `-agentpath:<dll>` を足す。
  */
 fun main() {
     if (GraphicsEnvironment.isHeadless()) {
@@ -24,7 +24,7 @@ fun main() {
     }
 }
 
-/** Whether Windows shows apps in dark mode (AppsUseLightTheme is 0). */
+/** Windows がアプリをダークモードで表示するか（AppsUseLightTheme が 0）。 */
 private fun windowsUsesDarkMode(): Boolean =
     try {
         val process = ProcessBuilder(

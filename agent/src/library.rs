@@ -1,7 +1,6 @@
-//! What LWJGL is handed ([`crate::jvmti`]): the hooks of the game's window library, the first
-//! GLFW or SDL3 that LWJGL looks a function up in (only that one is hooked: a mod's SDL, for
-//! controller support, in a GLFW game is left alone), and the zoom's replacements of LWJGL's
-//! GL natives.
+//! LWJGL に渡すもの（[`crate::jvmti`]）：ゲームのウィンドウのライブラリのフック（LWJGL が
+//! 最初に関数を引いた GLFW か SDL3 だけをフックする。GLFW のゲームでコントローラーのために
+//! Mod が読み込む SDL には触れない）と、LWJGL の GL のネイティブのズーム用の差し替え。
 
 use std::ffi::{CStr, c_void};
 use std::sync::Mutex;
@@ -9,11 +8,11 @@ use std::sync::Mutex;
 use crate::hook::Hook;
 use crate::os;
 
-/// Libraries LWJGL looked functions up in that are not hooked (checked once each). Held while
-/// a library is checked, so two threads never attach at once.
+/// LWJGL が関数を引いた、フックしないライブラリ（それぞれ 1 回だけ調べる）。ライブラリを
+/// 調べる間は持ったままにし、2 つのスレッドが同時に取り付けないようにする。
 static PASSED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
-/// The hook LWJGL is handed for `name`, looked up in `library`.
+/// `library` で引かれた `name` の代わりに LWJGL に渡すフック。
 pub fn hook(library: usize, name: &CStr) -> Option<&'static Hook> {
     identify(library);
     let hooks: &[&[Hook]] = if crate::glfw::is_hooked(library) {
@@ -29,7 +28,7 @@ pub fn hook(library: usize, name: &CStr) -> Option<&'static Hook> {
         .find(|hook| hook.name == name)
 }
 
-/// The native in place of LWJGL's `name` of `class`: the zoom's GL functions.
+/// `class` の LWJGL の `name` の代わりのネイティブ：ズームの GL の関数。
 pub fn native(
     class: &str,
     name: &str,
@@ -43,18 +42,18 @@ pub fn native(
     }
 }
 
-/// The address of an exported function of `library`, a library LWJGL loaded.
+/// `library`（LWJGL が読み込んだライブラリ）の export の関数のアドレス。
 pub fn export(library: usize, name: &CStr) -> Option<*const c_void> {
     os::get().symbol(library, name)
 }
 
-/// Hooks `library` if it is the first GLFW or SDL3 LWJGL looks a function up in.
+/// `library` が、LWJGL が関数を引いた最初の GLFW か SDL3 ならフックする。
 fn identify(library: usize) {
     if library == 0 || crate::glfw::is_hooked(library) || crate::sdl::is_hooked(library) {
         return;
     }
     let mut passed = PASSED.lock().unwrap_or_else(|e| e.into_inner());
-    // Another thread may have hooked it while this one waited for the lock.
+    // このスレッドがロックを待つ間に、別のスレッドがフックしたかもしれない。
     if passed.contains(&library)
         || crate::glfw::is_hooked(library)
         || crate::sdl::is_hooked(library)

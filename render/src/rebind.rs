@@ -1,88 +1,87 @@
-//! The key rebinding's state: which key or mouse button the game gets for each physical
-//! press, and what keeps each of them held in the game.
+//! キーの置き換えの状態：物理の押下ごとにゲームがどのキーかマウスのボタンを受け取るかと、
+//! それぞれをゲームの中で押さえているもの。
 //!
-//! Decided once, at the press: a release always follows what its press did, whatever the
-//! rules are by then, so nothing stays held in the game. Pure and platform-neutral; the input
-//! router feeds it the events it would forward and the platform hooks deliver what it returns.
+//! 押したときに 1 回だけ決める：解放は、そのときのルールがどうであれ、必ず押下がしたことに従う
+//! ので、ゲームの中で押されたまま残るものはない。OS に依存しない純粋な処理：入力の振り分けが
+//! 渡すはずのイベントを与え、各 OS のフックが返したものを届ける。
 
 use reminedog_core::InputId;
 
-/// The most rules in use at once.
+/// 同時に使うルールの最大の数。
 pub const MAX_REBINDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     Press,
-    /// Auto-repeat of a held key.
+    /// 押しているキーのオートリピート。
     Repeat,
     Release,
 }
 
-/// An event the game gets in place of the physical one.
+/// 物理のものの代わりにゲームが受け取るイベント。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Output {
     pub id: InputId,
     pub phase: Phase,
 }
 
-/// What to do with a key or mouse button event.
+/// キーかマウスのボタンのイベントをどうするか。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
-    /// Pass the event on to the game as it is.
+    /// イベントをそのままゲームに渡す。
     Forward,
-    /// The game must not see it.
+    /// ゲームに見せてはならない。
     Consume,
-    /// Give the game this instead.
+    /// 代わりにこれをゲームに渡す。
     Send(Output),
 }
 
-/// What a source's press did, kept until its release.
+/// 元のキーの押下がしたこと。解放まで覚える。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Latch {
-    /// The game got the press as it was.
+    /// ゲームは押下をそのまま受け取った。
     Passthrough,
-    /// The game got the press as this key or button.
+    /// ゲームは押下をこのキーかボタンとして受け取った。
     Rebound(InputId),
-    /// Was rebound, and the output was let go when the window lost focus; the source's own
-    /// release is still to come.
+    /// 置き換えていて、ウィンドウがフォーカスを失ったときに出力を離した。元のキー自身の解放は
+    /// まだ来る。
     Orphaned,
 }
 
-/// What the rebinding holds and takes from the game, for the platform's table of keys the game
-/// reads as held, and F3+C's checks. Where an id is in both (A and B swapped, both held),
-/// `held` wins: the game has it down.
+/// 置き換えがゲームから押さえているものと取っているもの（ゲームが押していると読むキーの各 OS の
+/// 表と、F3+C の確認のため）。id が両方にある（A と B を入れ替えて両方押している）ときは
+/// `held` が勝つ：ゲームでは押されている。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RebindState {
-    /// (source, output) of each held rule: the output is down in the game.
+    /// 押さえているルールごとの (元のキー, 出力)：出力はゲームの中で下りている。
     pub held: Vec<(InputId, InputId)>,
-    /// Sources the game must see as up: those of `held`, and those whose output was let go on
-    /// focus loss while their own release is still to come.
+    /// ゲームが離していると見なければならない元のキー：`held` のものと、フォーカスを失ったときに
+    /// 出力を離したが、自分自身の解放がまだ来るもの。
     pub taken: Vec<InputId>,
-    /// Keys and buttons a rule outputs that the game got pressed as they were and that are not
-    /// released yet. Should a release never come (26.x drops input events while it loads a
-    /// world), the rule's own presses of the id would be swallowed; see
-    /// [`crate::InputRouter::forget_passthrough`].
+    /// ルールが出力するキーとボタンのうち、ゲームがそのまま押されたものとして受け取り、まだ離されて
+    /// いないもの。解放が来ないと（26.x はワールドの読み込み中に入力のイベントを捨てる）、その id
+    /// へのルール自身の押下が飲み込まれてしまう。[`crate::InputRouter::forget_passthrough`] を参照。
     pub passthrough: Vec<InputId>,
 }
 
 impl RebindState {
-    /// Whether the rebinding holds `id` down in the game.
+    /// 置き換えがゲームの中で `id` を押さえているか。
     pub fn holds(&self, id: InputId) -> bool {
         self.held.iter().any(|&(_, output)| output == id)
     }
 
-    /// Whether the game must see `id` as up although it may be physically held.
+    /// 物理的には押しているかもしれないが、ゲームが `id` を離していると見なければならないか。
     pub fn takes(&self, id: InputId) -> bool {
         !self.holds(id) && self.taken.contains(&id)
     }
 }
 
 pub(crate) struct Rebinder {
-    /// (source, output), at most one per source.
+    /// (元のキー, 出力)。元のキーごとに多くても 1 つ。
     rules: Vec<(InputId, InputId)>,
     latch: Vec<(InputId, Latch)>,
-    /// How many holds keep each delivered id down in the game: rebound outputs, and physical
-    /// presses passed through (so a physical W and X → W share one press and one release).
+    /// 届けた各 id をゲームの中で押さえている数：置き換えた出力と、そのまま通した物理の押下
+    /// （物理の W と X → W は 1 回の押下と 1 回の解放を共有する）。
     held: Vec<(InputId, u8)>,
 }
 
@@ -95,8 +94,8 @@ impl Rebinder {
         }
     }
 
-    /// The rules to decide later presses with; held presses keep what they did. Of rules with
-    /// the same source the first wins, and at most [`MAX_REBINDS`] are kept.
+    /// 後の押下を決めるルール。押さえている押下は、したことのまま。同じ元のキーのルールは最初の
+    /// ものが勝ち、多くても [`MAX_REBINDS`] 個を持つ。
     pub(crate) fn set_rules(&mut self, rules: Vec<(InputId, InputId)>) {
         self.rules.clear();
         for (source, output) in rules {
@@ -117,7 +116,7 @@ impl Rebinder {
             .map(|&(_, output)| output)
     }
 
-    /// No rules and nothing held: every event goes on as it is.
+    /// ルールがなく、何も押さえていない：どのイベントもそのまま通る。
     fn bypass(&self) -> bool {
         self.rules.is_empty() && self.latch.is_empty()
     }
@@ -134,8 +133,8 @@ impl Rebinder {
         Some(self.latch.swap_remove(i).1)
     }
 
-    /// Whether the source's press reached the game as another key (or did before focus loss):
-    /// its own repeats, characters and release are not the game's.
+    /// 元のキーの押下が別のキーとしてゲームに届いた（か、フォーカスを失う前に届いた）か：その
+    /// リピート、文字、解放はゲームのものではない。
     pub(crate) fn takes(&self, source: InputId) -> bool {
         matches!(
             self.latch_of(source),
@@ -143,7 +142,7 @@ impl Rebinder {
         )
     }
 
-    /// One more hold on `id`; the new count.
+    /// `id` を押さえる数を 1 つ増やす。新しい数。
     fn hold(&mut self, id: InputId) -> u8 {
         match self.held.iter_mut().find(|(i, _)| *i == id) {
             Some((_, count)) => {
@@ -157,7 +156,7 @@ impl Rebinder {
         }
     }
 
-    /// One hold less on `id`; the new count.
+    /// `id` を押さえる数を 1 つ減らす。新しい数。
     fn unhold(&mut self, id: InputId) -> u8 {
         let Some(i) = self.held.iter().position(|&(i, _)| i == id) else {
             return 0;
@@ -171,12 +170,12 @@ impl Rebinder {
         left
     }
 
-    /// The first say on an event of a source whose earlier press is latched, before the
-    /// router's own handling (hotkeys, the UI) sees it. `None` leaves the event to the router;
-    /// a stale latch is dropped then, for a press to be decided anew.
+    /// 前の押下が記録されている元のキーのイベントについて、router 自身の処理（ホットキー、UI）が
+    /// 見る前の最初の判断。`None` ならイベントを router に任せる。そのときは古い記録を捨て、押下を
+    /// 決め直す。
     ///
-    /// `active`: the rules apply now (in game, the UI closed). `stateless`: the platform sends
-    /// this key's auto-repeat as presses and no release on focus loss (GLFW's key -1).
+    /// `active`：今ルールが効く（ゲーム中で、UI を閉じている）。`stateless`：OS はこのキーの
+    /// オートリピートを押下として送り、フォーカスを失っても解放を送らない（GLFW の key -1）。
     pub(crate) fn latched(
         &mut self,
         source: InputId,
@@ -190,9 +189,8 @@ impl Rebinder {
                 Some(self.repeat(output, active))
             }
             (Phase::Press, _) => {
-                // A press with no release since the last: the release went missing, or this is
-                // a stateless key's auto-repeat. Decided anew; the game keeps a rebound output
-                // down until that output's next release.
+                // 前の押下から解放のない押下：解放がなくなったか、解放のないキーのオートリピート。
+                // 決め直す。ゲームは置き換えた出力を、その出力の次の解放まで押さえたままにする。
                 self.unlatch(source);
                 let held = match latch {
                     Latch::Rebound(output) => Some(output),
@@ -219,8 +217,8 @@ impl Rebinder {
         }
     }
 
-    /// A repeat of a rebound source: the output's repeat while the rules apply and the output
-    /// is a key (mouse buttons never repeat; a repeat would release them).
+    /// 置き換えた元のキーのリピート：ルールが効いていて、出力がキーなら、出力のリピート
+    /// （マウスのボタンはリピートしない。リピートはそれを離してしまう）。
     fn repeat(&self, output: InputId, active: bool) -> Delivery {
         if active && matches!(output, InputId::Key(_)) {
             Delivery::Send(Output {
@@ -232,7 +230,7 @@ impl Rebinder {
         }
     }
 
-    /// One hold less on a rebound output: its release when it was the last.
+    /// 置き換えた出力を押さえる数を 1 つ減らす。最後だったなら、その解放。
     fn let_go(&mut self, output: InputId) -> Delivery {
         if self.unhold(output) == 0 {
             Delivery::Send(Output {
@@ -244,9 +242,9 @@ impl Rebinder {
         }
     }
 
-    /// A press the router would forward: rebound when `active` and a rule has this source,
-    /// else passed through. Either way the game gets a press only if the id was not already
-    /// held down by another source.
+    /// router が渡すはずの押下：`active` で、この元のキーのルールがあれば置き換え、なければ
+    /// そのまま通す。どちらでも、ゲームが押下を受け取るのは、その id をほかの元のキーがまだ
+    /// 押さえていないときだけ。
     pub(crate) fn press(&mut self, source: InputId, active: bool) -> Delivery {
         if self.bypass() {
             return Delivery::Forward;
@@ -275,8 +273,8 @@ impl Rebinder {
         }
     }
 
-    /// A release the router would forward, of a source not taken by [`latched`]
-    /// (passed through, or pressed before anything was latched).
+    /// router が渡すはずの、[`latched`] が取らなかった元のキーの解放（そのまま通したか、何かを
+    /// 記録する前に押した）。
     ///
     /// [`latched`]: Self::latched
     pub(crate) fn release(&mut self, source: InputId) -> Delivery {
@@ -288,27 +286,27 @@ impl Rebinder {
                     Delivery::Consume
                 }
             }
-            // `latched` decides these; only reached if it was skipped.
+            // `latched` がこれを決める。飛ばしたときだけここに来る。
             Some(Latch::Rebound(output)) => self.let_go(output),
             Some(Latch::Orphaned) => Delivery::Consume,
-            // A press the router took (the menu was open, say) while a rule holds the id down:
-            // the rule's own release lets go of it.
+            // ルールが id を押さえている間に router が取った押下（たとえばメニューが開いていた）：
+            // ルール自身の解放がそれを離す。
             None if self.rule_holds(source) => Delivery::Consume,
             None => Delivery::Forward,
         }
     }
 
-    /// Whether a held rule has `id` down in the game.
+    /// 押さえているルールが、ゲームの中で `id` を下ろしているか。
     pub(crate) fn rule_holds(&self, id: InputId) -> bool {
         self.latch
             .iter()
             .any(|&(_, latch)| latch == Latch::Rebound(id))
     }
 
-    /// Forgets a press the game got as it was, whose release never came, without giving the
-    /// game anything: the platform found the key or button up, and the game let go of it by
-    /// itself (26.x drops input events while it loads or saves a world, and resets its own
-    /// key state when the screen changes). Returns whether `source` had such a press.
+    /// ゲームがそのまま受け取ったが解放が来なかった押下を、ゲームに何も渡さずに忘れる：OS が
+    /// キーかボタンが離れているのを見つけ、ゲームは自分で離した（26.x はワールドの読み込みか
+    /// 保存の間に入力のイベントを捨て、画面が変わると自分のキーの状態を戻す）。`source` にそういう
+    /// 押下があったかを返す。
     pub(crate) fn forget_passthrough(&mut self, source: InputId) -> bool {
         if self.latch_of(source) != Some(Latch::Passthrough) {
             return false;
@@ -318,13 +316,12 @@ impl Rebinder {
         true
     }
 
-    /// The window lost focus: the releases the game must get now, for outputs nothing holds
-    /// any more. `platform_releases(source)`: the platform still sends that source's release
-    /// (GLFW sends none for key -1, SDL3 none for mouse buttons).
+    /// ウィンドウがフォーカスを失った：何も押さえなくなった出力について、ゲームがいま受け取るべき
+    /// 解放。`platform_releases(source)`：OS はその元のキーの解放をまだ送る（GLFW は key -1 には、
+    /// SDL3 はマウスのボタンには送らない）。
     ///
-    /// Rebound sources whose release comes become orphaned (that release is then dropped);
-    /// passed-through ones stay (their release goes to the game). Latches whose release never
-    /// comes are dropped, and an id they alone held is released too.
+    /// 解放が来る置き換えた元のキーは孤児になる（その解放はそのとき捨てる）。そのまま通したものは
+    /// 残る（その解放はゲームに行く）。解放が来ない記録は捨て、それだけが押さえていた id も離す。
     pub(crate) fn focus_lost(
         &mut self,
         platform_releases: impl Fn(InputId) -> bool,
@@ -356,8 +353,8 @@ impl Rebinder {
         releases
     }
 
-    /// The source was let go although its release never came (the platform's check of the
-    /// real key state): as its release would, with the event to give the game if any.
+    /// 解放は来なかったが、元のキーは離された（OS が本当のキーの状態を確かめた）：解放と同じように、
+    /// ゲームに渡すイベントがあればそれも。
     pub(crate) fn release_source(&mut self, source: InputId) -> Option<Output> {
         let id = match self.unlatch(source)? {
             Latch::Rebound(output) => output,
@@ -415,7 +412,7 @@ mod tests {
         r
     }
 
-    /// As the router does when its own handling forwards everything.
+    /// router の自身の処理が全部を渡すときと同じように。
     fn event(r: &mut Rebinder, id: InputId, phase: Phase, active: bool) -> Delivery {
         stateless_event(r, id, phase, active, false)
     }
@@ -463,10 +460,10 @@ mod tests {
         assert!(r.takes(MOUSE4));
         assert_eq!(event(&mut r, MOUSE4, Release, true), send(F3, Release));
         assert!(!r.takes(MOUSE4));
-        // Not in game: the button is the game's as it is.
+        // ゲーム中ではない：ボタンはそのままゲームのもの。
         assert_eq!(event(&mut r, MOUSE4, Press, false), Forward);
         assert_eq!(event(&mut r, MOUSE4, Release, true), Forward);
-        // Other keys pass through.
+        // ほかのキーはそのまま通る。
         assert_eq!(event(&mut r, W, Press, true), Forward);
         assert_eq!(event(&mut r, W, Repeat, true), Forward);
         assert_eq!(event(&mut r, W, Release, true), Forward);
@@ -475,18 +472,18 @@ mod tests {
 
     #[test]
     fn the_release_follows_the_press_whatever_the_rules_became() {
-        // Changed to another key.
+        // 別のキーに変えた。
         let mut r = rebinder(&[(A, F3)]);
         assert_eq!(event(&mut r, A, Press, true), send(F3, Press));
         r.set_rules(vec![(A, BACKSPACE)]);
         assert_eq!(event(&mut r, A, Repeat, true), send(F3, Repeat));
         assert_eq!(event(&mut r, A, Release, true), send(F3, Release));
         assert_eq!(event(&mut r, A, Press, true), send(BACKSPACE, Press));
-        // Removed, and the rebinding turned off (no rules).
+        // 消して、置き換えをオフにした（ルールなし）。
         r.set_rules(vec![]);
         assert_eq!(event(&mut r, A, Release, true), send(BACKSPACE, Release));
         assert_eq!(event(&mut r, A, Press, true), Forward);
-        // Switched to a mouse button.
+        // マウスのボタンに切り替えた。
         let mut r = rebinder(&[(A, F3)]);
         event(&mut r, A, Press, true);
         r.set_rules(vec![(A, LEFT)]);
@@ -498,17 +495,17 @@ mod tests {
 
     #[test]
     fn a_press_not_rebound_releases_as_itself() {
-        // Pressed in a screen, released in game.
+        // 画面で押し、ゲーム中に離した。
         let mut r = rebinder(&[(A, F3)]);
         assert_eq!(event(&mut r, A, Press, false), Forward);
         assert_eq!(event(&mut r, A, Repeat, true), Forward);
         assert_eq!(event(&mut r, A, Release, true), Forward);
-        // Pressed before the rule existed.
+        // ルールができる前に押した。
         let mut r = rebinder(&[(B, C)]);
         assert_eq!(event(&mut r, A, Press, true), Forward);
         r.set_rules(vec![(A, F3)]);
         assert_eq!(event(&mut r, A, Release, true), Forward);
-        // Pressed before anything was tracked.
+        // 何かを追う前に押した。
         let mut r = rebinder(&[(A, F3)]);
         assert_eq!(event(&mut r, A, Release, true), Forward);
     }
@@ -518,10 +515,10 @@ mod tests {
         let mut r = rebinder(&[(X, W), (C, LEFT)]);
         assert_eq!(event(&mut r, X, Press, true), send(W, Press));
         assert_eq!(event(&mut r, X, Repeat, true), send(W, Repeat));
-        // The UI or a screen opened while held: the output stays down, nothing repeats.
+        // 押している間に UI か画面が開いた：出力は下りたまま、何もリピートしない。
         assert_eq!(event(&mut r, X, Repeat, false), Consume);
         assert_eq!(event(&mut r, X, Release, false), send(W, Release));
-        // A mouse button never repeats (a repeat would release it).
+        // マウスのボタンはリピートしない（リピートはそれを離してしまう）。
         assert_eq!(event(&mut r, C, Press, true), send(LEFT, Press));
         assert_eq!(event(&mut r, C, Repeat, true), Consume);
         assert_eq!(event(&mut r, C, Release, true), send(LEFT, Release));
@@ -552,14 +549,14 @@ mod tests {
 
     #[test]
     fn a_physical_key_and_a_rule_share_its_press() {
-        // Physical W, then X → W: W goes up only when both are let go.
+        // 物理の W、次に X → W：両方を離したときだけ W が上がる。
         let mut r = rebinder(&[(X, W)]);
         assert_eq!(event(&mut r, W, Press, true), Forward);
         assert_eq!(event(&mut r, X, Press, true), Consume);
         assert_eq!(event(&mut r, X, Release, true), Consume);
         assert_eq!(event(&mut r, W, Repeat, true), Forward);
         assert_eq!(event(&mut r, W, Release, true), Forward);
-        // The other way round.
+        // 逆の順。
         assert_eq!(event(&mut r, X, Press, true), send(W, Press));
         assert_eq!(event(&mut r, W, Press, true), Consume);
         assert_eq!(event(&mut r, W, Release, true), Consume);
@@ -573,7 +570,7 @@ mod tests {
         assert_eq!(event(&mut r, A, Press, true), send(B, Press));
         assert_eq!(event(&mut r, B, Press, true), send(A, Press));
         let state = r.state();
-        // Both are taken sources and held outputs: held wins.
+        // どちらも取られた元のキーで、押さえている出力：held が勝つ。
         assert!(state.holds(A) && state.holds(B));
         assert!(!state.takes(A) && !state.takes(B));
         assert_eq!(event(&mut r, A, Release, true), send(B, Release));
@@ -589,13 +586,13 @@ mod tests {
         assert_eq!(event(&mut r, W, Press, true), Forward);
         assert_eq!(event(&mut r, X, Press, true), send(F3, Press));
         assert_eq!(event(&mut r, MOUSE4, Press, true), send(C, Press));
-        // GLFW: every key and button gets its release after the focus callback.
+        // GLFW：フォーカスのコールバックの後に、どのキーとボタンも解放を受け取る。
         let mut releases = r.focus_lost(|_| true);
         releases.sort_by_key(|o| o.id);
         assert_eq!(releases, [output(C, Release), output(F3, Release)]);
         assert_eq!(r.state().taken.len(), 2, "orphaned sources stay up");
         assert!(r.state().held.is_empty());
-        // The platform's own releases: the plain key's goes to the game.
+        // OS 自身の解放：ただのキーのものはゲームに行く。
         assert_eq!(event(&mut r, W, Release, true), Forward);
         assert_eq!(event(&mut r, X, Release, true), Consume);
         assert_eq!(event(&mut r, MOUSE4, Release, true), Consume);
@@ -604,7 +601,7 @@ mod tests {
 
     #[test]
     fn focus_loss_without_rules_keeps_plain_releases() {
-        // Rules exist but none is held: W must still be released by its own release.
+        // ルールはあるが何も押さえていない：W はやはり自分の解放で離されなければならない。
         let mut r = rebinder(&[(X, F3)]);
         event(&mut r, W, Press, true);
         assert!(r.focus_lost(|_| true).is_empty());
@@ -613,24 +610,24 @@ mod tests {
 
     #[test]
     fn a_source_whose_release_never_comes_works_after_focus_loss() {
-        // SDL3 releases no mouse button on focus loss.
+        // SDL3 はフォーカスを失ってもマウスのボタンを離さない。
         let sdl = |id: InputId| matches!(id, InputId::Key(_));
         let mut r = rebinder(&[(MOUSE4, F3)]);
         assert_eq!(event(&mut r, MOUSE4, Press, true), send(F3, Press));
         assert_eq!(event(&mut r, LEFT, Press, true), Forward);
         let mut releases = r.focus_lost(sdl);
         releases.sort_by_key(|o| o.id);
-        // The left button the game got as it was is let go too: nothing will release it.
+        // ゲームがそのまま受け取った左のボタンも離す：ほかに離すものはない。
         assert_eq!(releases, [output(F3, Release), output(LEFT, Release)]);
         assert!(r.latch.is_empty() && r.held.is_empty());
-        // Back in the game: the next press works.
+        // ゲームに戻った：次の押下は効く。
         assert_eq!(event(&mut r, MOUSE4, Press, true), send(F3, Press));
         assert_eq!(event(&mut r, MOUSE4, Release, true), send(F3, Release));
     }
 
     #[test]
     fn an_orphaned_source_pressed_again_is_decided_anew() {
-        // The orphan's release went missing (e.g. eaten by the IME).
+        // 孤児の解放がなくなった（例：IME が食べた）。
         let mut r = rebinder(&[(X, F3)]);
         event(&mut r, X, Press, true);
         assert_eq!(r.focus_lost(|_| true), [output(F3, Release)]);
@@ -643,11 +640,11 @@ mod tests {
     fn a_missed_release_does_not_eat_the_next_press() {
         let mut r = rebinder(&[(X, F3)]);
         assert_eq!(event(&mut r, X, Press, true), send(F3, Press));
-        // X's release was lost; F3 stays down in the game until the next release fixes it.
+        // X の解放がなくなった。次の解放で直るまで、ゲームの中で F3 は下りたまま。
         assert_eq!(event(&mut r, X, Press, true), send(F3, Press));
         assert_eq!(event(&mut r, X, Release, true), send(F3, Release));
         assert!(r.held.is_empty());
-        // The same for a plain key.
+        // ただのキーでも同じ。
         assert_eq!(event(&mut r, W, Press, true), Forward);
         assert_eq!(event(&mut r, W, Press, true), Forward);
         assert_eq!(event(&mut r, W, Release, true), Forward);
@@ -656,7 +653,7 @@ mod tests {
 
     #[test]
     fn a_stateless_key_repeats_with_presses() {
-        // GLFW's key -1 (Japanese keys): auto-repeat comes as presses.
+        // GLFW の key -1（日本語のキー）：オートリピートが押下として来る。
         let mut r = rebinder(&[(RO, W)]);
         assert_eq!(
             stateless_event(&mut r, RO, Press, true, true),
@@ -671,7 +668,7 @@ mod tests {
             stateless_event(&mut r, RO, Release, true, true),
             send(W, Release)
         );
-        // GLFW sends no release for it on focus loss: dropped, not orphaned.
+        // GLFW はフォーカスを失ってもその解放を送らない：孤児にせず捨てる。
         stateless_event(&mut r, RO, Press, true, true);
         let glfw = |id: InputId| id != RO;
         assert_eq!(r.focus_lost(glfw), [output(W, Release)]);
@@ -710,7 +707,7 @@ mod tests {
         assert_eq!(r.release_source(X), None, "B still holds F3");
         assert_eq!(r.release_source(B), Some(output(F3, Release)));
         assert_eq!(r.release_source(B), None);
-        // The late release is not latched any more.
+        // 遅れた解放は、もう記録されていない。
         assert_eq!(event(&mut r, X, Release, true), Forward);
         event(&mut r, W, Press, true);
         assert_eq!(r.release_source(W), Some(output(W, Release)));
@@ -718,12 +715,12 @@ mod tests {
 
     #[test]
     fn a_release_of_an_id_a_rule_holds_is_the_rules() {
-        // The router took W's press (the menu was open) while X → W held W down.
+        // X → W が W を押さえている間に、router が W の押下を取った（メニューが開いていた）。
         let mut r = rebinder(&[(X, W)]);
         assert_eq!(event(&mut r, X, Press, true), send(W, Press));
         assert_eq!(r.release(W), Consume, "X still holds W");
         assert_eq!(event(&mut r, X, Release, true), send(W, Release));
-        // Nothing holds it any more.
+        // もう何も押さえていない。
         assert_eq!(r.release(W), Forward);
         assert_eq!(r.release(X), Forward);
     }
@@ -731,22 +728,22 @@ mod tests {
     #[test]
     fn a_stale_passthrough_press_is_forgotten_without_a_release() {
         const H: InputId = InputId::Key(11);
-        // 26.x dropped the release of the click that started loading a world.
+        // 26.x は、ワールドの読み込みを始めたクリックの解放を捨てた。
         let mut r = rebinder(&[(H, LEFT)]);
         assert_eq!(event(&mut r, LEFT, Press, false), Forward);
         assert_eq!(r.state().passthrough, [LEFT]);
         assert!(r.state().held.is_empty());
-        // Only presses of a rule's output are listed.
+        // 並べるのはルールの出力の押下だけ。
         assert_eq!(event(&mut r, W, Press, false), Forward);
         assert_eq!(r.state().passthrough, [LEFT]);
         assert!(r.forget_passthrough(LEFT));
         assert!(!r.forget_passthrough(LEFT), "only once");
         assert!(r.state().passthrough.is_empty());
-        // The rule's press reaches the game again.
+        // ルールの押下がまたゲームに届く。
         assert_eq!(event(&mut r, H, Press, true), send(LEFT, Press));
         assert!(!r.forget_passthrough(H), "a rebound press is not forgotten");
         assert_eq!(event(&mut r, H, Release, true), send(LEFT, Release));
-        // A late release of the forgotten press is the game's.
+        // 忘れた押下の遅れた解放はゲームのもの。
         assert_eq!(event(&mut r, LEFT, Release, true), Forward);
         assert_eq!(event(&mut r, W, Release, true), Forward);
         assert!(r.latch.is_empty() && r.held.is_empty());

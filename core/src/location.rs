@@ -1,7 +1,7 @@
-//! Parsing of the command Minecraft copies to the clipboard on F3+C.
+//! F3+C で Minecraft がクリップボードにコピーするコマンドの解析。
 //!
-//! Since 1.13 the game formats it with `Locale.ROOT` and `%.2f`:
-//! `/execute in minecraft:overworld run tp @s 123.45 64.00 -987.65 -179.90 12.30`.
+//! 1.13 から、ゲームは `Locale.ROOT` と `%.2f` で書く：
+//! `/execute in minecraft:overworld run tp @s 123.45 64.00 -987.65 -179.90 12.30`。
 
 use std::borrow::Cow;
 use std::str::FromStr;
@@ -12,10 +12,10 @@ pub const OVERWORLD: &str = "minecraft:overworld";
 pub const THE_NETHER: &str = "minecraft:the_nether";
 pub const THE_END: &str = "minecraft:the_end";
 
-/// A player position and view direction as reported by F3+C.
+/// F3+C が報告するプレイヤーの位置と向き。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Location {
-    /// Dimension id such as `minecraft:overworld`; `None` for the bare `/tp @s ...` form.
+    /// `minecraft:overworld` のようなディメンションの id。`/tp @s ...` だけの形なら `None`。
     pub dimension: Option<String>,
     pub x: f64,
     pub y: f64,
@@ -25,7 +25,7 @@ pub struct Location {
 }
 
 impl Location {
-    /// The dimension id, assuming the overworld when F3+C did not name one.
+    /// ディメンションの id。F3+C が名前を出さなかったときはオーバーワールドとみなす。
     pub fn dimension_or_overworld(&self) -> &str {
         self.dimension.as_deref().unwrap_or(OVERWORLD)
     }
@@ -45,17 +45,17 @@ pub enum ParseError {
     InvalidNumber(String),
 }
 
-/// Parses F3+C clipboard text into a [`Location`].
+/// F3+C のクリップボードの文字を [`Location`] に解析する。
 ///
-/// Accepts `[/]execute in <dimension> run tp @s x y z yaw pitch` and the older
-/// `[/]tp @s x y z yaw pitch`. Anything else, including other single-line commands,
-/// is rejected so that unrelated clipboard contents never produce a waypoint.
+/// `[/]execute in <dimension> run tp @s x y z yaw pitch` と、古い `[/]tp @s x y z yaw pitch` を
+/// 受け付ける。ほかのもの（1 行のほかのコマンドも）は断るので、関係のないクリップボードの中身から
+/// ウェイポイントができることはない。
 pub fn parse_f3c(text: &str) -> Result<Location, ParseError> {
     let text = text.trim();
     if text.is_empty() {
         return Err(ParseError::Empty);
     }
-    // F3+C output is always a single line.
+    // F3+C の出力は必ず 1 行。
     if text.contains(['\r', '\n']) {
         return Err(ParseError::NotTeleport);
     }
@@ -81,7 +81,7 @@ pub fn parse_f3c(text: &str) -> Result<Location, ParseError> {
     })
 }
 
-/// Validates a resource location (`namespace:path`); a missing namespace means `minecraft`.
+/// リソースの場所（`namespace:path`）を確かめる。namespace がなければ `minecraft`。
 fn parse_dimension(id: &str) -> Result<String, ParseError> {
     let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
     let namespace_ok = !namespace.is_empty()
@@ -106,10 +106,10 @@ fn parse_number<T: FromStr>(token: &str, finite: impl Fn(&T) -> bool) -> Result<
         .ok_or_else(|| ParseError::InvalidNumber(token.to_owned()))
 }
 
-/// Accepts `-?digits([.,]digits)?` and returns it with a `.` decimal separator.
+/// `-?digits([.,]digits)?` を受け付け、小数点を `.` にして返す。
 ///
-/// This deliberately rejects exponents, `NaN`, `Infinity` and a leading `+`, none of
-/// which `%.2f` produces. A `,` separator is tolerated in case a locale leaks in.
+/// 指数、`NaN`、`Infinity`、先頭の `+` はわざと断る。どれも `%.2f` は出さない。ロケールが
+/// 漏れたときのために、`,` の区切りは許す。
 fn normalize_number(token: &str) -> Option<Cow<'_, str>> {
     let unsigned = token.strip_prefix('-').unwrap_or(token);
     let (int, frac) = match unsigned.split_once(['.', ',']) {
@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(parsed.x, 30_000_000.0);
         assert_eq!(parsed.z, -29_999_999.99);
         assert_eq!(parsed.yaw, 12345.67);
-        // Beyond the world border, but still what the game reported.
+        // ワールドの境界の外だが、ゲームが報告したもの。
         let parsed = parse_f3c("/tp @s 1000000000000.00 0.00 0.00 0.00 0.00").unwrap();
         assert_eq!(parsed.x, 1e12);
     }
@@ -297,7 +297,7 @@ mod tests {
                 "{text:?}"
             );
         }
-        // Overflows to infinity once parsed.
+        // 解析すると無限大にあふれる。
         let huge = format!("/tp @s 1{} 64.00 0.00 0.00 0.00", "0".repeat(400));
         assert!(matches!(
             parse_f3c(&huge),
@@ -353,7 +353,7 @@ mod tests {
             "/",
             "hello world",
             "123.45 64.00 -987.65 -179.90 12.30",
-            // Shift+F3+C and F3+I copy other commands.
+            // Shift+F3+C と F3+I はほかのコマンドをコピーする。
             "/setblock 10 64 -20 minecraft:stone",
             "/summon minecraft:pig 1.00 2.00 3.00 {}",
             "/execute in minecraft:overworld run tp @p 1.00 2.00 3.00 4.00 5.00",
@@ -365,7 +365,7 @@ mod tests {
             "/TP @s 1.00 2.00 3.00 4.00 5.00",
             "//tp @s 1.00 2.00 3.00 4.00 5.00",
             "please /tp @s 1.00 2.00 3.00 4.00 5.00",
-            // Two lines where each half would be suspicious on its own.
+            // それぞれの半分だけでも怪しい 2 行。
             "/tp @s 1.00 2.00 3.00\n4.00 5.00",
             "/tp @s 1.00 2.00 3.00 4.00 5.00\n/tp @s 1.00 2.00 3.00 4.00 5.00",
         ] {

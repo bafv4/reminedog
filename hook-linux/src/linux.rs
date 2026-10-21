@@ -1,4 +1,4 @@
-//! What the agent needs from Linux ([`reminedog_agent::os::Os`]). X11 with GLX so far.
+//! エージェントが Linux に頼ること（[`reminedog_agent::os::Os`]）。今は GLX の X11。
 
 use std::ffi::{CStr, c_void};
 
@@ -29,8 +29,8 @@ impl Os for Linux {
         Some(SdlProperty::Number(c"SDL.window.x11.window"))
     }
 
-    /// The GLX drawable current at the swap: GLFW draws on a GLX window of its own
-    /// (`glXCreateWindow`), not on the X window itself.
+    /// スワップのときに今の GLX の描画先：GLFW は X のウィンドウそのものではなく、自分の GLX の
+    /// ウィンドウ（`glXCreateWindow`）に描く。
     fn window_surface(&self, native_window: Option<usize>) -> usize {
         match glx::current() {
             (0, _) => native_window.unwrap_or(0),
@@ -66,12 +66,12 @@ impl Os for Linux {
         glx::delete_context(context)
     }
 
-    /// Not read yet: the safety net never releases a key.
+    /// まだ読まない：安全網はキーを離さない。
     fn input_up(&self, _id: InputId) -> bool {
         false
     }
 
-    /// Not read yet: relative motion moves the overlay's cursor as it comes.
+    /// まだ読まない：相対移動はそのままオーバーレイのカーソルを動かす。
     fn pointer_speed(&self) -> PointerSpeed {
         PointerSpeed::RAW
     }

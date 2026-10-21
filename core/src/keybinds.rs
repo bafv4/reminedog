@@ -1,17 +1,16 @@
-//! Minecraft's key names and the key bindings in `<game_dir>/options.txt`.
+//! Minecraft のキーの名前と、`<game_dir>/options.txt` のキーの割り当て。
 //!
-//! options.txt stores a binding as `key_<mapping id>:<key name>`, e.g.
-//! `key_key.debug.modifier:key.keyboard.f3`. The key names come from the games' own tables
-//! (`keytable.rs`): 26.x (SDL3) has a name for every SDL scancode, 1.13 to 1.21 (GLFW) one
-//! for every GLFW key code, and three names mean different keys in the two ([`Naming`]).
-//! [`InputId`] is a key or mouse button independent of both, with conversions to and from
-//! each library's codes and a label for the menu.
+//! options.txt は割り当てを `key_<割り当ての id>:<キーの名前>` で書く（例：
+//! `key_key.debug.modifier:key.keyboard.f3`）。キーの名前はゲーム自身の表から来る（`keytable.rs`）：
+//! 26.x（SDL3）は SDL のスキャンコードごとに、1.13〜1.21（GLFW）は GLFW のキーコードごとに名前を
+//! 持ち、3 つの名前は両者で別のキーを指す（[`Naming`]）。[`InputId`] はどちらにも依らないキーか
+//! マウスのボタンで、各ライブラリのコードとの相互の変換と、メニューのためのラベルを持つ。
 //!
-//! F3+C is sent as key events for the debug modifier and copy-location mappings. Recent
-//! versions (1.21.11, 26.x) let the user rebind both; older ones (1.16) have no such lines and
-//! hard-code F3 and C, which are also the defaults here. The name lookups F3+C uses
-//! ([`glfw_key`], [`sdl_scancode`], [`sdl_keycode`]) know only the keys a debug binding is
-//! likely to use: letters, digits, F-keys and keypad digits.
+//! F3+C は、デバッグの修飾キーと座標のコピーの割り当てのキーのイベントとして送る。新しい版
+//! （1.21.11、26.x）は両方を変えられる。古い版（1.16）にはその行がなく、F3 と C に決め打ちで、
+//! これはここでの既定でもある。F3+C が使う名前の引き当て（[`glfw_key`]、[`sdl_scancode`]、
+//! [`sdl_keycode`]）が知っているのは、デバッグの割り当てが使いそうなキーだけ：文字、数字、
+//! F キー、テンキーの数字。
 
 use std::collections::HashMap;
 use std::fs;
@@ -21,20 +20,20 @@ use std::sync::LazyLock;
 
 use crate::keytable::{GLFW_KEYS, SDL_KEYS};
 
-/// The key name options.txt stores for a mapping without a key.
+/// キーのない割り当てに options.txt が書くキーの名前。
 pub const UNBOUND: &str = "key.keyboard.unknown";
 
 const KEYBOARD_PREFIX: &str = "key.keyboard.";
 const MOUSE_PREFIX: &str = "key.mouse.";
-/// 1.21's names for keys GLFW has no key code for, by Win32 scancode.
+/// GLFW にキーコードのないキーの 1.21 の名前（Win32 のスキャンコードごと）。
 const SCANCODE_PREFIX: &str = "scancode.";
 
 const MODIFIER_ID: &str = "key.debug.modifier";
 const OVERLAY_ID: &str = "key.debug.overlay";
 const COPY_LOCATION_ID: &str = "key.debug.copyLocation";
 const CRASH_ID: &str = "key.debug.crash";
-/// Mappings the game only reads as "held" during its tick. A refused F3+C presses and
-/// releases the copy key within one poll, so these never see it.
+/// ゲームが tick の間に「押している」としてしか読まない割り当て。断られた F3+C は 1 回の
+/// ポーリングの間にコピーのキーを押して離すので、これらには見えない。
 const HELD_ONLY_IDS: [&str; 8] = [
     "key.forward",
     "key.left",
@@ -45,23 +44,22 @@ const HELD_ONLY_IDS: [&str; 8] = [
     "key.saveToolbarActivator",
     "key.loadToolbarActivator",
 ];
-/// Drops the held item on a press; with Ctrl physically held, the whole stack.
+/// 押すと持っているアイテムを捨てる。Ctrl を物理的に押していればスタックごと。
 const DROP_ID: &str = "key.drop";
 
-/// The keys F3+C is made of, as the key names Minecraft stores in options.txt, e.g.
-/// "key.keyboard.f3".
+/// options.txt に Minecraft が書くキーの名前での、F3+C を作るキー（例："key.keyboard.f3"）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DebugKeys {
     pub modifier: String,
     pub copy_location: String,
     pub crash: String,
-    /// Other (non-debug) mappings bound to the copy-location key that act on a press, by id
-    /// (e.g. "key.drop"). A refused F3+C presses each of them once.
+    /// 座標のコピーのキーに割り当てられた、押下で動くほかの（デバッグでない）割り当て（id で。
+    /// 例："key.drop"）。断られた F3+C は、それぞれを 1 回押す。
     pub shared_with_copy: Vec<String>,
 }
 
 impl DebugKeys {
-    /// Whether a refused F3+C drops the held item (a whole stack with Ctrl held).
+    /// 断られた F3+C が持っているアイテムを捨てるか（Ctrl を押していればスタックごと）。
     pub fn copy_drops_items(&self) -> bool {
         self.shared_with_copy.iter().any(|id| id == DROP_ID)
     }
@@ -78,20 +76,19 @@ impl Default for DebugKeys {
     }
 }
 
-/// A `key_<id>:<name>` line of options.txt.
+/// options.txt の `key_<id>:<name>` の行。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct KeyLine<'a> {
     id: &'a str,
     name: &'a str,
-    /// Forge and NeoForge write a modifier the mapping needs after the name
-    /// (`key.keyboard.c:CONTROL`); the key alone does not set it off.
+    /// Forge と NeoForge は、割り当てに要る修飾キーを名前の後に書く（`key.keyboard.c:CONTROL`）。
+    /// キーだけでは動かない。
     with_modifier: bool,
 }
 
-/// The `key_<id>:<name>` lines of options.txt, in file order. The last line wins for a
-/// repeated id, which keeps its first position. CRLF, a BOM and whitespace around the parts
-/// are tolerated; lines with an empty part are skipped. A Forge modifier after the name is
-/// split off.
+/// options.txt の `key_<id>:<name>` の行（ファイルの順）。同じ id が繰り返されたら最後の行が
+/// 勝ち、最初の位置を保つ。CRLF、BOM、各部分の前後の空白は許す。空の部分のある行は飛ばす。
+/// 名前の後の Forge の修飾キーは切り離す。
 fn key_lines(options_txt: &str) -> Vec<KeyLine<'_>> {
     let text = options_txt.strip_prefix('\u{feff}').unwrap_or(options_txt);
     let mut bindings: Vec<KeyLine<'_>> = Vec::new();
@@ -135,13 +132,13 @@ fn key_lines(options_txt: &str) -> Vec<KeyLine<'_>> {
     bindings
 }
 
-/// Reads the debug keys from the text of options.txt.
+/// options.txt の文字からデバッグのキーを読む。
 ///
-/// Every `key_<id>:<name>` line is read, and the last one wins for a repeated id. A missing
-/// debug line keeps its default (1.16 has none). CRLF, a BOM and whitespace around the parts
-/// are tolerated. `shared_with_copy` lists, in file order, the mappings outside `key.debug.*`
-/// bound to the copy-location key, except those only read as held and (Forge) those that
-/// need a modifier as well; an unbound copy-location key shares nothing.
+/// `key_<id>:<name>` の行を全部読み、同じ id が繰り返されたら最後のものが勝つ。デバッグの行が
+/// なければ既定のまま（1.16 にはない）。CRLF、BOM、各部分の前後の空白は許す。
+/// `shared_with_copy` は、座標のコピーのキーに割り当てられた `key.debug.*` 以外の割り当てを
+/// ファイルの順に並べる。ただし、押しているとしてしか読まれないものと、（Forge で）修飾キーも
+/// 要るものは除く。座標のコピーのキーに割り当てがなければ、何も共有しない。
 pub fn parse_debug_keys(options_txt: &str) -> DebugKeys {
     let bindings = key_lines(options_txt);
     let bound = |id: &str| {
@@ -174,13 +171,13 @@ pub fn parse_debug_keys(options_txt: &str) -> DebugKeys {
     }
 }
 
-/// The mappings bound to each key or mouse button in the text of options.txt, by mapping id
-/// in file order (e.g. `(Key(60), ["key.debug.overlay", "key.debug.modifier"])`), for showing
-/// what a key does in the game. Keys appear in the order of their first mapping.
+/// options.txt の文字の、各キーかマウスのボタンに割り当てた割り当て（割り当ての id で、
+/// ファイルの順。例：`(Key(60), ["key.debug.overlay", "key.debug.modifier"])`）。キーが
+/// ゲームで何をするかを見せるため。キーは最初の割り当ての順に並ぶ。
 ///
-/// The lines are read as [`parse_debug_keys`] reads them, and the key names with `naming`.
-/// Unbound mappings and names that are not a key are left out, and so are the debug mappings
-/// other than the modifier and the overlay toggle: they act only together with the modifier.
+/// 行は [`parse_debug_keys`] と同じく読み、キーの名前は `naming` で読む。割り当てのないものと
+/// キーでない名前は除き、修飾キーとオーバーレイの切り替え以外のデバッグの割り当ても除く：
+/// それらは修飾キーと一緒のときだけ動く。
 pub fn bindings_by_key(options_txt: &str, naming: Naming) -> Vec<(InputId, Vec<String>)> {
     let mut by_key: Vec<(InputId, Vec<String>)> = Vec::new();
     let mut index: HashMap<InputId, usize> = HashMap::new();
@@ -202,13 +199,13 @@ pub fn bindings_by_key(options_txt: &str, naming: Naming) -> Vec<(InputId, Vec<S
     by_key
 }
 
-/// `<game_dir>/options.txt`: the game's options, including the key bindings.
+/// `<game_dir>/options.txt`：キーの割り当てを含む、ゲームの設定。
 pub fn options_path(game_dir: &Path) -> PathBuf {
     game_dir.join("options.txt")
 }
 
-/// Reads the debug keys from `<game_dir>/options.txt`. A missing file (a fresh instance) gives
-/// the defaults; text that is not UTF-8 is read lossily.
+/// `<game_dir>/options.txt` からデバッグのキーを読む。ファイルがなければ（新しいインスタンス）
+/// 既定のもの。UTF-8 でない文字は、壊れた部分を置き換えて読む。
 pub fn load_debug_keys(game_dir: &Path) -> io::Result<DebugKeys> {
     match fs::read(options_path(game_dir)) {
         Ok(bytes) => Ok(parse_debug_keys(&String::from_utf8_lossy(&bytes))),
@@ -217,62 +214,61 @@ pub fn load_debug_keys(game_dir: &Path) -> io::Result<DebugKeys> {
     }
 }
 
-/// Key ids are below this (SDL3's `SDL_SCANCODE_COUNT`), so an array this long holds a value
-/// for every key.
+/// キーの id はこれより小さい（SDL3 の `SDL_SCANCODE_COUNT`）。この長さの配列は、どのキーの値も持てる。
 pub const SCANCODE_COUNT: usize = 512;
-/// The first key id: SDL3 has no keys below `SDL_SCANCODE_A`, and the names of 1..=3 would
-/// read as the digit keys.
+/// 最初のキーの id：SDL3 に `SDL_SCANCODE_A` より下のキーはなく、1..=3 の名前は数字のキーと
+/// 読まれてしまう。
 const FIRST_SCANCODE: u16 = 4;
-/// Mouse ids are 1..=this: GLFW and SDL3 report no other buttons on Windows.
+/// マウスの id は 1..=これ：Windows では GLFW も SDL3 もほかのボタンを報告しない。
 const MOUSE_BUTTONS: u8 = 5;
-/// GLFW key codes are below this (`GLFW_KEY_LAST` + 1).
+/// GLFW のキーコードはこれより小さい（`GLFW_KEY_LAST` + 1）。
 const GLFW_KEY_COUNT: usize = 349;
-/// SDLK_SCANCODE_MASK: keys without a character use their scancode with this bit set.
+/// SDLK_SCANCODE_MASK：文字のないキーは、スキャンコードにこのビットを立てたものを使う。
 const SCANCODE_MASK: u32 = 1 << 30;
 
-/// A key or mouse button, independent of the window library.
+/// ウィンドウのライブラリに依らない、キーかマウスのボタン。
 ///
-/// `Key` is an SDL3 scancode (4..512), `Mouse` an SDL3 button number (1 left, 2 middle,
-/// 3 right, 4 and 5 the side buttons). Both are also the values 26.x uses. Named after the
-/// game's names with [`input_name`] and [`input_by_name`].
+/// `Key` は SDL3 のスキャンコード（4..512）、`Mouse` は SDL3 のボタンの番号（1 左、2 中、3 右、
+/// 4 と 5 は横のボタン）。どちらも 26.x が使う値。ゲームの名前で [`input_name`] と
+/// [`input_by_name`] で名付ける。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum InputId {
     Key(u16),
     Mouse(u8),
 }
 
-/// Whose key names to read: a few names mean different keys in 1.21 and 26.x (1.21's
-/// `keypad.decimal`, `menu` and `world.2` are 26.x's `keypad.period`, `application` and
-/// `world.1`), and mouse buttons are numbered differently.
+/// どのキーの名前で読むか：いくつかの名前は 1.21 と 26.x で別のキーを指し（1.21 の
+/// `keypad.decimal`、`menu`、`world.2` は 26.x の `keypad.period`、`application`、
+/// `world.1`）、マウスのボタンの番号の振り方も違う。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Naming {
-    /// 26.x (SDL3): the names in settings.json, and in options.txt under SDL3.
+    /// 26.x（SDL3）：settings.json と、SDL3 のもとでの options.txt の名前。
     Modern,
-    /// 1.13 to 1.21 (GLFW), as their options.txt has them: `scancode.<n>` for the keys GLFW
-    /// has no key code for (the Japanese keys), and unnamed mouse buttons as GLFW's number + 1.
+    /// 1.13〜1.21（GLFW）の options.txt のとおり：GLFW にキーコードのないキー（日本語のキー）は
+    /// `scancode.<n>`、名前のないマウスのボタンは GLFW の番号 + 1。
     Glfw,
 }
 
-/// The kind of a modifier key, for the modifier bits of key events.
+/// キーのイベントの修飾キーのビットのための、修飾キーの種類。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Modifier {
     Shift,
     Ctrl,
     Alt,
-    /// The Windows key (GLFW's Super, SDL3's GUI).
+    /// Windows キー（GLFW の Super、SDL3 の GUI）。
     Super,
 }
 
-/// Which of a pair of modifier keys.
+/// 左右の修飾キーのどちらか。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Side {
     Left,
     Right,
 }
 
-/// Keys of Japanese keyboards GLFW has no key code for: GLFW reports them as key -1 with their
-/// Win32 scancode, and 1.21 names them `scancode.<n>`. (Win32 scancode, SDL3 scancode), as
-/// SDL3's Windows scancode table maps them.
+/// GLFW にキーコードのない日本語のキーボードのキー：GLFW はこれを Win32 のスキャンコード付きの
+/// key -1 として報告し、1.21 は `scancode.<n>` と名付ける。SDL3 の Windows のスキャンコードの表の
+/// とおりの (Win32 のスキャンコード, SDL3 のスキャンコード)。
 const JIS_KEYS: [(u16, u16); 5] = [
     // カタカナ/ひらがな: international2.
     (0x70, 136),
@@ -282,12 +278,12 @@ const JIS_KEYS: [(u16, u16); 5] = [
     (0x79, 138),
     // 無変換: international5.
     (0x7b, 139),
-    // ¥: international3.
+    // ¥：international3。
     (0x7d, 137),
 ];
 
-/// [`SDL_KEYS`] row + 1 by SDL scancode (0: no name). Building it checks the table: a bad or
-/// repeated scancode does not compile.
+/// SDL のスキャンコードごとの [`SDL_KEYS`] の行 + 1（0：名前なし）。作るときに表を確かめる：
+/// 間違った、または重なったスキャンコードはコンパイルできない。
 const SDL_ROW: [u8; SCANCODE_COUNT] = {
     assert!(SDL_KEYS.len() < u8::MAX as usize);
     let mut rows = [0; SCANCODE_COUNT];
@@ -301,7 +297,7 @@ const SDL_ROW: [u8; SCANCODE_COUNT] = {
     rows
 };
 
-/// [`GLFW_KEYS`] row + 1 by GLFW key code (0: no such key).
+/// GLFW のキーコードごとの [`GLFW_KEYS`] の行 + 1（0：そのキーはない）。
 const GLFW_ROW: [u8; GLFW_KEY_COUNT] = {
     assert!(GLFW_KEYS.len() < u8::MAX as usize);
     let mut rows = [0; GLFW_KEY_COUNT];
@@ -315,8 +311,9 @@ const GLFW_ROW: [u8; GLFW_KEY_COUNT] = {
     rows
 };
 
-/// [`GLFW_KEYS`] row + 1 by SDL scancode (0: GLFW has no such key). Of two GLFW keys on one
-/// scancode (`world.1` and `world.2`), the one Windows has (with a Win32 scancode).
+/// SDL のスキャンコードごとの [`GLFW_KEYS`] の行 + 1（0：GLFW にそのキーはない）。1 つの
+/// スキャンコードに 2 つの GLFW のキー（`world.1` と `world.2`）があれば、Windows にある方
+/// （Win32 のスキャンコードを持つ方）。
 const GLFW_ROW_BY_SDL: [u8; SCANCODE_COUNT] = {
     let mut rows = [0; SCANCODE_COUNT];
     let mut i = 0;
@@ -326,7 +323,7 @@ const GLFW_ROW_BY_SDL: [u8; SCANCODE_COUNT] = {
         assert!(sc < SCANCODE_COUNT && (sc == 0 || SDL_ROW[sc] != 0));
         if sc != 0 {
             let old = rows[sc];
-            // At most one of them has a Win32 scancode.
+            // Win32 のスキャンコードを持つのは、多くても 1 つ。
             assert!(old == 0 || GLFW_KEYS[old as usize - 1].3 == 0 || win == 0);
             if old == 0 || win != 0 {
                 rows[sc] = (i + 1) as u8;
@@ -337,7 +334,7 @@ const GLFW_ROW_BY_SDL: [u8; SCANCODE_COUNT] = {
     rows
 };
 
-/// The [`SDL_KEYS`] row of a scancode.
+/// スキャンコードの [`SDL_KEYS`] の行。
 const fn sdl_row(sc: u16) -> Option<(u16, &'static str, u32)> {
     if sc as usize >= SCANCODE_COUNT {
         return None;
@@ -348,7 +345,7 @@ const fn sdl_row(sc: u16) -> Option<(u16, &'static str, u32)> {
     }
 }
 
-/// The [`GLFW_KEYS`] row of a GLFW key code.
+/// GLFW のキーコードの [`GLFW_KEYS`] の行。
 const fn glfw_row(key: i32) -> Option<(i32, &'static str, u16, u16)> {
     if key < 0 || key as usize >= GLFW_KEY_COUNT {
         return None;
@@ -359,7 +356,7 @@ const fn glfw_row(key: i32) -> Option<(i32, &'static str, u16, u16)> {
     }
 }
 
-/// The [`GLFW_KEYS`] row of an SDL scancode.
+/// SDL のスキャンコードの [`GLFW_KEYS`] の行。
 const fn glfw_row_of_sdl(sc: u16) -> Option<(i32, &'static str, u16, u16)> {
     if sc as usize >= SCANCODE_COUNT {
         return None;
@@ -370,7 +367,7 @@ const fn glfw_row_of_sdl(sc: u16) -> Option<(i32, &'static str, u16, u16)> {
     }
 }
 
-/// The SDL scancode of a Japanese key by Win32 scancode.
+/// Win32 のスキャンコードから、日本語のキーの SDL のスキャンコード。
 const fn jis_by_win_scancode(win: i32) -> Option<u16> {
     let mut i = 0;
     while i < JIS_KEYS.len() {
@@ -382,7 +379,7 @@ const fn jis_by_win_scancode(win: i32) -> Option<u16> {
     None
 }
 
-/// The Win32 scancode of a Japanese key by SDL scancode.
+/// SDL のスキャンコードから、日本語のキーの Win32 のスキャンコード。
 const fn jis_win_scancode(sc: u16) -> Option<u16> {
     let mut i = 0;
     while i < JIS_KEYS.len() {
@@ -394,12 +391,12 @@ const fn jis_win_scancode(sc: u16) -> Option<u16> {
     None
 }
 
-/// Whether a scancode is in the range of key ids.
+/// スキャンコードがキーの id の範囲にあるか。
 const fn is_key(sc: u16) -> bool {
     sc >= FIRST_SCANCODE && (sc as usize) < SCANCODE_COUNT
 }
 
-/// A decimal number as the game writes it for an unnamed key: digits only.
+/// 名前のないキーにゲームが書く 10 進の数：数字だけ。
 fn number(text: &str) -> Option<u32> {
     if text.is_empty() || text.len() > 9 || !text.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -407,17 +404,17 @@ fn number(text: &str) -> Option<u32> {
     text.parse().ok()
 }
 
-/// The rows of [`SDL_KEYS`] by name.
+/// 名前ごとの [`SDL_KEYS`] の行。
 static SDL_NAMES: LazyLock<HashMap<&'static str, u16>> =
     LazyLock::new(|| SDL_KEYS.iter().map(|&(sc, name, _)| (name, sc)).collect());
-/// A row of [`GLFW_KEYS`]: the GLFW key code, its name, and SDL scancodes.
+/// [`GLFW_KEYS`] の行：GLFW のキーコード、その名前、SDL のスキャンコード。
 type GlfwRow = (i32, &'static str, u16, u16);
 
-/// The rows of [`GLFW_KEYS`] by name.
+/// 名前ごとの [`GLFW_KEYS`] の行。
 static GLFW_NAMES: LazyLock<HashMap<&'static str, GlfwRow>> =
     LazyLock::new(|| GLFW_KEYS.iter().map(|&row| (row.1, row)).collect());
 
-/// A key id from 26.x's name after `key.keyboard.`: its name, or the scancode itself.
+/// 26.x の `key.keyboard.` の後の名前からキーの id：その名前か、スキャンコードそのもの。
 fn modern_key(rest: &str) -> Option<InputId> {
     let sc = match SDL_NAMES.get(rest) {
         Some(&sc) => sc,
@@ -426,8 +423,7 @@ fn modern_key(rest: &str) -> Option<InputId> {
     is_key(sc).then_some(InputId::Key(sc))
 }
 
-/// The [`GLFW_KEYS`] row of 1.21's name after `key.keyboard.`: its name, or the GLFW key code
-/// itself.
+/// 1.21 の `key.keyboard.` の後の名前の [`GLFW_KEYS`] の行：その名前か、GLFW のキーコードそのもの。
 fn glfw_name_row(rest: &str) -> Option<(i32, &'static str, u16, u16)> {
     match GLFW_NAMES.get(rest) {
         Some(&row) => Some(row),
@@ -435,11 +431,11 @@ fn glfw_name_row(rest: &str) -> Option<(i32, &'static str, u16, u16)> {
     }
 }
 
-/// The key or mouse button of a key name from options.txt or settings.json, e.g.
-/// `key.keyboard.f3` or `key.mouse.4`, read as `naming` reads it. Like the game, a number
-/// stands for an unnamed key (`key.keyboard.<scancode>` in 26.x, `key.keyboard.<GLFW key>` in
-/// 1.21). `None` for `key.keyboard.unknown`, ids out of range, keys the other library has no
-/// equivalent for (GLFW's F25) and anything else.
+/// options.txt か settings.json のキーの名前（例：`key.keyboard.f3`、`key.mouse.4`）を、
+/// `naming` の読み方で読んだキーかマウスのボタン。ゲームと同じく、数は名前のないキーを表す
+/// （26.x では `key.keyboard.<スキャンコード>`、1.21 では `key.keyboard.<GLFW のキー>`）。
+/// `key.keyboard.unknown`、範囲外の id、もう一方のライブラリに同じもののないキー（GLFW の F25）、
+/// そのほかは `None`。
 pub fn input_by_name(name: &str, naming: Naming) -> Option<InputId> {
     if let Some(rest) = name.strip_prefix(KEYBOARD_PREFIX) {
         return match naming {
@@ -483,10 +479,9 @@ pub fn input_by_name(name: &str, naming: Naming) -> Option<InputId> {
     }
 }
 
-/// 26.x's name of a key or mouse button (what settings.json stores), e.g. `key.keyboard.f3`,
-/// `key.mouse.4`; an unnamed key is `key.keyboard.<scancode>`. [`input_by_name`] with
-/// [`Naming::Modern`] reads it back for every id in range; ids out of range get names it
-/// refuses.
+/// キーかマウスのボタンの 26.x の名前（settings.json に書くもの。例：`key.keyboard.f3`、
+/// `key.mouse.4`）。名前のないキーは `key.keyboard.<スキャンコード>`。範囲内のどの id でも、
+/// [`Naming::Modern`] の [`input_by_name`] で読み戻せる。範囲外の id には、読み戻せない名前を付ける。
 pub fn input_name(id: InputId) -> String {
     match id {
         InputId::Key(sc) => match sdl_row(sc) {
@@ -501,10 +496,10 @@ pub fn input_name(id: InputId) -> String {
     }
 }
 
-/// The menu's label of a key or mouse button: `A`, `1`, `F3`, `左 Ctrl`, `スペース`, `↑`,
-/// US symbols for punctuation, `テンキー 1`, `テンキーの Enter`, the Japanese keys (`ろ`,
-/// `¥`, `変換`, `無変換`, `カタカナ/ひらがな`), `左クリック`, `マウスのボタン4`, and
-/// `キー 130` for keys without a label here.
+/// キーかマウスのボタンのメニューでのラベル：`A`、`1`、`F3`、`左 Ctrl`、`スペース`、`↑`、
+/// 記号は US 配列のもの、`テンキー 1`、`テンキーの Enter`、日本語のキー（`ろ`、`¥`、`変換`、
+/// `無変換`、`カタカナ/ひらがな`）、`左クリック`、`マウスのボタン4`。ここにラベルのないキーは
+/// `キー 130`。
 pub fn input_label(id: InputId) -> String {
     match id {
         InputId::Key(sc) => key_id_label(sc),
@@ -519,7 +514,7 @@ pub fn input_label(id: InputId) -> String {
 
 fn key_id_label(sc: u16) -> String {
     let label = match sc {
-        // Letters, then the digit row 1..9, 0.
+        // 文字、次に数字の列の 1..9、0。
         4..=29 => return char::from(b'A' + (sc - 4) as u8).to_string(),
         30..=38 => return (sc - 29).to_string(),
         39 => "0",
@@ -585,9 +580,9 @@ fn key_id_label(sc: u16) -> String {
     label.to_owned()
 }
 
-/// The key of a GLFW key event (1.13 to 1.21): by key code, or for key -1 (the keys GLFW has
-/// no code for) by Win32 scancode, which is how the game tells those apart. `None` for keys
-/// SDL3 has no equivalent for (F25) and codes out of range.
+/// GLFW のキーのイベント（1.13〜1.21）のキー：キーコードで。key -1（GLFW にコードのないキー）は
+/// Win32 のスキャンコードで（ゲームもそれで見分ける）。SDL3 に同じもののないキー（F25）と
+/// 範囲外のコードは `None`。
 pub const fn input_from_glfw_key(key: i32, win_scancode: i32) -> Option<InputId> {
     if key == -1 {
         return match jis_by_win_scancode(win_scancode) {
@@ -601,8 +596,8 @@ pub const fn input_from_glfw_key(key: i32, win_scancode: i32) -> Option<InputId>
     }
 }
 
-/// The mouse button of a GLFW button number: GLFW counts from 0 and has right before middle
-/// (0 left, 1 right, 2 middle, 3 and 4 the side buttons).
+/// GLFW のボタンの番号のマウスのボタン：GLFW は 0 から数え、中より右が先（0 左、1 右、2 中、
+/// 3 と 4 は横のボタン）。
 pub const fn input_from_glfw_button(button: i32) -> Option<InputId> {
     match button {
         0 => Some(InputId::Mouse(1)),
@@ -614,9 +609,10 @@ pub const fn input_from_glfw_button(button: i32) -> Option<InputId> {
     }
 }
 
-/// The GLFW key code and Win32 scancode to send a key as: `(-1, scancode)` for the keys GLFW
-/// has no code for, else `(key code, scancode or 0)`. `None` for mouse buttons and keys GLFW
-/// lacks. The scancode of a coded key is what GLFW 3.4 reports on Windows; the game ignores it.
+/// キーを送るときの GLFW のキーコードと Win32 のスキャンコード：GLFW にコードのないキーは
+/// `(-1, スキャンコード)`、それ以外は `(キーコード, スキャンコードか 0)`。マウスのボタンと、GLFW に
+/// ないキーは `None`。コードのあるキーのスキャンコードは GLFW 3.4 が Windows で報告するもので、
+/// ゲームは無視する。
 pub const fn glfw_key_of(id: InputId) -> Option<(i32, i32)> {
     let InputId::Key(sc) = id else {
         return None;
@@ -630,7 +626,7 @@ pub const fn glfw_key_of(id: InputId) -> Option<(i32, i32)> {
     }
 }
 
-/// The GLFW button number of a mouse button (the reverse of [`input_from_glfw_button`]).
+/// マウスのボタンの GLFW のボタンの番号（[`input_from_glfw_button`] の逆）。
 pub const fn glfw_button_of(id: InputId) -> Option<i32> {
     match id {
         InputId::Mouse(1) => Some(0),
@@ -642,10 +638,9 @@ pub const fn glfw_button_of(id: InputId) -> Option<i32> {
     }
 }
 
-/// The SDL3 keycode of a key (the `key` field of a key event), as SDL3's default keymap gives
-/// it with a US layout: the character for letters, digits and punctuation, the scancode with
-/// `SDLK_SCANCODE_MASK` for other keys. 0 (`SDLK_UNKNOWN`) for mouse buttons and ids out of
-/// range.
+/// キーの SDL3 のキーコード（キーのイベントの `key` のフィールド）。US 配列の SDL3 の既定の
+/// キーマップのとおり：文字、数字、記号はその文字、ほかのキーはスキャンコードに
+/// `SDLK_SCANCODE_MASK` を立てたもの。マウスのボタンと範囲外の id は 0（`SDLK_UNKNOWN`）。
 pub const fn sdl_keycode_of(id: InputId) -> u32 {
     match id {
         InputId::Key(sc) => match sdl_row(sc) {
@@ -657,8 +652,8 @@ pub const fn sdl_keycode_of(id: InputId) -> u32 {
     }
 }
 
-/// The Win32 scancode of a key (set 1, with 0x100 for the 0xE0 prefix), as GLFW 3.4 reports
-/// it; `None` for mouse buttons and keys GLFW does not know.
+/// GLFW 3.4 が報告するキーの Win32 のスキャンコード（セット 1。0xE0 の前置きは 0x100）。
+/// マウスのボタンと、GLFW が知らないキーは `None`。
 pub const fn win_scancode_of(id: InputId) -> Option<u16> {
     let InputId::Key(sc) = id else {
         return None;
@@ -672,7 +667,7 @@ pub const fn win_scancode_of(id: InputId) -> Option<u16> {
     }
 }
 
-/// Which modifier a key is: the left and right Ctrl, Shift, Alt and Windows keys.
+/// キーがどの修飾キーか：左右の Ctrl、Shift、Alt、Windows キー。
 pub const fn modifier_kind(id: InputId) -> Option<(Modifier, Side)> {
     let InputId::Key(sc) = id else {
         return None;
@@ -690,47 +685,47 @@ pub const fn modifier_kind(id: InputId) -> Option<(Modifier, Side)> {
     })
 }
 
-/// Whether F3+C may use a key (by SDL scancode): letters, digits, F-keys and keypad digits.
+/// F3+C がキー（SDL のスキャンコードで）を使えるか：文字、数字、F キー、テンキーの数字。
 const fn f3c_key(sc: u16) -> bool {
     matches!(sc, 4..=39 | 58..=69 | 89..=98 | 104..=115)
 }
 
-/// The GLFW key code of a 1.21 key name (what 1.13 to 1.21 match bindings on), for the keys
-/// F3+C may use: letters, digits, F1..F25 and keypad digits.
+/// 1.21 のキーの名前の GLFW のキーコード（1.13〜1.21 はこれで割り当てを照らし合わせる）。
+/// F3+C が使えるキー：文字、数字、F1..F25、テンキーの数字。
 pub fn glfw_key(name: &str) -> Option<i32> {
     let rest = name.strip_prefix(KEYBOARD_PREFIX)?;
     let &(key, _, _, _) = GLFW_NAMES.get(rest)?;
     matches!(key, 48..=57 | 65..=90 | 290..=314 | 320..=329).then_some(key)
 }
 
-/// The key of a 26.x key name, for the keys F3+C may use.
+/// F3+C が使えるキーについて、26.x のキーの名前のキー。
 fn f3c_scancode(name: &str) -> Option<u16> {
     let rest = name.strip_prefix(KEYBOARD_PREFIX)?;
     let &sc = SDL_NAMES.get(rest)?;
     f3c_key(sc).then_some(sc)
 }
 
-/// The SDL3 scancode of a key name (what 26.x matches bindings on), for the keys F3+C may use:
-/// letters, digits, F1..F24 (SDL has no F25) and keypad digits.
+/// キーの名前の SDL3 のスキャンコード（26.x はこれで割り当てを照らし合わせる）。F3+C が使える
+/// キー：文字、数字、F1..F24（SDL に F25 はない）、テンキーの数字。
 pub fn sdl_scancode(name: &str) -> Option<u32> {
     f3c_scancode(name).map(u32::from)
 }
 
-/// The SDL3 keycode of a key name, for the `key` field of synthetic key events; the keys of
-/// [`sdl_scancode`].
+/// 作ったキーのイベントの `key` のフィールドのための、キーの名前の SDL3 のキーコード。
+/// キーは [`sdl_scancode`] と同じ。
 pub fn sdl_keycode(name: &str) -> Option<u32> {
     f3c_scancode(name).map(|sc| sdl_keycode_of(InputId::Key(sc)))
 }
 
-/// A short label for a key name, e.g. "F3", "C", "テンキー 1", "左 Shift", "マウスの戻る" (as
-/// [`input_label`] has them, whether 26.x or 1.21 named it); names of neither are shown as
-/// they are.
+/// キーの名前の短いラベル。例："F3"、"C"、"テンキー 1"、"左 Shift"、"マウスの戻る"
+/// （[`input_label`] と同じ。26.x と 1.21 のどちらの名前でも）。どちらの名前でもないものは
+/// そのまま出す。
 pub fn key_label(name: &str) -> String {
     if let Some(sc) = f3c_scancode(name) {
         return input_label(InputId::Key(sc));
     }
     if let Some(key @ 290..=314) = glfw_key(name) {
-        // GLFW's F25, which SDL3 lacks.
+        // SDL3 にない、GLFW の F25。
         return format!("F{}", key - 289);
     }
     match input_by_name(name, Naming::Modern).or_else(|| input_by_name(name, Naming::Glfw)) {
@@ -739,8 +734,8 @@ pub fn key_label(name: &str) -> String {
     }
 }
 
-/// The Japanese name of a vanilla mapping id such as "key.drop" (the game's ja_jp names);
-/// other ids are returned as they are.
+/// "key.drop" のようなバニラの割り当ての id の日本語の名前（ゲームの ja_jp の名前）。ほかの
+/// id はそのまま返す。
 pub fn mapping_label(id: &str) -> String {
     let label = match id {
         "key.forward" => "前進",
@@ -810,8 +805,8 @@ mod tests {
 
     #[test]
     fn default_bindings_of_recent_versions() {
-        // The shape of the user's 26.3 options.txt: the debug keys at their defaults,
-        // "drop" moved to C and the toolbar activator moved away from it.
+        // 利用者の 26.3 の options.txt の形：デバッグのキーは既定のまま、「捨てる」を C に移し、
+        // ツールバーの切り替えをそこから外した。
         let text = "version:5023\n\
                     key_key.attack:key.mouse.left\n\
                     key_key.drop:key.keyboard.c\n\
@@ -828,10 +823,10 @@ mod tests {
 
     #[test]
     fn old_versions_without_debug_lines_compare_against_c() {
-        // 1.16.1 hard-codes F3 and C and writes no debug lines.
+        // 1.16.1 は F3 と C に決め打ちで、デバッグの行を書かない。
         let text = "key_key.drop:key.keyboard.c\nkey_key.inventory:key.keyboard.e\n\
                     key_key.saveToolbarActivator:key.keyboard.c\n";
-        // The hotbar saver on C is only read as held, so a refused F3+C cannot trigger it.
+        // C のホットバーの保存は押しているとしてしか読まれないので、断られた F3+C では動かない。
         let parsed = parse_debug_keys(text);
         assert_eq!(parsed, keys("f3", "c", "c", &["key.drop"]));
         assert!(parsed.copy_drops_items());
@@ -844,15 +839,15 @@ mod tests {
 
     #[test]
     fn forge_modifiers_are_split_off() {
-        // Forge writes the modifier a mapping needs after the key; NONE is none.
+        // Forge は割り当てに要る修飾キーをキーの後に書く。NONE はなし。
         let text = "key_key.debug.copyLocation:key.keyboard.c:NONE\n\
                     key_key.drop:key.keyboard.c:CONTROL\n\
                     key_key.inventory:key.keyboard.c\n";
         let parsed = parse_debug_keys(text);
         assert_eq!(parsed.copy_location, "key.keyboard.c");
-        // Drop needs Ctrl as well, so F3+C cannot set it off.
+        // 捨てるには Ctrl も要るので、F3+C では動かない。
         assert_eq!(parsed.shared_with_copy, ["key.inventory"]);
-        // The menu lists both (debug mappings other than the modifier are left out).
+        // メニューには両方を出す（修飾キー以外のデバッグの割り当ては除く）。
         assert_eq!(
             bindings_by_key(text, Naming::Modern),
             [(
@@ -887,7 +882,7 @@ mod tests {
         assert_eq!(parsed.modifier, "key.keyboard.f4");
         assert_eq!(parsed.copy_location, "key.keyboard.x");
         assert_eq!(parsed.crash, "key.keyboard.keypad.5");
-        // Debug mappings are left out; modded ones are listed by id.
+        // デバッグの割り当ては除く。Mod のものは id で出す。
         assert_eq!(
             parsed.shared_with_copy,
             ["key.inventory", "modid.custom_action"]
@@ -904,7 +899,7 @@ mod tests {
         assert_eq!(parsed.modifier, "key.keyboard.f3");
         assert_eq!(parsed.copy_location, UNBOUND);
         assert_eq!(parsed.crash, UNBOUND);
-        // Other unbound mappings do not "share" the missing key.
+        // 割り当てのないほかの割り当ては、ないキーを「共有」しない。
         assert!(parsed.shared_with_copy.is_empty());
     }
 
@@ -915,7 +910,7 @@ mod tests {
                     \x20 key_key.drop : key.keyboard.v \r\n\
                     \tkey_key.debug.copyLocation:key.keyboard.v\r\n";
         assert_eq!(parse_debug_keys(text), keys("f6", "v", "c", &["key.drop"]));
-        // A BOM right before the first key line.
+        // 最初のキーの行の直前の BOM。
         assert_eq!(
             parse_debug_keys("\u{feff}key_key.debug.copyLocation:key.keyboard.b").copy_location,
             "key.keyboard.b"
@@ -933,10 +928,10 @@ mod tests {
                     key_key.chat\n\
                     keykey.jump:key.keyboard.q\n";
         let parsed = parse_debug_keys(text);
-        // The last line wins, and the mapping keeps its first position.
+        // 最後の行が勝ち、割り当ては最初の位置を保つ。
         assert_eq!(parsed.copy_location, "key.keyboard.q");
         assert_eq!(parsed.shared_with_copy, ["key.drop"]);
-        // An empty value is ignored rather than taken as a key.
+        // 空の値はキーとせず、無視する。
         assert_eq!(parsed.modifier, "key.keyboard.f3");
     }
 
@@ -961,7 +956,7 @@ mod tests {
         let cases = [
             ("a", 65),
             ("c", 67),
-            // The letter, not a function key.
+            // ファンクションキーではなく、文字。
             ("f", 70),
             ("z", 90),
             ("0", 48),
@@ -1079,7 +1074,7 @@ mod tests {
         assert_eq!(key_label("key.keyboard.f"), "F");
         assert_eq!(key_label("key.keyboard.0"), "0");
         assert_eq!(key_label("key.keyboard.keypad.1"), "テンキー 1");
-        // Keys F3+C cannot use get their labels too.
+        // F3+C が使えないキーにもラベルがある。
         assert_eq!(key_label("key.mouse.left"), input_label(InputId::Mouse(1)));
         assert_eq!(key_label(UNBOUND), UNBOUND);
     }
@@ -1087,7 +1082,7 @@ mod tests {
     #[test]
     fn mapping_labels() {
         assert_eq!(mapping_label("key.drop"), "アイテムを捨てる");
-        // The names the game's own ja_jp key settings show.
+        // ゲーム自身の ja_jp のキーの設定が出す名前。
         assert_eq!(mapping_label("key.attack"), "攻撃する／壊す");
         assert_eq!(
             mapping_label("key.loadToolbarActivator"),
@@ -1102,7 +1097,7 @@ mod tests {
 
     #[test]
     fn mapping_labels_of_recent_mappings() {
-        // 1.21.11's and 26.3's mappings, with the game's ja_jp names.
+        // 1.21.11 と 26.3 の割り当て（ゲームの ja_jp の名前で）。
         let cases = [
             ("key.debug.modifier", "デバッグ修飾キー"),
             ("key.debug.overlay", "オーバーレイの切り替え"),
@@ -1119,14 +1114,14 @@ mod tests {
         for (id, label) in cases {
             assert_eq!(mapping_label(id), label, "{id}");
         }
-        // The other debug mappings are not shown, and keep their ids.
+        // ほかのデバッグの割り当ては出さず、id のまま。
         assert_eq!(mapping_label("key.debug.crash"), "key.debug.crash");
     }
 
     #[test]
     fn f3c_lookups_keep_to_their_keys() {
-        // Named keys outside letters, digits, F-keys and keypad digits stay unsupported for
-        // F3+C, and so do numbers standing for keys.
+        // 文字、数字、F キー、テンキーの数字以外の名前のあるキーは、F3+C では使えないまま。キーを
+        // 表す数も同じ。
         for name in [
             "key.keyboard.left.shift",
             "key.keyboard.keypad.enter",
@@ -1138,7 +1133,7 @@ mod tests {
             assert_eq!(sdl_scancode(name), None, "{name}");
             assert_eq!(sdl_keycode(name), None, "{name}");
         }
-        // The keys they know are the table's.
+        // それらが知っているキーは表のもの。
         for (key, name, sc, _) in GLFW_KEYS {
             let full = format!("{KEYBOARD_PREFIX}{name}");
             let Some(code) = glfw_key(&full) else {
@@ -1161,12 +1156,12 @@ mod tests {
                 .filter(|(_, name, _, _)| f(&format!("{KEYBOARD_PREFIX}{name}")))
                 .count()
         };
-        // 26 letters, 10 digits, F1..F25, 10 keypad digits; SDL3 lacks F25.
+        // 26 の文字、10 の数字、F1..F25、10 のテンキーの数字。SDL3 に F25 はない。
         assert_eq!(count(|name| glfw_key(name).is_some()), 71);
         assert_eq!(count(|name| sdl_scancode(name).is_some()), 70);
     }
 
-    /// Notable rows of 26.3's table (`InputConstants.Type.KEYBOARD`).
+    /// 26.3 の表（`InputConstants.Type.KEYBOARD`）の目立つ行。
     const MODERN_ROWS: [(&str, u16); 31] = [
         ("a", 4),
         ("z", 29),
@@ -1212,7 +1207,7 @@ mod tests {
                 "{full}"
             );
         }
-        // Every row reads back from its name, and gives its name.
+        // どの行も名前から読み戻せ、その名前を返す。
         for (sc, name, _) in SDL_KEYS {
             let full = format!("{KEYBOARD_PREFIX}{name}");
             assert_eq!(
@@ -1222,7 +1217,7 @@ mod tests {
             );
             assert_eq!(input_name(InputId::Key(sc)), full);
         }
-        // A number stands for a key, as in the game: unnamed ones, and named ones too.
+        // ゲームと同じく、数はキーを表す：名前のないものも、名前のあるものも。
         assert_eq!(input_name(InputId::Key(130)), "key.keyboard.130");
         assert_eq!(
             input_by_name("key.keyboard.130", Naming::Modern),
@@ -1236,7 +1231,7 @@ mod tests {
             input_by_name("key.keyboard.511", Naming::Modern),
             Some(InputId::Key(511))
         );
-        // The digit keys' names are names, not numbers.
+        // 数字のキーの名前は名前で、数ではない。
         assert_eq!(
             input_by_name("key.keyboard.4", Naming::Modern),
             Some(InputId::Key(33))
@@ -1307,7 +1302,7 @@ mod tests {
         ] {
             assert_eq!(input_by_name(name, Naming::Glfw), None, "{name}");
         }
-        // Ids out of range never panic, and get names that do not read back.
+        // 範囲外の id でもパニックせず、読み戻せない名前を得る。
         for id in [
             InputId::Key(0),
             InputId::Key(1),
@@ -1347,7 +1342,7 @@ mod tests {
     #[test]
     fn glfw_names_and_codes() {
         assert_eq!(GLFW_KEYS.len(), 120);
-        // (1.21 name, GLFW key, 26.x name)
+        // (1.21 の名前, GLFW のキー, 26.x の名前)
         let renamed = [
             ("keypad.decimal", 330, "keypad.period"),
             ("menu", 348, "application"),
@@ -1359,19 +1354,19 @@ mod tests {
             let id = (sc != 0).then_some(InputId::Key(sc));
             assert_eq!(input_by_name(&full, Naming::Glfw), id, "{full}");
             assert_eq!(input_from_glfw_key(key, i32::from(win)), id, "{full}");
-            // Named keys are told apart by key code; the scancode does not matter.
+            // 名前のあるキーはキーコードで見分ける。スキャンコードは関係ない。
             assert_eq!(input_from_glfw_key(key, 0), id, "{full}");
             assert_eq!(
                 input_by_name(&format!("{KEYBOARD_PREFIX}{key}"), Naming::Glfw),
                 id,
                 "{full}"
             );
-            // GLFW's F25 has no SDL3 key.
+            // GLFW の F25 に SDL3 のキーはない。
             let Some(id) = id else {
                 assert_eq!(name, "f25");
                 continue;
             };
-            // The same name in 26.x, except for the renamed keys.
+            // 名前を変えたキーを除き、26.x でも同じ名前。
             let modern = match renamed.iter().find(|(n, _, _)| *n == name) {
                 Some((_, renamed_key, modern)) => {
                     assert_eq!(*renamed_key, key);
@@ -1381,16 +1376,16 @@ mod tests {
             };
             assert_eq!(input_name(id), modern, "{full}");
             if name == "world.1" {
-                // Not a key on Windows; the ISO key is world.2.
+                // Windows のキーではない。ISO 配列のキーは world.2。
                 assert_eq!(glfw_key_of(id), Some((162, 0x56)));
                 continue;
             }
             assert_eq!(glfw_key_of(id), Some((key, i32::from(win))), "{full}");
             assert_eq!(win_scancode_of(id), Some(win), "{full}");
-            // Sending a key gives the same key back.
+            // キーを送ると同じキーが返る。
             assert_eq!(input_from_glfw_key(key, i32::from(win)), Some(id));
         }
-        // Some rows by GLFW key code and the Win32 scancode GLFW 3.4 reports.
+        // GLFW のキーコードと GLFW 3.4 が報告する Win32 のスキャンコードの、いくつかの行。
         let cases = [
             ("space", 32, 44, 0x39),
             ("0", 48, 39, 0x0b),
@@ -1420,7 +1415,7 @@ mod tests {
         }
         assert_eq!(input_from_glfw_key(314, 0), None);
         assert_eq!(input_from_glfw_key(161, -1), Some(InputId::Key(100)));
-        // Keys only SDL3 has.
+        // SDL3 だけにあるキー。
         for sc in [50, 118, 140, 144, 220, 260] {
             assert_eq!(glfw_key_of(InputId::Key(sc)), None, "{sc}");
         }
@@ -1428,7 +1423,7 @@ mod tests {
 
     #[test]
     fn names_that_differ_between_versions() {
-        // (name, 1.21's key, 26.x's key)
+        // (名前, 1.21 のキー, 26.x のキー)
         let cases = [
             ("key.keyboard.keypad.decimal", 99, 220),
             ("key.keyboard.menu", 101, 118),
@@ -1441,7 +1436,7 @@ mod tests {
                 Some(InputId::Key(modern))
             );
         }
-        // 26.x's names for 1.21's keys are not 1.21 names.
+        // 1.21 のキーの 26.x の名前は、1.21 の名前ではない。
         assert_eq!(
             input_by_name("key.keyboard.keypad.period", Naming::Glfw),
             None
@@ -1450,7 +1445,7 @@ mod tests {
             input_by_name("key.keyboard.application", Naming::Glfw),
             None
         );
-        // A number is a GLFW key code in 1.21 and a scancode in 26.x.
+        // 数は、1.21 では GLFW のキーコード、26.x ではスキャンコード。
         assert_eq!(
             input_by_name("key.keyboard.67", Naming::Glfw),
             Some(InputId::Key(6))
@@ -1463,7 +1458,7 @@ mod tests {
 
     #[test]
     fn mouse_buttons() {
-        // SDL3's numbers, which 26.x uses as they are.
+        // 26.x がそのまま使う SDL3 の番号。
         let modern = [
             ("key.mouse.left", 1),
             ("key.mouse.middle", 2),
@@ -1481,7 +1476,7 @@ mod tests {
                 "{name}"
             );
         }
-        // 1.21 names a button by GLFW's number + 1, and GLFW has right before middle.
+        // 1.21 はボタンを GLFW の番号 + 1 で名付け、GLFW は中より右が先。
         let glfw = [
             ("key.mouse.left", 1),
             ("key.mouse.right", 3),
@@ -1505,7 +1500,7 @@ mod tests {
             assert_eq!(input_from_glfw_button(glfw), Some(id));
             assert_eq!(glfw_button_of(id), Some(glfw));
         }
-        // Neither library reports buttons 6..8 on Windows.
+        // Windows ではどちらのライブラリも 6..8 のボタンを報告しない。
         for button in [-1, 5, 6, 7, i32::MAX, i32::MIN] {
             assert_eq!(input_from_glfw_button(button), None, "{button}");
         }
@@ -1514,7 +1509,7 @@ mod tests {
         assert_eq!(input_name(InputId::Mouse(3)), "key.mouse.right");
         assert_eq!(input_name(InputId::Mouse(4)), "key.mouse.4");
         assert_eq!(input_name(InputId::Mouse(5)), "key.mouse.5");
-        // Mouse buttons are not keys.
+        // マウスのボタンはキーではない。
         for button in 1..=MOUSE_BUTTONS {
             let id = InputId::Mouse(button);
             assert_eq!(glfw_key_of(id), None);
@@ -1527,7 +1522,7 @@ mod tests {
 
     #[test]
     fn japanese_keys() {
-        // (Win32 scancode, SDL3 scancode, label)
+        // (Win32 のスキャンコード, SDL3 のスキャンコード, ラベル)
         let cases = [
             (0x70, 136, "カタカナ/ひらがな"),
             (0x73, 135, "ろ"),
@@ -1537,7 +1532,7 @@ mod tests {
         ];
         for (win, sc, label) in cases {
             let id = InputId::Key(sc);
-            // GLFW sends them as key -1; 1.21 names them by the decimal scancode.
+            // GLFW はこれらを key -1 として送る。1.21 は 10 進のスキャンコードで名付ける。
             assert_eq!(input_from_glfw_key(-1, win), Some(id));
             let old_name = format!("scancode.{win}");
             assert_eq!(input_by_name(&old_name, Naming::Glfw), Some(id));
@@ -1554,7 +1549,7 @@ mod tests {
             input_by_name("scancode.115", Naming::Glfw),
             Some(InputId::Key(135))
         );
-        // Other keys GLFW sends as -1 are not known.
+        // GLFW が -1 として送るほかのキーは知らない。
         assert_eq!(input_from_glfw_key(-1, 0x71), None);
         assert_eq!(input_from_glfw_key(-1, 0x2e), None);
     }
@@ -1626,13 +1621,13 @@ mod tests {
         for (sc, label) in cases {
             assert_eq!(input_label(InputId::Key(sc)), label, "{sc}");
         }
-        // The same words as the menu's hotkeys.
+        // メニューのホットキーと同じ言葉。
         assert_eq!(input_label(InputId::Mouse(1)), "左クリック");
         assert_eq!(input_label(InputId::Mouse(3)), "右クリック");
         assert_eq!(input_label(InputId::Mouse(2)), "ホイールクリック");
         assert_eq!(input_label(InputId::Mouse(4)), "マウスのボタン4");
         assert_eq!(input_label(InputId::Mouse(5)), "マウスのボタン5");
-        // Every key in range has a label of its own.
+        // 範囲内のどのキーにも自分のラベルがある。
         let mut seen = std::collections::HashSet::new();
         for sc in FIRST_SCANCODE..SCANCODE_COUNT as u16 {
             assert!(seen.insert(input_label(InputId::Key(sc))), "{sc}");
@@ -1659,7 +1654,7 @@ mod tests {
             (135, 0x4000_0087),
             (224, 0x4000_00e0),
             (290, 0x4000_0122),
-            // Unnamed: the scancode with the mask, as SDL3 makes it.
+            // 名前なし：SDL3 が作るのと同じく、スキャンコードにマスクを立てたもの。
             (130, 0x4000_0082),
             (511, 0x4000_01ff),
         ];
@@ -1703,13 +1698,13 @@ mod tests {
         for (sc, win) in cases {
             assert_eq!(win_scancode_of(InputId::Key(sc)), Some(win), "{sc}");
         }
-        // Keys GLFW does not know.
+        // GLFW が知らないキー。
         for sc in [50, 118, 140, 144, 220] {
             assert_eq!(win_scancode_of(InputId::Key(sc)), None, "{sc}");
         }
     }
 
-    /// The key lines of the user's 26.3 options.txt.
+    /// 利用者の 26.3 の options.txt のキーの行。
     const OPTIONS_26_3: &str = "version:5023\n\
         key_key.attack:key.mouse.left\n\
         key_key.use:key.mouse.right\n\
@@ -1774,7 +1769,7 @@ mod tests {
         key_key.debug.lightmapTexture:key.keyboard.4\n\
         key_key.debug.improvedTransparency:key.keyboard.x\n";
 
-    /// The key lines of the user's 1.21.11 options.txt.
+    /// 利用者の 1.21.11 の options.txt のキーの行。
     const OPTIONS_1_21_11: &str = "version:4671\n\
         key_key.attack:key.mouse.left\n\
         key_key.use:key.mouse.right\n\
@@ -1836,7 +1831,7 @@ mod tests {
         key_key.debug.fpsCharts:key.keyboard.2\n\
         key_key.debug.networkCharts:key.keyboard.3\n";
 
-    /// The mapping ids bound to `id`.
+    /// `id` に割り当てた割り当ての id。
     fn bound(bindings: &[(InputId, Vec<String>)], id: InputId) -> Vec<&str> {
         bindings
             .iter()
@@ -1851,8 +1846,8 @@ mod tests {
         assert_eq!(bindings.len(), 39);
         assert_eq!(bindings[0], (InputId::Mouse(1), vec!["key.attack".into()]));
         let key = |name: &str| input_by_name(&format!("key.keyboard.{name}"), Naming::Modern);
-        // F3: the modifier and the overlay toggle, in file order. The other debug mappings
-        // act only with F3 held, so C is only "drop".
+        // F3：修飾キーとオーバーレイの切り替え（ファイルの順）。ほかのデバッグの割り当ては F3 を
+        // 押しているときだけ動くので、C は「捨てる」だけ。
         assert_eq!(
             bound(&bindings, key("f3").unwrap()),
             ["key.debug.overlay", "key.debug.modifier"]
@@ -1870,7 +1865,7 @@ mod tests {
         );
         assert_eq!(bound(&bindings, key("left.alt").unwrap()), ["key.pickItem"]);
         assert_eq!(bound(&bindings, InputId::Mouse(2)), ["key.spectatorHotbar"]);
-        // Keys bound only to other debug mappings are not listed.
+        // ほかのデバッグの割り当てにだけ割り当てたキーは出さない。
         assert!(bound(&bindings, key("b").unwrap()).is_empty());
         assert!(bound(&bindings, key("x").unwrap()).is_empty());
         for (_, ids) in &bindings {
@@ -1881,7 +1876,7 @@ mod tests {
                 );
             }
         }
-        // The labels the menu shows for F3.
+        // メニューが F3 について出すラベル。
         let labels: Vec<String> = bound(&bindings, key("f3").unwrap())
             .into_iter()
             .map(mapping_label)
@@ -1912,13 +1907,13 @@ mod tests {
             ["key.debug.overlay", "key.debug.modifier"]
         );
         assert_eq!(bound(&bindings, key("9").unwrap()), ["key.hotbar.9"]);
-        // The same file read as 26.x's gives the same keys: it has none of the renamed ones.
+        // 同じファイルを 26.x のものとして読んでも、同じキーになる：名前を変えたものがないため。
         assert_eq!(bindings_by_key(OPTIONS_1_21_11, Naming::Modern), bindings);
     }
 
     #[test]
     fn bindings_by_naming_and_odd_lines() {
-        // 1.21 names the application key "menu" and the Japanese keys by scancode.
+        // 1.21 はアプリケーションキーを "menu"、日本語のキーをスキャンコードで名付ける。
         let text = "key_key.chat:key.keyboard.menu\n\
                     key_key.inventory:key.keyboard.menu\n\
                     key_key.drop:scancode.115\n\
@@ -1929,8 +1924,8 @@ mod tests {
                     key_key.attack:key.mouse.9\n\
                     key_key.sneak:key.keyboard.nonsense\n";
         let glfw = bindings_by_key(text, Naming::Glfw);
-        // The repeated chat line moved chat to Backspace, keeping its first position; the
-        // mouse button 9 and the unknown name are left out.
+        // 繰り返されたチャットの行がチャットを Backspace に移し、最初の位置を保つ。マウスのボタン 9 と
+        // 知らない名前は除く。
         assert_eq!(
             glfw,
             [

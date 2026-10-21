@@ -1,16 +1,15 @@
-//! The Objective-C runtime, as far as the agent talks to AppKit (`NSOpenGLContext`,
-//! `NSPasteboard`).
+//! Objective-C のランタイム（エージェントが AppKit（`NSOpenGLContext`、`NSPasteboard`）と
+//! 話すところまで）。
 //!
-//! libobjc is linked (it is small and every macOS process with a window has it); AppKit is not:
-//! its classes are looked up by name once the game (GLFW, SDL3) has loaded it, and are null
-//! before that.
+//! libobjc はリンクする（小さく、ウィンドウを持つ macOS のプロセスにはどれにもある）。AppKit は
+//! リンクしない：そのクラスは、ゲーム（GLFW、SDL3）が読み込んでから名前で引き、それまでは null。
 
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// An object (`id`); null is `nil`.
+/// オブジェクト（`id`）。null は `nil`。
 pub type Id = *mut c_void;
-/// A selector (`SEL`).
+/// セレクタ（`SEL`）。
 pub type Sel = *const c_void;
 
 pub const NIL: Id = std::ptr::null_mut();
@@ -26,13 +25,13 @@ unsafe extern "C" {
     fn objc_autoreleasePoolPop(pool: *mut c_void);
 }
 
-/// A class by name, null if it is not loaded.
+/// 名前で引いたクラス。読み込まれていなければ null。
 pub fn class(name: &CStr) -> Id {
-    // SAFETY: a NUL-terminated name.
+    // SAFETY: NUL で終わる名前。
     unsafe { objc_getClass(name.as_ptr()) }
 }
 
-/// A selector, registered on first use.
+/// セレクタ。初めて使うときに登録する。
 pub struct Selector {
     name: &'static CStr,
     sel: AtomicUsize,
@@ -49,7 +48,7 @@ impl Selector {
     fn get(&self) -> Sel {
         match self.sel.load(Ordering::Relaxed) {
             0 => {
-                // SAFETY: a NUL-terminated name; selectors live for the process.
+                // SAFETY: NUL で終わる名前。セレクタはプロセスの間生きる。
                 let sel = unsafe { sel_registerName(self.name.as_ptr()) };
                 self.sel.store(sel as usize, Ordering::Relaxed);
                 sel
@@ -59,55 +58,55 @@ impl Selector {
     }
 }
 
-/// `objc_msgSend` as the function type of a method.
+/// メソッドの関数の型としての `objc_msgSend`。
 ///
 /// # Safety
-/// `F` is an `extern "C"` function pointer type whose return is not a struct.
+/// `F` は、構造体を返さない `extern "C"` の関数ポインタの型。
 unsafe fn msg_send<F: Copy>() -> F {
     let raw = objc_msgSend as unsafe extern "C" fn();
-    // SAFETY: function pointers are all one size; the caller gives the method's type.
+    // SAFETY: 関数ポインタはどれも同じ大きさ。メソッドの型は呼び出し側が与える。
     unsafe { std::mem::transmute_copy(&raw) }
 }
 
-/// Sends a message without arguments.
+/// 引数なしでメッセージを送る。
 ///
 /// # Safety
-/// `receiver` is an object (or nil) that answers `sel` with an `R`.
+/// `receiver` は、`sel` に `R` で答えるオブジェクト（か nil）。
 pub unsafe fn send<R>(receiver: Id, sel: &Selector) -> R {
-    // SAFETY: guaranteed by the caller.
+    // SAFETY: 呼び出し側が保証する。
     unsafe { msg_send::<unsafe extern "C" fn(Id, Sel) -> R>()(receiver, sel.get()) }
 }
 
-/// Sends a message with one argument.
+/// 引数 1 つでメッセージを送る。
 ///
 /// # Safety
-/// `receiver` is an object (or nil) that answers `sel` taking an `A` with an `R`.
+/// `receiver` は、`A` を取る `sel` に `R` で答えるオブジェクト（か nil）。
 pub unsafe fn send1<A, R>(receiver: Id, sel: &Selector, a: A) -> R {
-    // SAFETY: guaranteed by the caller.
+    // SAFETY: 呼び出し側が保証する。
     unsafe { msg_send::<unsafe extern "C" fn(Id, Sel, A) -> R>()(receiver, sel.get(), a) }
 }
 
-/// Sends a message with two arguments.
+/// 引数 2 つでメッセージを送る。
 ///
 /// # Safety
-/// As [`send1`].
+/// [`send1`] と同じ。
 pub unsafe fn send2<A, B, R>(receiver: Id, sel: &Selector, a: A, b: B) -> R {
-    // SAFETY: guaranteed by the caller.
+    // SAFETY: 呼び出し側が保証する。
     unsafe { msg_send::<unsafe extern "C" fn(Id, Sel, A, B) -> R>()(receiver, sel.get(), a, b) }
 }
 
-/// Sends a message with three arguments.
+/// 引数 3 つでメッセージを送る。
 ///
 /// # Safety
-/// As [`send1`].
+/// [`send1`] と同じ。
 pub unsafe fn send3<A, B, C, R>(receiver: Id, sel: &Selector, a: A, b: B, c: C) -> R {
-    // SAFETY: guaranteed by the caller.
+    // SAFETY: 呼び出し側が保証する。
     unsafe {
         msg_send::<unsafe extern "C" fn(Id, Sel, A, B, C) -> R>()(receiver, sel.get(), a, b, c)
     }
 }
 
-/// `NSRect` (`CGRect`): origin and size in points.
+/// `NSRect`（`CGRect`）：ポイントでの原点と大きさ。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
@@ -117,34 +116,33 @@ pub struct Rect {
     pub height: f64,
 }
 
-/// Sends a message without arguments that answers an `NSRect` (a struct returned in memory on
-/// x86_64, through `objc_msgSend_stret`).
+/// 引数なしで、`NSRect` で答えるメッセージを送る（x86_64 では構造体をメモリで返すので、
+/// `objc_msgSend_stret` を通す）。
 ///
 /// # Safety
-/// `receiver` is an object that answers `sel` with an `NSRect`.
+/// `receiver` は、`sel` に `NSRect` で答えるオブジェクト。
 pub unsafe fn send_rect(receiver: Id, sel: &Selector) -> Rect {
     #[cfg(target_arch = "x86_64")]
     let raw = objc_msgSend_stret as unsafe extern "C" fn();
     #[cfg(not(target_arch = "x86_64"))]
     let raw = objc_msgSend as unsafe extern "C" fn();
-    // SAFETY: the variant of objc_msgSend for a struct return on this architecture, as the
-    // method's type.
+    // SAFETY: このアーキテクチャで構造体を返すときの objc_msgSend の変種を、メソッドの型として。
     let f: unsafe extern "C" fn(Id, Sel) -> Rect = unsafe { std::mem::transmute(raw) };
-    // SAFETY: guaranteed by the caller.
+    // SAFETY: 呼び出し側が保証する。
     unsafe { f(receiver, sel.get()) }
 }
 
-/// An autorelease pool around `f`: AppKit's getters may autorelease what they answer, and the
-/// agent runs outside the game's pools.
+/// `f` の周りの autorelease pool：AppKit の getter は答えるものを autorelease することがあり、
+/// エージェントはゲームのプールの外で動く。
 pub fn autoreleased<R>(f: impl FnOnce() -> R) -> R {
     struct Pool(*mut c_void);
     impl Drop for Pool {
         fn drop(&mut self) {
-            // SAFETY: the pool pushed below, popped once on this thread.
+            // SAFETY: 下で積んだプール。このスレッドで 1 回だけ降ろす。
             unsafe { objc_autoreleasePoolPop(self.0) };
         }
     }
-    // SAFETY: no preconditions.
+    // SAFETY: 前提はない。
     let _pool = Pool(unsafe { objc_autoreleasePoolPush() });
     f()
 }

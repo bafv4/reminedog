@@ -1,5 +1,5 @@
-# Link the C runtime statically so reminedog.dll does not need vcruntime140.dll.
-# Minecraft 1.13-1.16 run on Java 8, whose runtime ships only msvcr100.dll; without this
-# the JVM refuses to start on PCs that lack the Visual C++ redistributable.
+# reminedog.dll が vcruntime140.dll を要らないように、C のランタイムを静的にリンクする。
+# Minecraft 1.13〜1.16 は Java 8 で動き、そのランタイムには msvcr100.dll しかない。これがないと、
+# Visual C++ の再頒布可能パッケージのない PC では JVM が起動しない。
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]

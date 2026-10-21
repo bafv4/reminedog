@@ -1,46 +1,44 @@
-// Minimal stand-in for Minecraft's LWJGL3/GLFW window and frame loop, used to smoke-test the
-// reminedog agent (-agentpath:) without the game. Java 8 source: javac --release 8.
+// Minecraft の LWJGL3／GLFW のウィンドウとフレームのループの最小の代役。ゲームなしで
+// reminedog のエージェント（-agentpath:）を試すのに使う。Java 8 のソース：javac --release 8。
 //
-// Usage: java -cp <lwjgl jars>;<classes> Smoke [FRAMES] [--legacy] [--readback] [--screenshot]
+// 使い方：java -cp <lwjgl jars>;<classes> Smoke [FRAMES] [--legacy] [--readback] [--screenshot]
 //                                            [--seconds=N] [--capture] [--mc [--sodium]] [--world=NAME]
 //                                            [--f3c-events] [--f3c-refuse]
 //                                            [--screen-key=KEY [--watch-keys=KEY,...]]
-//   FRAMES      frames to render (default 120)
-//   --legacy    default window hints, like Minecraft 1.13-1.16 (else 3.2 core, like 1.17+)
-//   --readback  after the last swap, print "PIXEL x y r g b" (front buffer) and
-//               "PIXEL_BACK x y r g b" (back buffer) for a few window coordinates
-//   --seconds=N   run for N seconds at about 60 fps instead of a frame count (for input tests)
-//   --capture     grab the cursor like Minecraft in game (GLFW_CURSOR_DISABLED), with raw
-//                 mouse motion where supported (Minecraft's "Raw Input" setting, on by default)
-//   --mc          render like Minecraft: into its own framebuffer at the size the framebuffer
-//                 size callback reports, then copied into the window
-//   --sodium      with --mc, set the viewport like Minecraft with Sodium, which skips a
-//                 glViewport equal to the last one (SmokeImage.viewport)
-//   --screenshot  after the last swap, save the back buffer as smoke-screenshot.png in the
-//                 current directory (diagnostic: what an overlay drew, where the driver keeps
-//                 the back buffer after a swap, as Wine + llvmpipe does)
-//   --world=NAME  at start, write saves/NAME/session.lock and a logs/latest.log with the
-//                 integrated server's start line into the current directory, as Minecraft
-//                 does when it opens a singleplayer world (so the agent knows the world)
-//   --f3c-events  F3 is held when its key events say so, like Minecraft 1.21.9+ (else when
-//                 glfwGetKey(F3) says so as a key is handled, like 1.16)
-//   --f3c-refuse  F3+C copies nothing, like a world with reduced debug info
-//   --screen-key=KEY  pressing the key with this GLFW key code (e.g. 69 for E) opens a fake
-//                 screen, which releases the cursor ("SCREEN open"), or closes it, which grabs
-//                 the cursor again like Minecraft (SmokeImage.Screen). The run starts in game
-//                 with --capture, else on a screen
-//   --watch-keys=KEY,...  when the screen closes, print "SETALL <key>=<0|1> ..." for these GLFW
-//                 key codes as glfwGetKey reads them just before the cursor is grabbed, as
-//                 Minecraft's KeyMapping.setAll does
-// SMOKE_VERBOSE=1 prints what the "game" receives: "KEY key scancode action mods",
-// "BUTTON button action mods" and "FOCUS 0|1" (GLFW's callback arguments).
-// Every frame it checks that the game's WGL context is still current and that there is no
-// GL error, so an agent that leaks state into the game's context fails the run. The debug
-// keys act like Minecraft's (SmokeImage.DebugKeys): pressing C while F3 is held copies a
-// Minecraft-style location with glfwSetClipboardString ("F3C copied"), and releasing F3
-// without a handled debug key toggles the debug overlay; at the end it prints
-// "F3C STATE overlay=<on|off> modifier=<up|down> copies=N".
-// Prints "SMOKE OK frames=N" and exits 0, or "SMOKE FAIL: <reason>" and exits 1.
+//   FRAMES      描くフレームの数（既定は 120）
+//   --legacy    Minecraft 1.13〜1.16 と同じく既定のウィンドウのヒント（なければ 1.17 以降と同じく 3.2 core）
+//   --readback  最後のスワップの後、いくつかのウィンドウの座標について "PIXEL x y r g b"（フロント
+//               バッファ）と "PIXEL_BACK x y r g b"（バックバッファ）を出す
+//   --seconds=N   フレームの数の代わりに、約 60 fps で N 秒動かす（入力のテスト用）
+//   --capture     ゲーム中の Minecraft と同じくカーソルを捕まえる（GLFW_CURSOR_DISABLED）。使えれば
+//                 マウスの生の移動も（Minecraft の「Raw Input」の設定。既定でオン）
+//   --mc          Minecraft と同じく描く：フレームバッファの大きさのコールバックが報告する大きさで
+//                 自前のフレームバッファに描き、ウィンドウに写す
+//   --sodium      --mc と一緒に、Sodium を入れた Minecraft と同じく viewport を設定する（直前と同じ
+//                 glViewport を省く。SmokeImage.viewport）
+//   --screenshot  最後のスワップの後、バックバッファを今のフォルダに smoke-screenshot.png として保存する
+//                 （調べるため：オーバーレイが何を描いたか。Wine＋llvmpipe のように、スワップの後も
+//                 ドライバがバックバッファを残すところで）
+//   --world=NAME  始めに、シングルプレイのワールドを開いたときの Minecraft と同じく、
+//                 saves/NAME/session.lock と、統合サーバーの開始の行を持つ logs/latest.log を今の
+//                 フォルダに書く（エージェントがワールドを知るように）
+//   --f3c-events  Minecraft 1.21.9 以降と同じく、キーのイベントで F3 を押しているかを決める
+//                 （なければ 1.16 と同じく、キーを処理するときの glfwGetKey(F3) で）
+//   --f3c-refuse  デバッグ情報を制限したワールドと同じく、F3+C で何もコピーしない
+//   --screen-key=KEY  この GLFW のキーコード（E なら 69 など）のキーを押すと、偽の画面を開いて
+//                 カーソルを放す（"SCREEN open"）か、閉じて Minecraft と同じくカーソルをまた捕まえる
+//                 （SmokeImage.Screen）。--capture ならゲーム中で、なければ画面を開いて始める
+//   --watch-keys=KEY,...  画面を閉じたとき、Minecraft の KeyMapping.setAll と同じく、カーソルを
+//                 捕まえる直前に glfwGetKey で読んだこれらの GLFW のキーコードについて
+//                 "SETALL <key>=<0|1> ..." を出す
+// SMOKE_VERBOSE=1 で「ゲーム」が受け取ったものを出す："KEY key scancode action mods"、
+// "BUTTON button action mods"、"FOCUS 0|1"（GLFW のコールバックの引数）。
+// 毎フレーム、ゲームの WGL のコンテキストが今のもののままで、GL のエラーがないことを確かめる。
+// ゲームのコンテキストに状態を漏らすエージェントは失敗する。デバッグのキーは Minecraft と同じく
+// 動く（SmokeImage.DebugKeys）：F3 を押したまま C を押すと、Minecraft の形式の位置を
+// glfwSetClipboardString でコピーし（"F3C copied"）、処理したデバッグのキーなしで F3 を離すと
+// デバッグ画面を切り替える。最後に "F3C STATE overlay=<on|off> modifier=<up|down> copies=N" を出す。
+// "SMOKE OK frames=N" を出して 0 で終わるか、"SMOKE FAIL: <reason>" を出して 1 で終わる。
 
 import java.nio.ByteBuffer;
 
@@ -57,14 +55,14 @@ import static org.lwjgl.glfw.GLFW.*;
 import static org.lwjgl.opengl.GL11.*;
 
 public final class Smoke {
-    // Clear colour, chosen to be exact in 8 bits: RGB 51 102 153.
+    // クリアの色。8 ビットで正確になるように選んだ：RGB 51 102 153。
     private static final float CLEAR_R = 0.2f, CLEAR_G = 0.4f, CLEAR_B = 0.6f;
 
     private static int keys, chars, buttons, cursorMoves, scrolls, glfwErrors;
-    // F3 as its key events left it (--f3c-events).
+    // キーのイベントが残した F3 の状態（--f3c-events）。
     private static boolean f3Down;
     private static final StringBuilder typed = new StringBuilder();
-    // SMOKE_VERBOSE=1 prints every key, mouse button and focus event the "game" receives.
+    // SMOKE_VERBOSE=1 で、「ゲーム」が受け取るキー・マウスのボタン・フォーカスのイベントをすべて出す。
     private static final boolean VERBOSE = System.getenv("SMOKE_VERBOSE") != null;
     private static String lastGlfwError = "none";
 
@@ -149,7 +147,7 @@ public final class Smoke {
             SmokeImage.writeWorld(world);
         }
 
-        // Minecraft installs an error callback before glfwInit.
+        // Minecraft は glfwInit の前にエラーのコールバックを設定する。
         GLFWErrorCallback errorCallback = GLFWErrorCallback.create((error, description) -> {
             glfwErrors++;
             lastGlfwError = String.format("0x%X %s", error, GLFWErrorCallback.getDescription(description));
@@ -163,7 +161,7 @@ public final class Smoke {
 
         glfwDefaultWindowHints();
         if (!legacy) {
-            // Window hints of Minecraft 1.17+.
+            // Minecraft 1.17 以降のウィンドウのヒント。
             glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_API);
             glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_NATIVE_CONTEXT_API);
             glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -176,11 +174,11 @@ public final class Smoke {
             throw new Fail("glfwCreateWindow failed (last GLFW error: " + lastGlfwError + ")");
         }
 
-        // Minecraft makes the context current and creates GL capabilities in its Window
-        // constructor, and registers the input callbacks afterwards.
+        // Minecraft は Window のコンストラクタでコンテキストを今のものにして GL の capabilities を作り、
+        // その後で入力のコールバックを登録する。
         glfwMakeContextCurrent(window);
         GL.createCapabilities();
-        glfwSwapInterval(0); // vsync off keeps runs short
+        glfwSwapInterval(0); // vsync をオフにして実行を短くする
         System.out.println("GL_VERSION " + glGetString(GL_VERSION));
         System.out.println("GL_RENDERER " + glGetString(GL_RENDERER));
         System.out.println("GL_VENDOR " + glGetString(GL_VENDOR));
@@ -197,8 +195,8 @@ public final class Smoke {
             if (VERBOSE) {
                 System.out.printf("KEY %d %d %d %d%n", key, scancode, action, mods);
             }
-            // Minecraft 1.16 asks glfwGetKey whether F3 is held; 1.21.9+ follows F3's key events.
-            // Both read the crash key's real state with glfwGetKey.
+            // Minecraft 1.16 は F3 を押しているかを glfwGetKey に聞き、1.21.9 以降は F3 のキーのイベントに従う。
+            // どちらもクラッシュのキーの本当の状態は glfwGetKey で読む。
             boolean f3Held = events ? f3Down : glfwGetKey(w, GLFW_KEY_F3) == GLFW_PRESS;
             debugKeys.keyEvent(glfwGetKey(w, GLFW_KEY_C) == GLFW_PRESS, f3Held);
             if (key == GLFW_KEY_F3 && action == GLFW_RELEASE) {
@@ -236,7 +234,7 @@ public final class Smoke {
             fbSize[0] = width;
             fbSize[1] = height;
         });
-        // Minecraft follows the window's focus too (the agent learns of focus loss through it).
+        // Minecraft はウィンドウのフォーカスにも従う（エージェントはこれでフォーカスを失ったことを知る）。
         glfwSetWindowFocusCallback(window, (w, focused) -> {
             if (VERBOSE) {
                 System.out.println("FOCUS " + (focused ? 1 : 0));
@@ -250,7 +248,8 @@ public final class Smoke {
             glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
         }
 
-        // The agent swaps GL contexts inside the swap; make sure ours is current afterwards.
+        // エージェントはスワップの中で GL のコンテキストを切り替える。その後でこちらのものが今のものか
+        // 確かめる。
         long wglContext = Platform.get() == Platform.WINDOWS ? GLFWNativeWGL.glfwGetWGLContext(window) : 0;
         int glError = glGetError();
         if (glError != GL_NO_ERROR) {
@@ -298,8 +297,8 @@ public final class Smoke {
         System.out.printf("TIMING setup_ms=%d loop_ms=%d fps=%.0f%n",
             (t1 - t0) / 1000000, (t2 - t1) / 1000000, frames * 1e9 / Math.max(1, t2 - t1));
 
-        // Minecraft's shutdown order: free the window callbacks (LWJGL frees whatever the
-        // glfwSet*Callback calls return, so hooks must hand back the game's pointers).
+        // Minecraft の終了の順序：ウィンドウのコールバックを解放する（LWJGL は glfwSet*Callback の
+        // 呼び出しが返したものを解放するので、フックはゲームのポインタを返さなければならない）。
         Callbacks.glfwFreeCallbacks(window);
         glfwDestroyWindow(window);
         glfwTerminate();
@@ -308,10 +307,10 @@ public final class Smoke {
         System.out.println("SMOKE OK frames=" + frames);
     }
 
-    // Diagnostic only: after the last swap, print pixels at a few window coordinates from the
-    // front buffer ("PIXEL") and the back buffer ("PIXEL_BACK"). Under Wine + Mesa llvmpipe the
-    // front buffer reads back black, while the back buffer still holds the presented frame
-    // (copy swap); on real drivers the back buffer is undefined after a swap.
+    // 調べるためだけ：最後のスワップの後、いくつかのウィンドウの座標のピクセルをフロントバッファ
+    // （"PIXEL"）とバックバッファ（"PIXEL_BACK"）から出す。Wine＋Mesa の llvmpipe では、フロント
+    // バッファは黒く読めるが、バックバッファには見せたフレームが残っている（コピーのスワップ）。
+    // 本物のドライバでは、スワップの後のバックバッファは未定義。
     private static void readback(long window) {
         int[] winW = new int[1], winH = new int[1], fbW = new int[1], fbH = new int[1];
         glfwGetWindowSize(window, winW, winH);
@@ -326,7 +325,7 @@ public final class Smoke {
         for (int buffer : buffers) {
             glReadBuffer(buffer);
             for (int[] p : points) {
-                // Window coordinates have a top-left origin; GL's are bottom-left.
+                // ウィンドウの座標は左上が原点。GL のものは左下。
                 int x = p[0] * fbW[0] / Math.max(1, winW[0]);
                 int y = fbH[0] - 1 - p[1] * fbH[0] / Math.max(1, winH[0]);
                 glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
@@ -347,8 +346,8 @@ public final class Smoke {
         SmokeImage.saveBackBuffer(w[0], h[0], path);
     }
 
-    // Minecraft's InputConstants.grabOrReleaseMouse: the cursor to the window's centre, then
-    // the cursor mode.
+    // Minecraft の InputConstants.grabOrReleaseMouse：カーソルをウィンドウの中央へ動かし、それから
+    // カーソルのモード。
     private static void setCursor(long window, int mode) {
         int[] w = new int[1], h = new int[1];
         glfwGetWindowSize(window, w, h);

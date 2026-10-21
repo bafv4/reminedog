@@ -5,12 +5,12 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 /**
- * MultiMC and Prism Launcher (a fork of MultiMC with the same files).
+ * MultiMC と Prism Launcher（同じファイルを使う MultiMC のフォーク）。
  *
- * An instance uses its own JVM arguments ("JvmArgs" in instance.cfg) when it overrides them
- * ("OverrideJavaArgs"; MultiMC also takes "OverrideJava"), and the launcher's ("JvmArgs" in
- * multimc.cfg / prismlauncher.cfg) otherwise. Adding reminedog turns the override on, starting
- * from the arguments the instance used before.
+ * インスタンスは、上書きしている（"OverrideJavaArgs"。MultiMC は "OverrideJava" も見る）ときは
+ * 自分の JVM 引数（instance.cfg の "JvmArgs"）を、そうでなければランチャーのもの（multimc.cfg・
+ * prismlauncher.cfg の "JvmArgs"）を使う。reminedog を足すと、インスタンスが前に使っていた引数
+ * から始めて上書きをオンにする。
  */
 class MultiMcLauncher private constructor(label: String, root: Path, private val prism: Boolean) :
     Launcher(label, root) {
@@ -28,7 +28,7 @@ class MultiMcLauncher private constructor(label: String, root: Path, private val
         val folders = Files.newDirectoryStream(instances).use { stream ->
             stream.filter { folder ->
                 val name = folder.fileName.toString()
-                // The launchers keep temporary folders here (".LAUNCHER_TEMP", "_MMC_TEMP").
+                // ランチャーはここに一時的なフォルダ（".LAUNCHER_TEMP"、"_MMC_TEMP"）を置く。
                 !name.startsWith(".") && !name.startsWith("_") && Files.isRegularFile(folder.resolve("instance.cfg"))
             }
         }
@@ -92,7 +92,7 @@ class MultiMcLauncher private constructor(label: String, root: Path, private val
 
         fun multimc(root: Path) = MultiMcLauncher("MultiMC", root, prism = false)
 
-        /** The Minecraft version from the instance's mmc-pack.json, or "". */
+        /** インスタンスの mmc-pack.json の Minecraft の版。なければ ""。 */
         private fun version(folder: Path): String {
             val pack = try {
                 JsonDoc.load(folder.resolve("mmc-pack.json")).root

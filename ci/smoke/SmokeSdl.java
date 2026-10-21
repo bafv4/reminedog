@@ -1,40 +1,40 @@
-// SDL3 counterpart of Smoke.java: Minecraft 26.x opens its window with SDL3 (LWJGL 3.4)
-// instead of GLFW. Follows what 26.3 does: it creates its OpenGL context on a hidden
-// utility window, then creates the visible game window and makes that context current on
-// it. Java 8 source: javac --release 8.
+// Smoke.java の SDL3 版：Minecraft 26.x は GLFW の代わりに SDL3（LWJGL 3.4）でウィンドウを開く。
+// 26.3 のすることに従う：表示しない補助のウィンドウで OpenGL のコンテキストを作り、それから
+// 見えるゲームのウィンドウを作って、そこでそのコンテキストを今のものにする。Java 8 のソース：
+// javac --release 8。
 //
-// Usage: java -cp <lwjgl jars incl. lwjgl-sdl>;<classes> SmokeSdl [FRAMES] [--screenshot]
+// 使い方：java -cp <lwjgl jars incl. lwjgl-sdl>;<classes> SmokeSdl [FRAMES] [--screenshot]
 //                                                                [--seconds=N] [--capture] [--mc [--sodium]]
 //                                                                [--world=NAME] [--f3c-refuse]
 //                                                                [--screen-key=SCANCODE
 //                                                                 [--watch-keys=SCANCODE,...]]
-//   --screenshot  save the back buffer after the last swap as smoke-screenshot.png
-//   --seconds=N   run for N seconds at about 60 fps instead of a frame count (input tests)
-//   --capture     relative mouse mode, as Minecraft uses in game
-//   --mc          render like Minecraft: into its own framebuffer at the pixel size the
-//                 window events report, then copied into the window
-//   --sodium      with --mc, set the viewport like Minecraft with Sodium, which skips a
-//                 glViewport equal to the last one (SmokeImage.viewport)
-//   --world=NAME  at start, write saves/NAME/session.lock and a logs/latest.log with the
-//                 integrated server's start line into the current directory, as Minecraft
-//                 does when it opens a singleplayer world (so the agent knows the world)
-//   --f3c-refuse  F3+C copies nothing, like a world with reduced debug info
-//   --screen-key=SCANCODE  pressing the key with this SDL scancode (e.g. 8 for E) in the game
-//                 window opens a fake screen, which leaves relative mouse mode ("SCREEN open"),
-//                 or closes it, which enters it again like Minecraft (SmokeImage.Screen). The
-//                 run starts in game with --capture, else on a screen
-//   --watch-keys=SCANCODE,...  when the screen closes, print "SETALL <scancode>=<0|1> ..." for
-//                 these scancodes as SDL_GetKeyboardState reads them just before relative mouse
-//                 mode is entered, as Minecraft's KeyMapping.setAll does
-// The debug keys act like 26.3's (SmokeImage.DebugKeys): F3 is held when the key events of
-// the game window (by windowID) say so, pressing C then copies a Minecraft-style location
-// with SDL_SetClipboardText ("F3C copied"), and releasing F3 without a handled debug key
-// toggles the debug overlay; at the end it prints
-// "F3C STATE overlay=<on|off> modifier=<up|down> copies=N". SMOKE_VERBOSE=1 prints the
-// events the "game" receives, of any window: "KEY scancode keycode action mod windowID"
-// (action 1 press, 0 release, -1 repeat; keycode unsigned), "BUTTON button down windowID"
-// (down 1 or 0, from the event type as 26.3 reads it) and "FOCUS 0|1".
-// Prints "SMOKE OK frames=N" and exits 0, or "SMOKE FAIL: <reason>" and exits 1.
+//   --screenshot  最後のスワップの後、バックバッファを smoke-screenshot.png として保存する
+//   --seconds=N   フレームの数の代わりに、約 60 fps で N 秒動かす（入力のテスト用）
+//   --capture     ゲーム中の Minecraft と同じく、相対マウスモードにする
+//   --mc          Minecraft と同じく描く：ウィンドウのイベントが報告するピクセルの大きさで自前の
+//                 フレームバッファに描き、ウィンドウに写す
+//   --sodium      --mc と一緒に、Sodium を入れた Minecraft と同じく viewport を設定する（直前と同じ
+//                 glViewport を省く。SmokeImage.viewport）
+//   --world=NAME  始めに、シングルプレイのワールドを開いたときの Minecraft と同じく、
+//                 saves/NAME/session.lock と、統合サーバーの開始の行を持つ logs/latest.log を今の
+//                 フォルダに書く（エージェントがワールドを知るように）
+//   --f3c-refuse  デバッグ情報を制限したワールドと同じく、F3+C で何もコピーしない
+//   --screen-key=SCANCODE  ゲームのウィンドウでこの SDL のスキャンコード（E なら 8 など）のキーを
+//                 押すと、偽の画面を開いて相対マウスモードを抜ける（"SCREEN open"）か、閉じて
+//                 Minecraft と同じくまた入る（SmokeImage.Screen）。--capture ならゲーム中で、なければ
+//                 画面を開いて始める
+//   --watch-keys=SCANCODE,...  画面を閉じたとき、Minecraft の KeyMapping.setAll と同じく、相対
+//                 マウスモードに入る直前に SDL_GetKeyboardState で読んだこれらのスキャンコードに
+//                 ついて "SETALL <scancode>=<0|1> ..." を出す
+// デバッグのキーは 26.3 と同じく動く（SmokeImage.DebugKeys）：ゲームのウィンドウ（windowID で
+// 見分ける）のキーのイベントで F3 を押しているかを決め、そのとき C を押すと Minecraft の形式の
+// 位置を SDL_SetClipboardText でコピーし（"F3C copied"）、処理したデバッグのキーなしで F3 を
+// 離すとデバッグ画面を切り替える。最後に "F3C STATE overlay=<on|off> modifier=<up|down> copies=N"
+// を出す。SMOKE_VERBOSE=1 で、どのウィンドウのものでも「ゲーム」が受け取るイベントを出す：
+// "KEY scancode keycode action mod windowID"（action は 1 が押下、0 が解放、-1 がリピート。
+// keycode は符号なし）、"BUTTON button down windowID"（down は 1 か 0。26.3 と同じくイベントの
+// 種類から）、"FOCUS 0|1"。
+// "SMOKE OK frames=N" を出して 0 で終わるか、"SMOKE FAIL: <reason>" を出して 1 で終わる。
 
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
@@ -180,9 +180,9 @@ public final class SmokeSdl {
             SDL_SetWindowRelativeMouseMode(window, true);
         }
         GL.createCapabilities();
-        // The game's WGL context must stay current across the agent's swaps (it draws with its
-        // own context and switches back).
-        // LWJGL 3.4 takes a buffer for the call's GetLastError.
+        // ゲームの WGL のコンテキストは、エージェントのスワップをまたいで今のもののままでなければ
+        // ならない（エージェントは自前のコンテキストで描いて戻す）。
+        // LWJGL 3.4 は、呼び出しの GetLastError のためのバッファを取る。
         IntBuffer lastError = BufferUtils.createIntBuffer(1);
         long wglContext = Platform.get() == Platform.WINDOWS ? WGL.wglGetCurrentContext(lastError) : 0;
         System.out.println("GL_VERSION " + glGetString(GL_VERSION));
@@ -247,8 +247,8 @@ public final class SmokeSdl {
                                     Integer.toUnsignedLong(key.key()), down ? (key.repeat() ? -1 : 1) : 0,
                                     key.mod() & 0xFFFF, key.windowID());
                             }
-                            // 26.3 handles the key events of its own window only (found by
-                            // windowID), follows F3 from them and reads the crash key's real state.
+                            // 26.3 は自分のウィンドウ（windowID で見つける）のキーのイベントだけを処理し、そこから F3 に
+                            // 従い、クラッシュのキーの本当の状態を読む。
                             if (key.windowID() != windowId) {
                                 break;
                             }
@@ -274,7 +274,7 @@ public final class SmokeSdl {
                         case SDL_EVENT_MOUSE_BUTTON_UP:
                             buttons++;
                             if (VERBOSE) {
-                                // Down from the event type, which is what 26.3 reads.
+                                // 押しているかはイベントの種類から（26.3 が読むもの）。
                                 SDL_MouseButtonEvent button = event.button();
                                 System.out.printf("BUTTON %d %d %d%n", button.button() & 0xFF,
                                     event.type() == SDL_EVENT_MOUSE_BUTTON_DOWN ? 1 : 0, button.windowID());
@@ -324,14 +324,14 @@ public final class SmokeSdl {
         System.out.println("SMOKE OK frames=" + frames);
     }
 
-    // SDL's own keyboard state, which injected events do not change (26.3's isKeyDown).
+    // SDL 自身のキーボードの状態。注入したイベントでは変わらない（26.3 の isKeyDown）。
     private static boolean keyDown(int scancode) {
         ByteBuffer state = SDL_GetKeyboardState();
         return state != null && scancode < state.limit() && state.get(scancode) != 0;
     }
 
-    // 26.3's InputConstants.grabMouse / releaseMouse: the pointer to the window's centre, then
-    // relative mouse mode on or off.
+    // 26.3 の InputConstants.grabMouse / releaseMouse：ポインターをウィンドウの中央へ動かし、それから
+    // 相対マウスモードをオンかオフにする。
     private static void grabMouse(long window, boolean grab) {
         IntBuffer w = BufferUtils.createIntBuffer(1), h = BufferUtils.createIntBuffer(1);
         SDL_GetWindowSize(window, w, h);

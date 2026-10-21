@@ -1,6 +1,6 @@
-//! The browser's thread: a COM apartment with a DispatcherQueue (for the compositor and the
-//! capture), a window that is never shown (the WebView's host), and a message loop that
-//! carries out the mailbox's commands.
+//! ブラウザのスレッド：DispatcherQueue のある COM のアパートメント（コンポジターと取り込みの
+//! ため）、見せることのないウィンドウ（WebView のホスト）、メールボックスの命令を行うメッセージの
+//! ループ。
 
 use std::io;
 use std::sync::Arc;
@@ -28,10 +28,10 @@ use super::{
 };
 use crate::ffi;
 
-/// The timer that brings the loop back to the mailbox after a nested message loop (one that
-/// a dialog of the WebView runs) dispatched the wake-up away.
+/// 入れ子のメッセージのループ（WebView のダイアログが動かすもの）が起こすメッセージを持って
+/// いってしまった後に、ループをメールボックスに戻すタイマー。
 const WAKE_TIMER: usize = 1;
-/// How often it fires, in milliseconds.
+/// それが動く間隔（ミリ秒）。
 const WAKE_INTERVAL: u32 = 100;
 
 pub(super) fn spawn(generation: u64, mailbox: Arc<Mailbox>, start: Start) -> io::Result<()> {
@@ -47,15 +47,15 @@ pub(super) fn spawn(generation: u64, mailbox: Arc<Mailbox>, start: Start) -> io:
         .map(drop)
 }
 
-/// The thread's life; the status it ends with.
+/// スレッドの一生。終わるときの状態。
 fn run(generation: u64, mailbox: &Mailbox, start: Start) -> BrowserState {
-    // SAFETY: initializes COM for this thread, undone below.
+    // SAFETY: このスレッドの COM を初期化する。下で戻す。
     if let Err(e) = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok() {
         log::error!("browser: CoInitializeEx failed: {e}");
         return BrowserState::Failed("ブラウザを起動できません".into());
     }
     let status = run_in_apartment(generation, mailbox, start);
-    // SAFETY: balances CoInitializeEx; everything COM was dropped in `run_in_apartment`.
+    // SAFETY: CoInitializeEx と対になる。COM のものは全部 `run_in_apartment` で捨てた。
     unsafe { CoUninitialize() };
     status
 }
@@ -66,7 +66,7 @@ fn run_in_apartment(generation: u64, mailbox: &Mailbox, start: Start) -> Browser
         threadType: DQTYPE_THREAD_CURRENT,
         apartmentType: DQTAT_COM_STA,
     };
-    // SAFETY: plain call; the queue is shut down below.
+    // SAFETY: ただの呼び出し。キューは下で止める。
     let queue = match unsafe { CreateDispatcherQueueController(options) } {
         Ok(queue) => queue,
         Err(e) => {
@@ -77,7 +77,7 @@ fn run_in_apartment(generation: u64, mailbox: &Mailbox, start: Start) -> Browser
     let status = match host_window() {
         Ok(window) => {
             let status = run_with_window(generation, mailbox, start, window);
-            // SAFETY: our own window, on its thread.
+            // SAFETY: 自分のウィンドウを、そのスレッドで。
             let _ = unsafe { DestroyWindow(window) };
             status
         }
@@ -90,14 +90,14 @@ fn run_in_apartment(generation: u64, mailbox: &Mailbox, start: Start) -> Browser
     status
 }
 
-/// Shuts down the thread's DispatcherQueue, running this thread's messages until it is done:
-/// the thread that made it must, before it ends.
+/// スレッドの DispatcherQueue を止め、終わるまでこのスレッドのメッセージを動かす：作った
+/// スレッドが、終わる前にそうしなければならない。
 fn shut_down(queue: &DispatcherQueueController) {
-    // SAFETY: plain call.
+    // SAFETY: ただの呼び出し。
     let thread = unsafe { GetCurrentThreadId() };
     let quit_when_done = queue.ShutdownQueueAsync().and_then(|shutdown| {
         shutdown.when(move |_| {
-            // SAFETY: plain call; ends the loop below.
+            // SAFETY: ただの呼び出し。下のループを終える。
             let _ = unsafe { PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0)) };
         })
     });
@@ -106,7 +106,7 @@ fn shut_down(queue: &DispatcherQueueController) {
         return;
     }
     let mut msg = MSG::default();
-    // SAFETY: a valid out parameter; the messages are dispatched as they come.
+    // SAFETY: 有効な出力の引数。メッセージは来たとおりに配る。
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
         unsafe {
             let _ = TranslateMessage(&msg);
@@ -134,24 +134,24 @@ fn run_with_window(generation: u64, mailbox: &Mailbox, start: Start, window: HWN
     };
     report(generation, |shared| shared.view.state = BrowserState::Ready);
     log::info!("browser: ready");
-    // From here on the game's thread wakes the loop; commands queued while the WebView was
-    // being made (their wake-ups went unhandled) run first.
+    // ここからはゲームのスレッドがループを起こす。WebView を作っている間に並んだ命令（その起こしは
+    // 処理されなかった）が先に動く。
     mailbox.window.store(window.0 as usize, Ordering::Release);
     if !run_commands(&mut browser, mailbox) {
         return BrowserState::Off;
     }
     let mut msg = MSG::default();
     loop {
-        // SAFETY: a valid out parameter.
+        // SAFETY: 有効な出力の引数。
         let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
         if got.0 <= 0 {
-            // WM_QUIT (nobody posts it) or an error.
+            // WM_QUIT（誰も送らない）かエラー。
             return BrowserState::Off;
         }
         let wake_timer = msg.message == WM_TIMER && msg.wParam.0 == WAKE_TIMER;
         if msg.hwnd == window && (msg.message == WM_APP_COMMAND || wake_timer) {
             if wake_timer {
-                // SAFETY: our window's timer.
+                // SAFETY: 自分のウィンドウのタイマー。
                 let _ = unsafe { KillTimer(Some(window), WAKE_TIMER) };
             }
             if !run_commands(&mut browser, mailbox) {
@@ -160,20 +160,20 @@ fn run_with_window(generation: u64, mailbox: &Mailbox, start: Start, window: HWN
         } else if msg.hwnd == window && msg.message == WM_APP_FRAME {
             browser.on_frame();
         } else {
-            // SAFETY: a message just retrieved.
+            // SAFETY: いま取り出したメッセージ。
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         }
-        // The browser's process is gone (an event handler said so): nothing will work again.
+        // ブラウザのプロセスがなくなった（イベントのハンドラがそう言った）：もう何も動かない。
         if let Some(state) = webview::take_ending() {
             return state;
         }
     }
 }
 
-/// Runs the queued commands; `false` once told to quit.
+/// 並んだ命令を動かす。終われと言われたら `false`。
 fn run_commands(browser: &mut Browser, mailbox: &Mailbox) -> bool {
     for command in mailbox.take() {
         match command {
@@ -204,11 +204,11 @@ fn run_commands(browser: &mut Browser, mailbox: &Mailbox) -> bool {
     true
 }
 
-/// The WebView's host: a window that is never shown or activated. Visual hosting needs a real
-/// window (not a message-only one).
+/// WebView のホスト：見せることも前に出すこともないウィンドウ。visual hosting には本物の
+/// ウィンドウが要る（メッセージ専用のものではだめ）。
 fn host_window() -> windows_core::Result<HWND> {
     let class = w!("reminedog-browser");
-    // SAFETY: plain Win32 calls; the class lives for the process.
+    // SAFETY: ただの Win32 の呼び出し。クラスはプロセスの間ある。
     unsafe {
         let instance = GetModuleHandleW(None)?;
         let wc = WNDCLASSEXW {
@@ -218,7 +218,7 @@ fn host_window() -> windows_core::Result<HWND> {
             lpszClassName: class,
             ..Default::default()
         };
-        // Fails once registered (by an earlier start), which is fine.
+        // （前の起動で）登録済みなら失敗するが、それでよい。
         RegisterClassExW(&wc);
         CreateWindowExW(
             WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0),
@@ -239,12 +239,12 @@ fn host_window() -> windows_core::Result<HWND> {
 
 extern "system" fn window_proc(window: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_APP_COMMAND {
-        // Only a nested message loop dispatches this (the thread's loop takes it first), and
-        // would lose it: the timer wakes the thread's loop again once that one is back.
-        // SAFETY: our own window, on its thread.
+        // これを配るのは入れ子のメッセージのループだけ（スレッドのループが先に取る）で、それはこれを
+        // 失ってしまう：スレッドのループが戻ったら、タイマーがまた起こす。
+        // SAFETY: 自分のウィンドウを、そのスレッドで。
         unsafe { SetTimer(Some(window), WAKE_TIMER, WAKE_INTERVAL, None) };
         return LRESULT(0);
     }
-    // SAFETY: forwarding the window's own message.
+    // SAFETY: ウィンドウ自身のメッセージを渡す。
     unsafe { DefWindowProcW(window, msg, wparam, lparam) }
 }

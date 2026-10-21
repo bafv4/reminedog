@@ -1,6 +1,6 @@
-# Linux build and smoke-test environment for reminedog (development only): a JDK, Rust, Xvfb
-# and Mesa (llvmpipe), so the agent and the LWJGL smoke harness (ci/smoke) run headless.
-# Built and used by scripts/linux/run.sh; the repository is mounted at /src.
+# reminedog の Linux のビルドとスモークテストの環境（開発用）：JDK、Rust、Xvfb、Mesa（llvmpipe）。
+# エージェントと LWJGL のスモークのテスト用プログラム（ci/smoke）を画面なしで動かす。
+# scripts/linux/run.sh がビルドして使う。リポジトリは /src にマウントする。
 FROM eclipse-temurin:25-jdk-noble
 
 ARG RUST_TOOLCHAIN=1.99.0

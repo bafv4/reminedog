@@ -4,7 +4,7 @@ plugins {
     kotlin("jvm") version "2.4.20"
 }
 
-// The release workflow passes -PreminedogVersion=1.2.3; other builds are "dev".
+// リリースのワークフローは -PreminedogVersion=1.2.3 を渡す。ほかのビルドは "dev"。
 val reminedogVersion: String? = providers.gradleProperty("reminedogVersion").orNull
 version = reminedogVersion ?: "dev"
 
@@ -20,11 +20,11 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
-// The jar is double-clicked with whatever Java the PC has, which can be Java 8.
+// jar は PC にある Java でダブルクリックで動かすので、Java 8 のことがある。
 kotlin {
     compilerOptions {
         jvmTarget = JvmTarget.JVM_1_8
-        // Like javac's --release: only the Java 8 API can be used.
+        // javac の --release と同じく、Java 8 の API だけを使える。
         freeCompilerArgs.add("-Xjdk-release=1.8")
         allWarningsAsErrors = true
     }
@@ -38,17 +38,17 @@ tasks.test {
     useJUnitPlatform()
 }
 
-// One jar with the dependencies (FlatLaf and the Kotlin library), so that it runs by double-clicking.
+// ダブルクリックで動くように、依存（FlatLaf と Kotlin のライブラリ）を入れた 1 つの jar。
 tasks.jar {
     archiveFileName = reminedogVersion?.let { "reminedog-installer-$it.jar" } ?: "reminedog-installer.jar"
     manifest {
         attributes(
             "Main-Class" to "reminedog.installer.MainKt",
-            // Read back by Download.INSTALLER_VERSION.
+            // Download.INSTALLER_VERSION が読み返す。
             "Implementation-Version" to project.version,
-            // FlatLaf has classes for newer Java versions (a multi-release jar).
+            // FlatLaf は新しい Java 向けのクラスを持つ（マルチリリースの jar）。
             "Multi-Release" to "true",
-            // FlatLaf's native library (window title bar on Windows) uses JNI.
+            // FlatLaf のネイティブのライブラリ（Windows のウィンドウのタイトルバー）は JNI を使う。
             "Enable-Native-Access" to "ALL-UNNAMED",
         )
     }

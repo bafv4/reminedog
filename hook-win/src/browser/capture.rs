@@ -1,9 +1,9 @@
-//! Copies what the browser draws into [`super::FRAME`].
+//! ブラウザが描くものを [`super::FRAME`] に写す。
 //!
-//! The WebView draws into a Windows.UI.Composition visual that is in no window. Windows'
-//! screen capture (`GraphicsCaptureItem::CreateFromVisual`) hands each new picture of that
-//! visual over as a Direct3D 11 texture, which is copied to a staging texture and from there
-//! into memory, where the game's thread picks it up.
+//! WebView は、どのウィンドウにもない Windows.UI.Composition の visual に描く。Windows の画面の
+//! 取り込み（`GraphicsCaptureItem::CreateFromVisual`）が、その visual の新しい絵を Direct3D 11 の
+//! テクスチャとして渡すので、それをステージングテクスチャに写し、そこからメモリに写して、ゲームの
+//! スレッドが拾う。
 
 use std::time::Instant;
 
@@ -34,11 +34,11 @@ use windows_numerics::Vector2;
 
 use super::{FRAME, WM_APP_FRAME, frame_changed, lock, post};
 
-/// The shortest time between two pictures (a 60 Hz cap, in 100 ns units). Windows before
-/// 11 24H2 ignores it and hands over a picture on every refresh of the screen.
+/// 2 つの絵の間のいちばん短い時間（60 Hz の上限。100 ns の単位）。11 24H2 より前の Windows は
+/// これを無視し、画面の更新のたびに絵を渡す。
 const MIN_UPDATE_INTERVAL: TimeSpan = TimeSpan { Duration: 166_667 };
-/// Times the Direct3D device is made again after the GPU removed or reset it (a driver
-/// update, a GPU switch) before the capture gives up.
+/// GPU がデバイスを外したかリセットした（ドライバの更新、GPU の切り替え）後に、取り込みが
+/// あきらめるまでに Direct3D のデバイスを作り直す回数。
 const MAX_DEVICE_RESETS: u32 = 3;
 
 pub(super) struct Capture {
@@ -46,26 +46,26 @@ pub(super) struct Capture {
     context: ID3D11DeviceContext,
     winrt_device: IDirect3DDevice,
     _compositor: Compositor,
-    /// The visual the WebView draws into.
+    /// WebView が描く visual。
     pub(super) root: ContainerVisual,
     session: Option<Session>,
     staging: Option<Staging>,
-    /// The picture being copied out of the staging texture; swapped with [`FRAME`]'s, so the
-    /// game's thread never waits for the copy.
+    /// ステージングテクスチャから写している絵。[`FRAME`] のものと入れ替えるので、ゲームのスレッドは
+    /// 写すのを待たない。
     back: Vec<u8>,
-    /// Which browser the pictures belong to ([`super::FrameSlot::generation`]).
+    /// 絵がどのブラウザのものか（[`super::FrameSlot::generation`]）。
     generation: u64,
-    /// The thread's window, woken with [`WM_APP_FRAME`] when a picture arrives.
+    /// 絵が来たときに [`WM_APP_FRAME`] で起こす、スレッドのウィンドウ。
     window: usize,
     frames: u64,
     started: Option<Instant>,
-    /// The size captured at ([`Capture::start`]).
+    /// 取り込む大きさ（[`Capture::start`]）。
     size: Option<[u32; 2]>,
     device_resets: u32,
 }
 
 struct Session {
-    // Kept alive while capturing.
+    // 取り込んでいる間は生かしておく。
     _item: GraphicsCaptureItem,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
@@ -78,11 +78,11 @@ impl Drop for Session {
     }
 }
 
-/// A hardware Direct3D 11 device for the capture, as WinRT wants it too.
+/// 取り込みのための、ハードウェアの Direct3D 11 のデバイス（WinRT もそれを求める）。
 fn create_device() -> windows_core::Result<(ID3D11Device, ID3D11DeviceContext, IDirect3DDevice)> {
     let mut device = None;
     let mut context = None;
-    // SAFETY: plain out parameters.
+    // SAFETY: ただの出力の引数。
     unsafe {
         D3D11CreateDevice(
             None,
@@ -102,13 +102,13 @@ fn create_device() -> windows_core::Result<(ID3D11Device, ID3D11DeviceContext, I
         ));
     };
     let dxgi: IDXGIDevice = device.cast()?;
-    // SAFETY: a valid DXGI device.
+    // SAFETY: 有効な DXGI のデバイス。
     let winrt_device: IDirect3DDevice =
         unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }?.cast()?;
     Ok((device, context, winrt_device))
 }
 
-/// Whether `error` says the GPU removed or reset the device.
+/// `error` が、GPU がデバイスを外したかリセットしたと言っているか。
 fn is_device_lost(error: &windows_core::Error) -> bool {
     error.code() == DXGI_ERROR_DEVICE_REMOVED || error.code() == DXGI_ERROR_DEVICE_RESET
 }
@@ -120,7 +120,7 @@ struct Staging {
 }
 
 impl Capture {
-    /// Needs a DispatcherQueue on this thread (the compositor and the frame pool use it).
+    /// このスレッドに DispatcherQueue が要る（コンポジターとフレームのプールが使う）。
     pub(super) fn new(generation: u64, window: HWND) -> windows_core::Result<Self> {
         let (device, context, winrt_device) = create_device()?;
         let compositor = Compositor::new()?;
@@ -143,7 +143,7 @@ impl Capture {
         })
     }
 
-    /// Sizes the visual (in pixels) and captures it at that size from now on.
+    /// visual の大きさ（ピクセル）を決め、これからはその大きさで取り込む。
     pub(super) fn start(&mut self, size: [u32; 2]) -> windows_core::Result<()> {
         self.stop();
         self.size = Some(size);
@@ -161,14 +161,14 @@ impl Capture {
             },
         )?;
         let session = pool.CreateCaptureSession(&item)?;
-        // Neither is in every version of Windows; the defaults only cost a yellow frame
-        // around the picture (it is not on the screen) and the cursor (not over the visual).
+        // どちらもすべての Windows の版にあるわけではない。既定のままでも、絵の周りの黄色い枠（画面には
+        // 出ない）とカーソル（visual の上にはない）がかかるだけ。
         let _ = session.SetIsBorderRequired(false);
         let _ = session.SetIsCursorCaptureEnabled(false);
         let _ = session.SetMinUpdateInterval(MIN_UPDATE_INTERVAL);
         let window = self.window;
-        // Raised on this thread (the pool was made with its DispatcherQueue); the message
-        // lets the loop pick the picture up with the capture at hand.
+        // このスレッドで起きる（プールはその DispatcherQueue で作った）。メッセージで、取り込みが手元に
+        // あるループが絵を拾う。
         pool.FrameArrived(&TypedEventHandler::new(move |_, _| {
             post(window, WM_APP_FRAME);
             Ok(())
@@ -189,7 +189,7 @@ impl Capture {
         self.size = None;
     }
 
-    /// Copies the newest picture into [`FRAME`] (older ones still waiting are dropped).
+    /// 最新の絵を [`FRAME`] に写す（まだ待っている古いものは捨てる）。
     pub(super) fn on_frame(&mut self) {
         let Some(session) = &self.session else {
             return;
@@ -214,8 +214,8 @@ impl Capture {
         }
     }
 
-    /// The GPU removed or reset the device (a driver update, a GPU switch): nothing is copied
-    /// with it again. A new device takes over, and the capture starts again on it.
+    /// GPU がデバイスを外したかリセットした（ドライバの更新、GPU の切り替え）：もうそれでは何も
+    /// 写さない。新しいデバイスが引き継ぎ、その上で取り込みをやり直す。
     fn reset_device(&mut self, error: &windows_core::Error) {
         let Some(size) = self.size else {
             return;
@@ -241,12 +241,12 @@ impl Capture {
 
     fn copy(&mut self, frame: &Direct3D11CaptureFrame) -> windows_core::Result<()> {
         let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
-        // SAFETY: the surface is a D3D11 texture made on our device.
+        // SAFETY: surface は、自前のデバイスで作った D3D11 のテクスチャ。
         let texture: ID3D11Texture2D = unsafe { access.GetInterface() }?;
         let mut desc = D3D11_TEXTURE2D_DESC::default();
-        // SAFETY: a valid out parameter.
+        // SAFETY: 有効な出力の引数。
         unsafe { texture.GetDesc(&mut desc) };
-        // While the size changes, the content can be smaller than the pool's textures.
+        // 大きさが変わる間は、中身がプールのテクスチャより小さいことがある。
         let content = frame.ContentSize()?;
         let width = (content.Width.max(0) as u32).min(desc.Width);
         let height = (content.Height.max(0) as u32).min(desc.Height);
@@ -255,8 +255,8 @@ impl Capture {
         }
         let staging = self.staging(&desc)?;
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        // SAFETY: both textures are on our device, same size and format; the staging texture
-        // is CPU-readable and only this thread touches the context.
+        // SAFETY: どちらのテクスチャも自前のデバイスの上で、同じ大きさと形式。ステージングテクスチャは
+        // CPU で読め、コンテキストに触れるのはこのスレッドだけ。
         unsafe {
             self.context.CopyResource(&staging, &texture);
             self.context
@@ -266,14 +266,13 @@ impl Capture {
         let row = width as usize * 4;
         self.back.resize(row * height as usize, 0);
         for (y, dst) in self.back.chunks_exact_mut(row).enumerate() {
-            // SAFETY: the mapping holds `RowPitch` bytes for each of the texture's rows, and a
-            // row of `width` pixels fits in one.
+            // SAFETY: マップはテクスチャの各行について `RowPitch` バイトを持ち、`width` ピクセルの行は 1 つに収まる。
             let src = unsafe {
                 std::slice::from_raw_parts(mapped.pData.cast::<u8>().add(y * pitch), row)
             };
             dst.copy_from_slice(src);
         }
-        // SAFETY: mapped above.
+        // SAFETY: 上でマップした。
         unsafe { self.context.Unmap(&staging, 0) };
         {
             let mut slot = lock(&FRAME);
@@ -292,7 +291,7 @@ impl Capture {
         Ok(())
     }
 
-    /// The staging texture for pictures like `desc`, made again when the size changes.
+    /// `desc` のような絵のためのステージングテクスチャ。大きさが変わったら作り直す。
     fn staging(&mut self, desc: &D3D11_TEXTURE2D_DESC) -> windows_core::Result<ID3D11Texture2D> {
         if let Some(staging) = &self.staging
             && staging.width == desc.Width
@@ -313,7 +312,7 @@ impl Capture {
             MiscFlags: 0,
         };
         let mut texture = None;
-        // SAFETY: a valid description and out parameter.
+        // SAFETY: 有効な説明と出力の引数。
         unsafe {
             self.device
                 .CreateTexture2D(&staging_desc, None, Some(&mut texture))?;

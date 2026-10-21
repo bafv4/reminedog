@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Fetch a Windows x64 Java runtime that runs under Wine: the jlinked Temurin JRE bundled in
-# the jdk4py wheel on PyPI (java.exe plus java.base, jdk.unsupported, ...; everything LWJGL
-# needs). The wheel is pinned by version and SHA-256. Needs python3 with pip.
-# Prints the Linux path of java.exe on stdout; progress goes to stderr.
+# Wine で動く Windows x64 の Java のランタイムを取る：PyPI の jdk4py の wheel に入っている、
+# jlink した Temurin の JRE（java.exe と java.base、jdk.unsupported、...。LWJGL が要るものはすべて）。
+# wheel は版と SHA-256 で固定する。pip の使える python3 が要る。
+# java.exe の Linux のパスを標準出力に出す。進み具合は標準エラーへ。
 #
-# Usage: scripts/fetch-wine-jre.sh [CACHE_DIR]
-#   CACHE_DIR defaults to $REMINEDOG_WINE_CACHE, else <repo>/target/wine-cache.
+# 使い方：scripts/fetch-wine-jre.sh [CACHE_DIR]
+#   CACHE_DIR の既定は $REMINEDOG_WINE_CACHE、なければ <repo>/target/wine-cache。
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cache=${1:-${REMINEDOG_WINE_CACHE:-$repo/target/wine-cache}}
 
-# Java 21 is what Minecraft 1.20.5+ runs on.
+# Java 21 は Minecraft 1.20.5 以降が動くもの。
 version=21.0.8.2
 sha256=1c8e37d26315dfbb603503153d3dcdd90021fda71d64ab0b6309f06f83c0d503
 
@@ -28,7 +28,7 @@ if [ ! -f "$java" ]; then
     --require-hashes -r "$tmp/requirements.txt" -d "$tmp" >&2
   python3 -m zipfile -e "$tmp/jdk4py-$version-py3-none-win_amd64.whl" "$tmp/wheel"
 
-  # LWJGL needs java.base and jdk.unsupported (sun.misc.Unsafe).
+  # LWJGL には java.base と jdk.unsupported（sun.misc.Unsafe）が要る。
   modules=$(grep '^MODULES=' "$tmp/wheel/jdk4py/java-runtime/release") || {
     echo "fetch-wine-jre: the runtime's release file lists no modules" >&2
     exit 1

@@ -14,12 +14,12 @@ reminedog-render = { path = "render" }
 reminedog-agent = { path = "agent" }
 
 egui = "0.36"
-# egui_glow 0.36 is built against glow 0.17; keep them in lockstep.
+# egui_glow 0.36 は glow 0.17 でビルドされている。版をそろえて上げる。
 egui_glow = { version = "0.36", default-features = false }
-# level.dat is gzipped NBT (the singleplayer world's name).
+# level.dat は gzip した NBT（シングルプレイのワールドの名前）。
 flate2 = "1"
 glow = "0.17"
-# dlsym, dlinfo and dlopen for the Linux and macOS agents.
+# Linux と macOS のエージェントの dlsym、dlinfo、dlopen。
 libc = "0.2"
 log = { version = "0.4", features = ["std"] }
 regex = "1"
@@ -28,7 +28,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 thiserror = "2"
-# webview2-com 0.39 is built against windows 0.62; keep them in lockstep.
+# webview2-com 0.39 は windows 0.62 でビルドされている。版をそろえて上げる。
 webview2-com = "0.39"
 windows = "0.62"
 windows-core = "0.62"
@@ -36,7 +36,7 @@ windows-numerics = "0.3"
 windows-sys = "0.61"
 
 [profile.release]
-# Hooks rely on catch_unwind to keep panics from crashing the game, so unwinding must stay on.
+# フックはパニックでゲームを落とさないように catch_unwind に頼るので、unwind のままにする。
 panic = "unwind"
 lto = "thin"
 codegen-units = 1

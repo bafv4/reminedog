@@ -1,5 +1,5 @@
-# SHA-256 of the LWJGL jars the smoke tests fetch (ci/smoke/fetch-lwjgl.sh checks each against
-# this list). A new LWJGL version needs its jars' hashes here: sha256sum <jar>.
+# スモークテストが取る LWJGL の jar の SHA-256（ci/smoke/fetch-lwjgl.sh がそれぞれをこの一覧と
+# 比べる）。LWJGL の新しい版には、その jar のハッシュをここに足す：sha256sum <jar>。
 59e8c44b4a119da9321bb117a9edc68c8dbefb60c72c0739233ada0b6114d715  lwjgl-3.2.2-natives-windows.jar
 600591641bf3e168102cc0bc8ff31e57cd6717fcf882dbf453aa98cb92fb0a9b  lwjgl-3.2.2.jar
 1e3d07b431f9329294eb2c79036831c3ed8ab4ebc2ff6c8c37996c4ca7fc7dcb  lwjgl-glfw-3.2.2-natives-windows.jar

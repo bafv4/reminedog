@@ -1,18 +1,18 @@
-//! Hotkeys the user can change: a key or an extra mouse button, with modifiers.
+//! 利用者が変えられるホットキー：キーか追加のマウスのボタンと、修飾キー。
 //!
-//! Stored as text in the settings file (`"Ctrl+I"`, `"Z"`, `"Mouse4"`), using egui's key
-//! names so the text round-trips.
+//! 設定ファイルには文字で書く（`"Ctrl+I"`、`"Z"`、`"Mouse4"`）。egui のキーの名前を使うので、
+//! 文字から戻しても同じになる。
 
 use std::fmt;
 
 use egui::{Key, Modifiers, PointerButton};
 use reminedog_core::InputId;
 
-/// What is pressed.
+/// 押すもの。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
     Key(Key),
-    /// Middle or an extra button; the left and right buttons are the UI's own.
+    /// 中か追加のボタン。左と右のボタンは UI のもの。
     Mouse(PointerButton),
 }
 
@@ -49,7 +49,7 @@ impl Hotkey {
         }
     }
 
-    /// `trigger` with the modifiers held in `modifiers`.
+    /// `modifiers` で押している修飾キー付きの `trigger`。
     pub fn with_modifiers(trigger: Trigger, modifiers: Modifiers) -> Self {
         Self {
             trigger,
@@ -59,8 +59,8 @@ impl Hotkey {
         }
     }
 
-    /// Whether a key press matches: the hotkey's modifiers must be held; others may be too
-    /// (sprinting with Ctrl held still zooms).
+    /// キーの押下が当てはまるか：ホットキーの修飾キーを押していること。ほかを押していてもよい
+    /// （Ctrl を押してダッシュしながらでもズームする）。
     pub fn matches_key(&self, key: Option<Key>, modifiers: Modifiers) -> bool {
         key.is_some_and(|k| self.trigger == Trigger::Key(k)) && self.modifiers_held(modifiers)
     }
@@ -73,7 +73,7 @@ impl Hotkey {
         (!self.ctrl || m.ctrl) && (!self.shift || m.shift) && (!self.alt || m.alt)
     }
 
-    /// Parses the settings-file form, e.g. `"Ctrl+Shift+M"`, `"F6"`, `"Mouse4"`.
+    /// 設定ファイルの形を解析する（例：`"Ctrl+Shift+M"`、`"F6"`、`"Mouse4"`）。
     pub fn parse(text: &str) -> Option<Hotkey> {
         let mut parts: Vec<&str> = text.split('+').map(str::trim).collect();
         let last = parts.pop()?;
@@ -89,7 +89,7 @@ impl Hotkey {
         Some(hotkey)
     }
 
-    /// For the menu: the mouse buttons in Japanese, keys as on the keyboard.
+    /// メニューのため：マウスのボタンは日本語で、キーはキーボードのとおりに。
     pub fn label(&self) -> String {
         let mut text = self.modifier_prefix();
         match self.trigger {
@@ -120,7 +120,7 @@ impl Hotkey {
     }
 }
 
-/// The settings-file form.
+/// 設定ファイルの形。
 impl fmt::Display for Hotkey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.modifier_prefix())?;
@@ -148,12 +148,12 @@ fn trigger_from_name(name: &str) -> Option<Trigger> {
         return Some(Trigger::Mouse(button));
     }
     let key = Key::from_name(name).or_else(|| {
-        // Letters in either case ("z").
+        // 大文字でも小文字でもよい文字（"z"）。
         (name.len() == 1)
             .then(|| Key::from_name(&name.to_ascii_uppercase()))
             .flatten()
     })?;
-    // Escape closes the menu and cancels key capture; modifier keys cannot be hotkeys alone.
+    // Esc はメニューを閉じ、キーの割り当て待ちをやめる。修飾キーだけではホットキーにできない。
     let reserved = matches!(
         key,
         Key::Escape
@@ -169,9 +169,9 @@ fn trigger_from_name(name: &str) -> Option<Trigger> {
     (!reserved).then_some(Trigger::Key(key))
 }
 
-/// The trigger a key or mouse button sets off, as the platform hooks name keys with a US
-/// layout: the keypad's digits, Enter, `+`, `-`, `.`, `/` and `=` are the main keys' (so a
-/// hotkey on 1 takes keypad 1 too). `None` for keys no hotkey can be on.
+/// キーかマウスのボタンが動かすトリガー。各 OS のフックは US 配列でキーを名付ける：テンキーの
+/// 数字、Enter、`+`、`-`、`.`、`/`、`=` は本体のキーのもの（1 のホットキーはテンキーの 1 も
+/// 取る）。ホットキーにできないキーなら `None`。
 pub(crate) fn input_trigger(id: InputId) -> Option<Trigger> {
     const LETTERS: [Key; 26] = [
         Key::A,
@@ -289,7 +289,7 @@ pub(crate) fn input_trigger(id: InputId) -> Option<Trigger> {
     Some(Trigger::Key(key))
 }
 
-/// Whether a key or button can be assigned (for key capture).
+/// キーかボタンを割り当てられるか（キーの割り当て待ちのため）。
 pub fn assignable(trigger: Trigger) -> bool {
     match trigger {
         Trigger::Key(key) => trigger_from_name(key.name()) == Some(trigger),
@@ -300,8 +300,8 @@ pub fn assignable(trigger: Trigger) -> bool {
     }
 }
 
-/// A key as the menu shows it, with the same arrows and minus as the rest of the menu (the
-/// game's key names, [`reminedog_core::input_label`]).
+/// メニューに出すキー。メニューのほかの部分と同じ矢印とマイナスで（ゲームのキーの名前、
+/// [`reminedog_core::input_label`]）。
 fn key_symbol(key: Key) -> &'static str {
     match key {
         Key::ArrowUp => "↑",
@@ -313,8 +313,7 @@ fn key_symbol(key: Key) -> &'static str {
     }
 }
 
-/// Whether a key types text without Ctrl or Alt: letters, digits, punctuation, Space, Enter,
-/// Backspace and Tab.
+/// キーが Ctrl や Alt なしで文字を打つか：文字、数字、記号、スペース、Enter、Backspace、Tab。
 pub(crate) fn types_text(key: Key) -> bool {
     use Key::*;
     matches!(
@@ -464,7 +463,7 @@ mod tests {
         assert_eq!(trigger(InputId::Key(29)), Some(Trigger::Key(Key::Z)));
         assert_eq!(trigger(InputId::Key(30)), Some(Trigger::Key(Key::Num1)));
         assert_eq!(trigger(InputId::Key(39)), Some(Trigger::Key(Key::Num0)));
-        // The keypad's digits are the main digits' to the hooks.
+        // フックにとって、テンキーの数字は本体の数字のもの。
         assert_eq!(trigger(InputId::Key(89)), Some(Trigger::Key(Key::Num1)));
         assert_eq!(trigger(InputId::Key(98)), Some(Trigger::Key(Key::Num0)));
         assert_eq!(trigger(InputId::Key(88)), Some(Trigger::Key(Key::Enter)));
@@ -474,7 +473,7 @@ mod tests {
             trigger(InputId::Key(80)),
             Some(Trigger::Key(Key::ArrowLeft))
         );
-        // Modifier keys and keys the hooks have no egui name for.
+        // 修飾キーと、フックに egui の名前がないキー。
         assert_eq!(trigger(InputId::Key(224)), None);
         assert_eq!(trigger(InputId::Key(57)), None);
         assert_eq!(trigger(InputId::Key(135)), None);

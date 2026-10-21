@@ -1,9 +1,9 @@
-//! The WebView2 itself: creation, its settings and events, and the commands it carries out.
+//! WebView2 そのもの：作成、その設定とイベント、行う命令。
 //!
-//! It is hosted as a visual ("visual hosting"), so it has no window of its own on the
-//! screen. Nothing it does may put a window in front of the game either (a fullscreen game
-//! loses the keyboard and minimizes): context menus, dialogs, new windows, downloads and
-//! external apps are turned off or refused.
+//! visual としてホストする（"visual hosting"）ので、画面の上に自分のウィンドウを持たない。
+//! それがすることも、ゲームの前にウィンドウを出してはならない（フルスクリーンのゲームはキーボードを
+//! 失って最小化する）：右クリックメニュー、ダイアログ、新しいウィンドウ、ダウンロード、外部の
+//! アプリはオフにするか断る。
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -42,16 +42,15 @@ use windows_core::{BOOL, HSTRING, Interface, PCWSTR, PWSTR};
 use super::capture::Capture;
 use super::{keep_last_page, notice, report};
 
-/// Edge's switches: video plays without a click first (the hotkeys start it), and the page
-/// keeps drawing though its host window is never on the screen.
+/// Edge のスイッチ：動画は先にクリックしなくても再生する（ホットキーが始める）。ホストの
+/// ウィンドウが画面に出なくても、ページは描き続ける。
 const BROWSER_ARGUMENTS: &str =
     "--autoplay-policy=no-user-gesture-required --disable-features=CalculateNativeWinOcclusion";
 
-/// Run in every page before its own scripts. Printing and the file pickers would open a
-/// dialog, and a page focusing itself might bring its window forward: they do nothing (a
-/// page then falls back to its `<input type=file>`, whose dialog is cancelled). Frames the
-/// page makes itself (`about:blank`, which the script does not run in) get the same through
-/// `contentWindow`, as far as a page reaches them that way.
+/// どのページでも、その自身のスクリプトより先に動く。印刷とファイルの選択はダイアログを開き、
+/// 自分にフォーカスを移すページはそのウィンドウを前に出すかもしれない：どれも何もしない（ページは
+/// その `<input type=file>` に戻り、そのダイアログはキャンセルする）。ページが自分で作るフレーム
+/// （スクリプトが動かない `about:blank`）も、ページが `contentWindow` で届く限り、同じものを受け取る。
 const PAGE_SCRIPT: &str = "(() => {\
     const quiet = (w) => { try {\
         w.print = () => {}; w.focus = () => {};\
@@ -65,21 +64,20 @@ const PAGE_SCRIPT: &str = "(() => {\
     }\
 })();";
 
-/// The longest address and title shown (a page can make its address hundreds of KB long);
-/// longer ones are cut, in characters.
+/// 出すアドレスとタイトルのいちばん長い文字数（ページはアドレスを数百 KB にできる）。長いものは切る。
 const MAX_SHOWN: usize = 2048;
 
 thread_local! {
-    /// How the thread's browser ended, set by an event handler for the thread's loop.
+    /// スレッドのブラウザがどう終わったか。スレッドのループのために、イベントのハンドラが入れる。
     static ENDING: RefCell<Option<BrowserState>> = const { RefCell::new(None) };
 }
 
-/// How the browser ended, if an event said it did (once).
+/// イベントが終わったと言っていれば、ブラウザがどう終わったか（1 回）。
 pub(super) fn take_ending() -> Option<BrowserState> {
     ENDING.with(|ending| ending.borrow_mut().take())
 }
 
-/// Japanese text for the menu, and the details for the log.
+/// メニューのための日本語の文字と、ログのための詳しいこと。
 pub(super) struct StartError {
     pub(super) message: String,
     pub(super) detail: String,
@@ -107,14 +105,13 @@ pub(super) struct Browser {
 impl Drop for Browser {
     fn drop(&mut self) {
         self.capture.stop();
-        // SAFETY: on the browser thread, which owns the controller.
+        // SAFETY: コントローラーを持つブラウザのスレッドで。
         let _ = unsafe { self.controller.Close() };
     }
 }
 
 impl Browser {
-    /// Creates the WebView in `window` (pumping this thread's messages until it exists) and
-    /// opens `url`.
+    /// `window` の中に WebView を作り（あるまでこのスレッドのメッセージを動かす）、`url` を開く。
     pub(super) fn create(
         generation: u64,
         window: HWND,
@@ -144,7 +141,7 @@ impl Browser {
         last_page: PathBuf,
     ) -> windows_core::Result<Self> {
         let controller: ICoreWebView2Controller = composition.cast()?;
-        // SAFETY: COM calls on the thread that created the controller.
+        // SAFETY: コントローラーを作ったスレッドでの COM の呼び出し。
         unsafe {
             let controller3: ICoreWebView2Controller3 = controller.cast()?;
             controller3.SetBoundsMode(COREWEBVIEW2_BOUNDS_MODE_USE_RAW_PIXELS)?;
@@ -159,7 +156,7 @@ impl Browser {
             }
             composition.SetRootVisualTarget(&capture.root)?;
         }
-        // SAFETY: as above.
+        // SAFETY: 上と同じ。
         let webview = unsafe { controller.CoreWebView2() }?;
         configure(&webview)?;
         subscribe(&webview, generation, last_page)?;
@@ -172,12 +169,12 @@ impl Browser {
             layout,
             shown: false,
         };
-        // The page gets its input without the system's focus; it is told it has it, so it
-        // shows the caret and its focus styles.
+        // ページはシステムのフォーカスなしに入力を受け取る。フォーカスがあると伝えるので、キャレットと
+        // フォーカスの見た目を出す。
         browser.cdp("Emulation.setFocusEmulationEnabled", r#"{"enabled":true}"#);
-        // A file input would open the system's file dialog in front of the game (on this
-        // thread, which it blocks): the dialog is cancelled instead, as if the user closed it.
-        // The interception needs the Page domain on.
+        // ファイルの入力は、ゲームの前にシステムのファイルのダイアログを開いてしまう（このスレッドで、
+        // スレッドを止めて）：代わりに、利用者が閉じたのと同じようにダイアログをキャンセルする。
+        // 横取りには Page のドメインをオンにする必要がある。
         browser.cdp("Page.enable", "{}");
         browser.cdp(
             "Page.setInterceptFileChooserDialog",
@@ -204,16 +201,16 @@ impl Browser {
         self.media(MediaCommand::PauseAll);
         self.set_muted(true);
         self.capture.stop();
-        // SAFETY: on the browser thread.
+        // SAFETY: ブラウザのスレッドで。
         if let Err(e) = unsafe { self.controller.SetIsVisible(false) } {
             log::debug!("browser: hiding failed: {e}");
         }
     }
 
-    /// Mutes the page while it is hidden: the pause only reaches the page's own players, not
-    /// those in its frames (a video embedded from another site), which play on unheard.
+    /// 隠している間はページをミュートする：一時停止はページ自身のプレイヤーにしか届かず、そのフレームの
+    /// 中のもの（ほかのサイトから埋め込んだ動画）は聞こえないまま再生を続ける。
     fn set_muted(&self, muted: bool) {
-        // SAFETY: on the browser thread.
+        // SAFETY: ブラウザのスレッドで。
         let result = self
             .webview
             .cast::<ICoreWebView2_8>()
@@ -226,7 +223,7 @@ impl Browser {
     #[cfg(test)]
     pub(super) fn is_muted(&self) -> bool {
         let mut muted = BOOL::default();
-        // SAFETY: on the browser thread; a valid out parameter.
+        // SAFETY: ブラウザのスレッドで。有効な出力の引数。
         let _ = self
             .webview
             .cast::<ICoreWebView2_8>()
@@ -240,12 +237,12 @@ impl Browser {
         self.apply_layout(resized);
     }
 
-    /// Sizes the WebView as [`Self::layout`] says; a new size (or showing it) restarts the
-    /// capture at that size.
+    /// [`Self::layout`] のとおりに WebView の大きさを決める。新しい大きさ（か、見せること）は、その
+    /// 大きさで取り込みをやり直す。
     fn apply_layout(&mut self, restart: bool) {
         let layout = self.layout;
         let [width, height] = layout.size.map(|v| v.max(1) as i32);
-        // SAFETY: on the browser thread.
+        // SAFETY: ブラウザのスレッドで。
         let result = unsafe {
             let controller3: windows_core::Result<ICoreWebView2Controller3> =
                 self.controller.cast();
@@ -280,28 +277,28 @@ impl Browser {
     }
 
     pub(super) fn navigate(&self, url: &str) {
-        // SAFETY: on the browser thread.
+        // SAFETY: ブラウザのスレッドで。
         if let Err(e) = unsafe { self.webview.Navigate(&HSTRING::from(url)) } {
             log::warn!("browser: navigating failed: {e}");
         }
     }
 
     pub(super) fn back(&self) {
-        // SAFETY: on the browser thread.
+        // SAFETY: ブラウザのスレッドで。
         let _ = unsafe { self.webview.GoBack() };
     }
 
     pub(super) fn forward(&self) {
-        // SAFETY: on the browser thread.
+        // SAFETY: ブラウザのスレッドで。
         let _ = unsafe { self.webview.GoForward() };
     }
 
     pub(super) fn reload(&self) {
-        // SAFETY: on the browser thread.
+        // SAFETY: ブラウザのスレッドで。
         let _ = unsafe { self.webview.Reload() };
     }
 
-    /// Calls a DevTools Protocol method, not waiting for its result.
+    /// DevTools Protocol のメソッドを呼ぶ。その結果は待たない。
     pub(super) fn cdp(&self, method: &'static str, params: &str) {
         let handler =
             CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, _json| {
@@ -310,7 +307,7 @@ impl Browser {
                 }
                 Ok(())
             }));
-        // SAFETY: on the browser thread; the strings outlive the call (WebView2 copies them).
+        // SAFETY: ブラウザのスレッドで。文字列は呼び出しより長く生きる（WebView2 は写す）。
         if let Err(e) = unsafe {
             self.webview.CallDevToolsProtocolMethod(
                 &HSTRING::from(method),
@@ -322,16 +319,16 @@ impl Browser {
         }
     }
 
-    /// Scrolls what is under the middle of the page by `pages` of its height, as Page Down
-    /// (or Up) would. The keys themselves only work once the page was clicked: until then
-    /// none of its frames has the focus. The wheel needs none.
+    /// Page Down（か Up）と同じく、ページの中央の下にあるものを、その高さの `pages` 分だけ
+    /// スクロールする。キーそのものは、ページを一度クリックするまで効かない：それまでは、どの
+    /// フレームもフォーカスを持たない。ホイールには要らない。
     pub(super) fn scroll(&self, pages: f32) {
         let layout = self.layout;
         let css = |pixels: u32| pixels as f32 / (layout.scale * layout.zoom);
         let [width, height] = layout.size.map(css);
         let wheel = PageInput::Wheel {
             pos: [width / 2.0, height / 2.0],
-            // Chromium's page step: seven eighths of the view.
+            // Chromium のページの送り：見え方の 8 分の 7。
             delta: [0.0, pages * height * 0.875],
             modifiers: PageModifiers::default(),
         };
@@ -339,7 +336,7 @@ impl Browser {
         self.cdp(method, &params);
     }
 
-    /// Controls the page's video; the outcome becomes a notice.
+    /// ページの動画を操作する。結果は通知になる。
     pub(super) fn media(&self, command: MediaCommand) {
         let generation = self.generation;
         self.eval(&media_script(command), move |json| {
@@ -353,7 +350,7 @@ impl Browser {
         });
     }
 
-    /// Runs `script` in the page and hands its value (as JSON) to `then`.
+    /// ページで `script` を動かし、その値（JSON）を `then` に渡す。
     pub(super) fn eval(&self, script: &str, then: impl FnOnce(&str) + 'static) {
         let handler = ExecuteScriptCompletedHandler::create(Box::new(move |result, json| {
             match result {
@@ -362,7 +359,7 @@ impl Browser {
             }
             Ok(())
         }));
-        // SAFETY: on the browser thread.
+        // SAFETY: ブラウザのスレッドで。
         if let Err(e) = unsafe { self.webview.ExecuteScript(&HSTRING::from(script), &handler) } {
             log::debug!("browser: running a script failed: {e}");
         }
@@ -371,7 +368,7 @@ impl Browser {
 
 fn environment(data_dir: &Path) -> Result<ICoreWebView2Environment, StartError> {
     let options = CoreWebView2EnvironmentOptions::default();
-    // SAFETY: plain setters on the options object.
+    // SAFETY: オプションの物のただの setter。
     unsafe {
         options.set_additional_browser_arguments(BROWSER_ARGUMENTS.to_owned());
         options.set_language("ja-JP".to_owned());
@@ -397,12 +394,12 @@ fn environment(data_dir: &Path) -> Result<ICoreWebView2Environment, StartError> 
         .ok_or_else(|| StartError::new("ブラウザを起動できません", "no environment"))
 }
 
-/// The menu's text when the environment could not be made.
+/// 環境を作れなかったときのメニューの文字。
 fn no_runtime_message(error: &webview2_com::Error) -> String {
-    // HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND): no WebView2 Runtime installed.
+    // HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)：WebView2 ランタイムが入っていない。
     const NOT_FOUND: i32 = 0x8007_0002_u32 as i32;
-    // HRESULT_FROM_WIN32(ERROR_INVALID_STATE): the user data folder is in use with other
-    // options (another game's browser, under another version of reminedog).
+    // HRESULT_FROM_WIN32(ERROR_INVALID_STATE)：ユーザーデータのフォルダを、別のオプションで使って
+    // いる（別の reminedog の版の、別のゲームのブラウザ）。
     const INVALID_STATE: i32 = 0x8007_139F_u32 as i32;
     match error {
         webview2_com::Error::WindowsError(e) if e.code().0 == NOT_FOUND => {
@@ -417,14 +414,14 @@ fn no_runtime_message(error: &webview2_com::Error) -> String {
     }
 }
 
-/// The WebView2 loader is linked statically into the MSVC build (the GNU build would import
-/// it from WebView2Loader.dll; it has no browser).
+/// WebView2 のローダーは MSVC のビルドに静的にリンクする（GNU のビルドは WebView2Loader.dll から
+/// import することになるが、それにはブラウザがない）。
 fn create_environment(
     data_dir: &HSTRING,
     options: &ICoreWebView2EnvironmentOptions,
     handler: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler,
 ) -> windows_core::Result<()> {
-    // SAFETY: valid strings and interfaces; the handler is called on this thread.
+    // SAFETY: 有効な文字列とインターフェイス。ハンドラはこのスレッドで呼ばれる。
     unsafe {
         webview2_com::Microsoft::Web::WebView2::Win32::CreateCoreWebView2EnvironmentWithOptions(
             PCWSTR::null(),
@@ -443,7 +440,7 @@ fn composition_controller(
     let (tx, rx) = mpsc::channel();
     CreateCoreWebView2CompositionControllerCompletedHandler::wait_for_async_operation(
         Box::new(move |handler| {
-            // SAFETY: a window of this thread; the handler is called on this thread.
+            // SAFETY: このスレッドのウィンドウ。ハンドラはこのスレッドで呼ばれる。
             unsafe { environment.CreateCoreWebView2CompositionController(window, &handler) }
                 .map_err(webview2_com::Error::from)
         }),
@@ -459,10 +456,10 @@ fn composition_controller(
         .ok_or(webview2_com::Error::CallbackError("no controller".into()))
 }
 
-/// Turns off whatever would open a window or take keys from the game.
+/// ウィンドウを開くか、ゲームからキーを取るものは、何でもオフにする。
 fn configure(webview: &ICoreWebView2) -> windows_core::Result<()> {
-    // SAFETY: COM calls on the browser thread. The newer interfaces are optional: an old
-    // runtime keeps its defaults there.
+    // SAFETY: ブラウザのスレッドでの COM の呼び出し。新しいインターフェイスはなくてもよい：古い
+    // ランタイムはそこで既定のまま。
     unsafe {
         let settings = webview.Settings()?;
         settings.SetAreDefaultContextMenusEnabled(false)?;
@@ -497,8 +494,7 @@ fn configure(webview: &ICoreWebView2) -> windows_core::Result<()> {
     Ok(())
 }
 
-/// Reports the page's state on its events, keeps the last page in `last_page`, and refuses
-/// what would open a window.
+/// イベントでページの状態を報告し、最後のページを `last_page` に残し、ウィンドウを開くものは断る。
 fn subscribe(
     webview: &ICoreWebView2,
     generation: u64,
@@ -506,7 +502,7 @@ fn subscribe(
 ) -> windows_core::Result<()> {
     let mut token = 0i64;
     let kept = Rc::new(RefCell::new(String::new()));
-    // SAFETY: COM calls on the browser thread; every handler runs on it too.
+    // SAFETY: ブラウザのスレッドでの COM の呼び出し。どのハンドラもそこで動く。
     unsafe {
         webview.add_SourceChanged(
             &SourceChangedEventHandler::create(Box::new(move |sender, _| {
@@ -529,8 +525,8 @@ fn subscribe(
             })),
             &mut token,
         )?;
-        // A page loaded: the next start opens it (only documents loaded, not a page changing
-        // its own address, which some do all the time).
+        // ページを読み込んだ：次の起動でそれを開く（読み込んだ文書だけ。自分のアドレスを変えるページ
+        // （ずっとそうするものもある）は除く）。
         webview.add_NavigationCompleted(
             &NavigationCompletedEventHandler::create(Box::new(move |sender, args| {
                 let mut success = BOOL::default();
@@ -553,8 +549,8 @@ fn subscribe(
             })),
             &mut token,
         )?;
-        // A link to a new window opens here instead; a page opening one by itself (an ad on a
-        // timer) gets nothing, as a popup blocker would.
+        // 新しいウィンドウへのリンクは代わりにここで開く。ページが自分で開くもの（タイマーの広告）は、
+        // ポップアップのブロックと同じく何も得ない。
         webview.add_NewWindowRequested(
             &NewWindowRequestedEventHandler::create(Box::new(move |sender, args| {
                 if let (Some(webview), Some(args)) = (sender, args) {
@@ -574,7 +570,7 @@ fn subscribe(
             })),
             &mut token,
         )?;
-        // Dialogs: an alert or "leave the page?" is accepted, anything else cancelled.
+        // ダイアログ：alert か「ページを離れますか？」は受け入れ、それ以外はキャンセルする。
         webview.add_ScriptDialogOpening(
             &ScriptDialogOpeningEventHandler::create(Box::new(|_, args| {
                 if let Some(args) = args {
@@ -607,7 +603,7 @@ fn subscribe(
                 }
                 log::warn!("browser: a browser process failed ({})", kind.0);
                 if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED {
-                    // The WebView is dead: the thread ends, and the next show starts afresh.
+                    // WebView が死んだ：スレッドは終わり、次に見せるときに初めからやり直す。
                     ENDING.with(|ending| {
                         *ending.borrow_mut() = Some(BrowserState::Failed(
                             "ブラウザのプロセスが終了しました（表示し直すと起動し直します）".into(),
@@ -623,7 +619,7 @@ fn subscribe(
                         ));
                     });
                 }
-                // Other processes (a frame's, the GPU's) are made again by WebView2.
+                // ほかのプロセス（フレームのもの、GPU のもの）は WebView2 が作り直す。
                 Ok(())
             })),
             &mut token,
@@ -655,8 +651,7 @@ fn subscribe(
                 &mut token,
             )?;
         }
-        // A site asking for a client certificate would get the system's picker: it goes on
-        // without one.
+        // クライアント証明書を求めるサイトには、システムの選択が出てしまう：証明書なしで続ける。
         if let Ok(webview) = webview.cast::<ICoreWebView2_5>() {
             webview.add_ClientCertificateRequested(
                 &ClientCertificateRequestedEventHandler::create(Box::new(|_, args| {
@@ -668,7 +663,7 @@ fn subscribe(
                 &mut token,
             )?;
         }
-        // Sharing the screen would open the system's picker.
+        // 画面の共有はシステムの選択を開いてしまう。
         if let Ok(webview) = webview.cast::<ICoreWebView2_27>() {
             webview.add_ScreenCaptureStarting(
                 &ScreenCaptureStartingEventHandler::create(Box::new(|_, args| {
@@ -680,7 +675,7 @@ fn subscribe(
                 &mut token,
             )?;
         }
-        // Links like mailto: would open another app in front of the game.
+        // mailto: などのリンクは、ゲームの前に別のアプリを開いてしまう。
         if let Ok(webview) = webview.cast::<ICoreWebView2_18>() {
             webview.add_LaunchingExternalUriScheme(
                 &LaunchingExternalUriSchemeEventHandler::create(Box::new(|_, args| {
@@ -696,12 +691,12 @@ fn subscribe(
     Ok(())
 }
 
-/// Reads the page's address, title and history into the shared state.
+/// ページのアドレス、タイトル、履歴を共有の状態に読む。
 fn refresh(webview: Option<ICoreWebView2>, generation: u64) {
     let Some(webview) = webview else {
         return;
     };
-    // SAFETY: COM getters on the browser thread; the strings are freed by `take_pwstr`.
+    // SAFETY: ブラウザのスレッドでの COM の getter。文字列は `take_pwstr` が解放する。
     let (url, title, back, forward) = unsafe {
         let mut url = PWSTR::null();
         let mut title = PWSTR::null();
@@ -722,7 +717,7 @@ fn refresh(webview: Option<ICoreWebView2>, generation: u64) {
     report(generation, |shared| {
         let view = &mut shared.view;
         if view.url != url {
-            // The address can hold tokens: the log gets the host only.
+            // アドレスはトークンを含みうる：ログにはホストだけを出す。
             log::debug!("browser: now on {}", host_of(&url));
         }
         view.url = url;
@@ -732,7 +727,7 @@ fn refresh(webview: Option<ICoreWebView2>, generation: u64) {
     });
 }
 
-/// `text` cut to [`MAX_SHOWN`] characters, with "…" when cut.
+/// [`MAX_SHOWN`] 文字に切った `text`。切ったら "…" を付ける。
 fn cut(mut text: String) -> String {
     if let Some((end, _)) = text.char_indices().nth(MAX_SHOWN) {
         text.truncate(end);
@@ -741,8 +736,8 @@ fn cut(mut text: String) -> String {
     text
 }
 
-/// `https://example.com/a?b` → `example.com`; only the scheme of other addresses (`data`,
-/// `about`), whose rest is no host.
+/// `https://example.com/a?b` → `example.com`。ほかのアドレス（`data`、`about`）はスキームだけ
+/// （その残りはホストではない）。
 fn host_of(url: &str) -> &str {
     let Some((scheme, rest)) = url.split_once(':') else {
         return "";

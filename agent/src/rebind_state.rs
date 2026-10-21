@@ -1,21 +1,21 @@
-//! The keys the game reads as held while the key rebinding is at work: one lock-free table by
-//! SDL scancode, and the safety net for releases that never come ([`lost_releases`]).
+//! キーの置き換えが働いている間に、ゲームが押していると読むキー：SDL のスキャンコードごとの
+//! ロックなしの表 1 つと、来ない解放のための安全網（[`lost_releases`]）。
 //!
-//! Minecraft keeps its own idea of which keys are down from the events it gets, but also asks
-//! the window library for the key state: when a screen closes (`KeyMapping.setAll` re-reads
-//! every keyboard mapping), for Ctrl (dropping a stack, picking a block with its data), for the
-//! debug crash key on every key event, and 1.16 for F3. A source whose press went to the game
-//! as another key must read as up there and the output as held, or closing a screen leaves the
-//! source's mappings held and lets go of the output's.
+//! Minecraft は、受け取ったイベントから、どのキーが押されているかを自分で覚えているが、
+//! ウィンドウのライブラリにキーの状態も聞く：画面を閉じたとき（`KeyMapping.setAll` が
+//! キーボードの割り当てを全部読み直す）、Ctrl のとき（スタックごと捨てる、データ付きで
+//! ブロックを取る）、キーのイベントのたびのデバッグのクラッシュのキー、そして 1.16 では F3。
+//! 押下を別のキーとしてゲームに渡した元のキーは、そこでは離していると読まれ、出力は押して
+//! いると読まれなければならない。そうでないと、画面を閉じたときに元のキーの割り当てが
+//! 押されたまま残り、出力の割り当ては離されてしまう。
 //!
-//! The platform rewrites the table from the router's [`RebindState`] right before it hands the
-//! game an event (GLFW updates its own key state before the callback, too), after focus loss
-//! and after the safety net. `glfwGetKey`, `SDL_GetKeyboardState`, the modifier bits of key
-//! events and F3+C's checks read it. Mouse buttons are not in it: the game never asks for their
-//! state.
+//! 各 OS の処理は、ゲームにイベントを渡す直前（GLFW もコールバックの前に自分のキーの状態を
+//! 更新する）、フォーカスを失った後、安全網の後に、router の [`RebindState`] から表を書き直す。
+//! `glfwGetKey`、`SDL_GetKeyboardState`、キーのイベントの修飾キーのビット、F3+C の確認が
+//! これを読む。マウスのボタンは入れない：ゲームはその状態を聞かない。
 //!
-//! Lock order: `router -> SUSPECTS` and `router -> PRESS_SUSPECTS`. The table takes no lock;
-//! only the router's holder writes it.
+//! ロックの順序：`router -> SUSPECTS` と `router -> PRESS_SUSPECTS`。表はロックを取らない。
+//! 書くのは router を持っている者だけ。
 
 use std::ops::RangeInclusive;
 use std::sync::Mutex;
@@ -27,40 +27,39 @@ use reminedog_render::{Output, RebindState};
 
 use crate::input;
 
-/// The key's real state.
+/// キーの本当の状態。
 const REAL: u8 = 0;
-/// The game must read the key as held: a rule holds it down.
+/// ゲームはキーを押していると読む：ルールが押さえている。
 const PRESSED: u8 = 1;
-/// The game must read the key as up: a rule took its press.
+/// ゲームはキーを離していると読む：ルールが押下を取った。
 const RELEASED: u8 = 2;
 
-/// SDL scancodes of the modifier keys: the left Ctrl, Shift, Alt and Windows keys, then the
-/// right ones.
+/// 修飾キーの SDL のスキャンコード：左の Ctrl、Shift、Alt、Windows キー、その後に右のもの。
 pub const MODIFIER_SCANCODES: RangeInclusive<usize> = 224..=231;
 
-/// How long a held source must read as up before its release counts as lost. A release on its
-/// way (the key went up after the game's last event poll) reaches the game before that.
+/// 押さえている元のキーが、どれだけ離して見えたら解放を取り逃したとみなすか。途中の解放
+/// （ゲームが最後にイベントを読んだ後にキーが上がった）は、それより前にゲームに届く。
 const LOST_RELEASE_DELAY: Duration = Duration::from_millis(100);
 
 static TABLE: [AtomicU8; SCANCODE_COUNT] = [const { AtomicU8::new(REAL) }; SCANCODE_COUNT];
-/// The keys whose entry is not `REAL`, the first [`FORCED_KEY_COUNT`] of them (more than fit:
-/// `usize::MAX`), so a copied key state is patched at those keys only ([`patch_forced`]).
+/// 項目が `REAL` でないキーの最初の [`FORCED_KEY_COUNT`] 個（収まらなければ `usize::MAX`）。
+/// 写したキーの状態は、そのキーだけを直す（[`patch_forced`]）。
 static FORCED_KEYS: [AtomicU16; MAX_FORCED_KEYS] = [const { AtomicU16::new(0) }; MAX_FORCED_KEYS];
 static FORCED_KEY_COUNT: AtomicUsize = AtomicUsize::new(0);
 const MAX_FORCED_KEYS: usize = 32;
-/// The window (`GLFWwindow*` or `SDL_Window*`) of the events the table was last written for.
+/// 表を最後に書いたときのイベントのウィンドウ（`GLFWwindow*` か `SDL_Window*`）。
 static WINDOW: AtomicUsize = AtomicUsize::new(0);
-/// Some entry is not `REAL`.
+/// `REAL` でない項目がある。
 static FORCED: AtomicBool = AtomicBool::new(false);
-/// Some modifier key's entry is not `REAL`.
+/// `REAL` でない修飾キーの項目がある。
 static MODIFIERS_FORCED: AtomicBool = AtomicBool::new(false);
-/// A rule holds its output down (a key or a mouse button).
+/// ルールが出力（キーかマウスのボタン）を押さえている。
 static REBOUND: AtomicBool = AtomicBool::new(false);
-/// A press the game got as it was holds a rule's output ([`RebindState::passthrough`]).
+/// ゲームがそのまま受け取った押下が、ルールの出力を押さえている（[`RebindState::passthrough`]）。
 static PASSED: AtomicBool = AtomicBool::new(false);
-/// Ids the safety net watches that Windows reported as up at the last checks, and since when.
+/// 安全網が見ている id のうち、前の確認で Windows が離していると答えたものと、その時刻。
 static SUSPECTS: Mutex<Vec<(InputId, Instant)>> = Mutex::new(Vec::new());
-/// The same for the router's own presses ([`forget_lost_presses`]).
+/// router 自身の押下についての同じもの（[`forget_lost_presses`]）。
 static PRESS_SUSPECTS: Mutex<Vec<(InputId, Instant)>> = Mutex::new(Vec::new());
 
 fn key_index(id: InputId) -> Option<usize> {
@@ -70,8 +69,8 @@ fn key_index(id: InputId) -> Option<usize> {
     }
 }
 
-/// The table for `state`. Where a key is both taken and held (A and B swapped, both held), the
-/// game has it down.
+/// `state` の表。取られていて、かつ押さえられているキー（A と B を入れ替えて両方押している）は、
+/// ゲームでは押されている。
 fn table_of(state: &RebindState) -> [u8; SCANCODE_COUNT] {
     let mut table = [REAL; SCANCODE_COUNT];
     for &id in &state.taken {
@@ -87,8 +86,8 @@ fn table_of(state: &RebindState) -> [u8; SCANCODE_COUNT] {
     table
 }
 
-/// Rewrites the table from the router's state, for the events of `window`. Call with the router
-/// locked, right after the call that changed the state and before the game gets the event.
+/// router の状態から、`window` のイベントのために表を書き直す。router をロックしたまま、
+/// 状態を変えた呼び出しの直後で、ゲームがイベントを受け取る前に呼ぶこと。
 pub fn apply(window: usize, state: &RebindState) {
     let rebound = !state.held.is_empty();
     WINDOW.store(window, Ordering::Relaxed);
@@ -126,8 +125,8 @@ pub fn apply(window: usize, state: &RebindState) {
     REBOUND.store(rebound, Ordering::Release);
 }
 
-/// The rebinding's say on a key: `Some(true)` the game must read it as held, `Some(false)` as
-/// up, `None` (also for mouse buttons) its real state.
+/// キーについての置き換えの判断：`Some(true)` はゲームが押していると、`Some(false)` は
+/// 離していると読む。`None`（マウスのボタンも）は本当の状態。
 pub fn forced(id: InputId) -> Option<bool> {
     if !FORCED.load(Ordering::Acquire) {
         return None;
@@ -139,7 +138,7 @@ pub fn forced(id: InputId) -> Option<bool> {
     }
 }
 
-/// [`forced`], for a query about `window` (GLFW's key state is per window).
+/// `window` についての問い合わせの [`forced`]（GLFW のキーの状態はウィンドウごと）。
 pub fn forced_in(window: usize, id: InputId) -> Option<bool> {
     if !FORCED.load(Ordering::Acquire) || WINDOW.load(Ordering::Relaxed) != window {
         return None;
@@ -147,14 +146,14 @@ pub fn forced_in(window: usize, id: InputId) -> Option<bool> {
     forced(id)
 }
 
-/// Whether the game reads `id` as held: the rebinding's say, else `physically()`.
+/// ゲームが `id` を押していると読むか：置き換えの判断、なければ `physically()`。
 pub fn held(id: InputId, physically: impl FnOnce() -> bool) -> bool {
     forced(id).unwrap_or_else(physically)
 }
 
-/// Copies the key state `real` (a C bool per SDL scancode) into `out`, with the rebinding's
-/// say on the few keys it has one on. False (nothing done) when it has a say on too many keys
-/// to list: [`forced`] must be asked for each key then.
+/// キーの状態 `real`（SDL のスキャンコードごとの C の bool）を `out` に写し、置き換えが判断を
+/// 持つ少しのキーだけを直す。判断を持つキーが多すぎて並べられないときは false（何もしない）：
+/// その場合はキーごとに [`forced`] を聞くこと。
 pub fn patch_forced(real: &[u8], out: &[AtomicU8]) -> bool {
     let count = FORCED_KEY_COUNT.load(Ordering::Acquire);
     if count > MAX_FORCED_KEYS {
@@ -177,19 +176,19 @@ pub fn patch_forced(real: &[u8], out: &[AtomicU8]) -> bool {
     true
 }
 
-/// Whether any key's state is the rebinding's.
+/// どれかのキーの状態が置き換えによるものか。
 pub fn any_forced() -> bool {
     FORCED.load(Ordering::Acquire)
 }
 
-/// Whether a modifier key's state is the rebinding's (the modifier bits of key events must
-/// follow it then).
+/// 修飾キーの状態が置き換えによるものか（そのときは、キーのイベントの修飾キーのビットも
+/// それに合わせる）。
 pub fn modifiers_forced() -> bool {
     MODIFIERS_FORCED.load(Ordering::Acquire)
 }
 
-/// The rule (source, output) that holds one of `ids` down in the game, for telling the user
-/// which key to let go of.
+/// `ids` のどれかをゲームの中で押さえているルール（元のキー、出力）。どのキーを離せばよいかを
+/// 利用者に伝えるため。
 pub fn rule_holding(ids: &[InputId]) -> Option<(InputId, InputId)> {
     if !REBOUND.load(Ordering::Acquire) {
         return None;
@@ -201,14 +200,13 @@ pub fn rule_holding(ids: &[InputId]) -> Option<(InputId, InputId)> {
         .find(|(_, output)| ids.contains(output))
 }
 
-/// The safety net for releases that never come (an IME took them, the window lost focus,
-/// 26.x dropped them while loading a world, anything else). A source a rule holds whose key or
-/// button Windows reports as up for [`LOST_RELEASE_DELAY`] is let go, as its release would. A
-/// rule's output the game got pressed as it was ([`RebindState::passthrough`]) is forgotten
-/// then, with nothing for the game: it let go of it by itself (26.x resets its key state when
-/// the screen changes), and the press would swallow the rule's own presses. Called every frame
-/// after the swap of `window`; only the window the table was written for is checked. Returns
-/// the releases to give the game right away (the table is up to date by then).
+/// 来ない解放の安全網（IME が取った、ウィンドウがフォーカスを失った、26.x がワールドの読み込み中に
+/// 捨てた、そのほか）。ルールが押さえている元のキーかボタンを、Windows が
+/// [`LOST_RELEASE_DELAY`] の間離していると答えたら、解放が来たときと同じように離す。ゲームが
+/// そのまま受け取ったルールの出力（[`RebindState::passthrough`]）は、そのときゲームに何も送らずに
+/// 忘れる：ゲームは自分で離している（26.x は画面が変わるとキーの状態を戻す）し、残すとルール自身の
+/// 押下を飲み込んでしまう。`window` のスワップの後に毎フレーム呼ぶ。確かめるのは表を書いた
+/// ウィンドウだけ。すぐにゲームに渡す解放を返す（そのときには表は最新）。
 pub fn lost_releases(window: usize) -> Vec<Output> {
     if !REBOUND.load(Ordering::Acquire) && !PASSED.load(Ordering::Acquire) {
         SUSPECTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -263,12 +261,12 @@ pub fn lost_releases(window: usize) -> Vec<Output> {
     releases
 }
 
-/// The safety net for the router's own presses (the zoom key, the in-game hotkeys, the debug
-/// modifier the game has down; [`reminedog_render::InputRouter::held_presses`]): one that
-/// Windows reports as up for [`LOST_RELEASE_DELAY`] is forgotten, as its release would have
-/// made it (26.x drops input events while it loads a world or leaves one). Else the zoom
-/// would come back in the next world, or the hotkeys keep the game's text. Called every frame
-/// after the swap.
+/// router 自身の押下（ズームのキー、ゲーム中のホットキー、ゲームが押しているデバッグの修飾キー。
+/// [`reminedog_render::InputRouter::held_presses`]）の安全網：Windows が
+/// [`LOST_RELEASE_DELAY`] の間離していると答えたものは、解放が来たときと同じように忘れる
+/// （26.x はワールドの読み込み中や抜ける間、入力のイベントを捨てる）。そうしないと、次の
+/// ワールドでズームが戻ったり、ホットキーがゲームの文字を取り続けたりする。スワップの後に
+/// 毎フレーム呼ぶ。
 pub fn forget_lost_presses() {
     let mut router = input::router();
     let held = router.held_presses();
@@ -288,9 +286,10 @@ pub fn forget_lost_presses() {
     }
 }
 
-/// Of the `watched` ids (held rules' sources, rule outputs pressed as they were), those up (by
-/// `up`) since [`LOST_RELEASE_DELAY`] (lost), and those up for less (the suspects to keep, with
-/// when they were first seen up). An id seen down, or not watched any more, is no suspect.
+/// `watched` の id（押さえているルールの元のキー、そのまま押されたルールの出力）のうち、
+/// [`LOST_RELEASE_DELAY`] より前から（`up` で）離れているもの（取り逃した）と、それより短く
+/// 離れているもの（残す容疑。最初に離れて見えた時刻と一緒に）。押して見えた id や、もう
+/// 見ていない id は容疑ではない。
 fn check_suspects(
     watched: &[InputId],
     suspects: &[(InputId, Instant)],
@@ -315,7 +314,7 @@ fn check_suspects(
     (lost, still)
 }
 
-/// Whether the system reports the key or mouse button as up now; false when it cannot tell.
+/// キーかマウスのボタンを、システムが今離していると答えるか。分からなければ false。
 fn is_up(id: InputId) -> bool {
     crate::os::get().input_up(id)
 }
@@ -339,14 +338,14 @@ mod tests {
         let table = table_of(&state);
         assert_eq!(table[60], PRESSED);
         assert_eq!(table[4], RELEASED);
-        // Mouse buttons are not in it (Mouse(4) is not the key with scancode 4).
+        // マウスのボタンは入れない（Mouse(4) はスキャンコード 4 のキーではない）。
         assert_eq!(table.iter().filter(|&&v| v != REAL).count(), 2);
         assert_eq!(table_of(&RebindState::default()), [REAL; SCANCODE_COUNT]);
     }
 
     #[test]
     fn a_held_output_wins_over_a_taken_source() {
-        // A and B swapped, both held: the game has both down.
+        // A と B を入れ替えて両方押している：ゲームでは両方押されている。
         let state = RebindState {
             held: vec![(A, B), (B, A)],
             taken: vec![A, B],
@@ -354,7 +353,7 @@ mod tests {
         };
         let table = table_of(&state);
         assert_eq!((table[4], table[5]), (PRESSED, PRESSED));
-        // Only B held (as A): B reads as up, A as held.
+        // B だけを押している（A として）：B は離して、A は押して読まれる。
         let state = RebindState {
             held: vec![(B, A)],
             taken: vec![B],
@@ -364,7 +363,7 @@ mod tests {
         assert_eq!((table[4], table[5]), (PRESSED, RELEASED));
     }
 
-    /// The only test that writes the shared table.
+    /// 共有の表に書く唯一のテスト。
     #[test]
     fn the_shared_table() {
         const WINDOW_A: usize = 0x1000;
@@ -385,7 +384,7 @@ mod tests {
         assert!(held(F3, || false));
         assert!(!held(A, || true));
         assert!(held(B, || true) && !held(B, || false));
-        // Mouse-only rules force no key, but are known to be held.
+        // マウスだけのルールはキーを強制しないが、押さえていることは分かる。
         let state = RebindState {
             held: vec![(MOUSE4, InputId::Mouse(1))],
             taken: vec![MOUSE4],
@@ -395,7 +394,7 @@ mod tests {
         assert!(!any_forced() && !modifiers_forced());
         assert!(REBOUND.load(Ordering::Acquire));
         assert_eq!(forced(F3), None);
-        // A rule's output pressed as it was: watched by the safety net, nothing forced.
+        // そのまま押されたルールの出力：安全網が見るが、何も強制しない。
         let state = RebindState {
             passthrough: vec![InputId::Mouse(1)],
             ..RebindState::default()
@@ -426,14 +425,14 @@ mod tests {
     #[test]
     fn a_release_counts_as_lost_once_it_is_late() {
         let start = Instant::now();
-        // A held rule's source, and a rule's output pressed as it was.
+        // 押さえているルールの元のキーと、そのまま押されたルールの出力。
         let held = [MOUSE4, A];
         let up = |id: InputId| id == MOUSE4;
-        // First seen up: a suspect.
+        // 初めて離れて見えた：容疑。
         let (lost, suspects) = check_suspects(&held, &[], start, up);
         assert!(lost.is_empty());
         assert_eq!(suspects, [(MOUSE4, start)]);
-        // Still up, not for long enough.
+        // まだ離れているが、十分ではない。
         let soon = start + LOST_RELEASE_DELAY / 2;
         let (lost, suspects) = check_suspects(&held, &suspects, soon, up);
         assert!(lost.is_empty());
@@ -452,11 +451,11 @@ mod tests {
         let later = start + LOST_RELEASE_DELAY;
         let (lost, suspects) = check_suspects(&held, &suspects, later, |_| false);
         assert!(lost.is_empty() && suspects.is_empty());
-        // Up again: the wait starts over.
+        // また押された：待ち直し。
         let (lost, suspects) = check_suspects(&held, &suspects, later, |_| true);
         assert!(lost.is_empty());
         assert_eq!(suspects, [(MOUSE4, later)]);
-        // Released meanwhile (not held any more): forgotten.
+        // その間に解放された（もう押さえていない）：忘れる。
         let (lost, suspects) = check_suspects(&[], &suspects, later + LOST_RELEASE_DELAY, |_| true);
         assert!(lost.is_empty() && suspects.is_empty());
     }

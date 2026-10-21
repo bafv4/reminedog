@@ -1,15 +1,15 @@
-//! SDL3, which Minecraft 26.x opens its window with instead of GLFW (LWJGL 3.4).
+//! SDL3。Minecraft 26.x は GLFW の代わりにこれでウィンドウを開く（LWJGL 3.4）。
 //!
-//! 26.x renders with OpenGL through SDL3 (its "RenderPearl OpenGL" backend), so the overlay
-//! works as with GLFW: `SDL_GL_SwapWindow` is hooked ([`crate::hook`]) and hands each frame to
-//! [`frame::before_swap`].
-//! `SDL_GetWindowSizeInPixels` reports the tall size during the high-resolution zoom
-//! ([`crate::tall`]), and `SDL_WarpMouseInWindow` maps the game's warps from that size back
-//! into the real window. The other hooks only log how the game uses SDL3 (window flags,
-//! OpenGL context or Vulkan surface), for diagnosing future versions.
+//! 26.x は SDL3 を通して OpenGL で描く（"RenderPearl OpenGL" のバックエンド）ので、オーバーレイは
+//! GLFW と同じように動く：`SDL_GL_SwapWindow` をフックし（[`crate::hook`]）、フレームごとに
+//! [`frame::before_swap`] に渡す。
+//! `SDL_GetWindowSizeInPixels` は高精細のズームの間、縦長の大きさを答え（[`crate::tall`]）、
+//! `SDL_WarpMouseInWindow` はゲームのマウスの移動を、その大きさから本当のウィンドウに写し戻す。
+//! ほかのフックは、ゲームの SDL3 の使い方（ウィンドウのフラグ、OpenGL のコンテキストか Vulkan の
+//! surface か）をログに出すだけ（将来の版を調べるため）。
 //!
-//! Only one window library is hooked, the first loaded: a mod's SDL (controller support) in
-//! a GLFW game is left alone.
+//! フックするウィンドウのライブラリは 1 つだけ、最初に読み込まれたもの：GLFW のゲームで
+//! Mod が使う SDL（コントローラーのため）には触れない。
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -53,12 +53,12 @@ const WINDOW_VULKAN: u64 = 0x1000_0000;
 static CREATE_WINDOW: Original<CreateWindowFn> = Original::new();
 static GL_CREATE_CONTEXT: Original<GlCreateContextFn> = Original::new();
 static GL_SWAP_WINDOW: Original<GlSwapWindowFn> = Original::new();
-/// The real SDL_GetWindowSizeInPixels (the overlay needs the real size).
+/// 本物の SDL_GetWindowSizeInPixels（オーバーレイには本当の大きさが要る）。
 static GET_WINDOW_SIZE_IN_PIXELS: Original<GetWindowSizeInPixelsFn> = Original::new();
 static VULKAN_CREATE_SURFACE: Original<VulkanCreateSurfaceFn> = Original::new();
 static WARP_MOUSE_IN_WINDOW: Original<WarpMouseInWindowFn> = Original::new();
 static SDL: OnceLock<Sdl> = OnceLock::new();
-/// The hooked SDL3 library (0 before).
+/// フックした SDL3 のライブラリ（その前は 0）。
 static MODULE: AtomicUsize = AtomicUsize::new(0);
 
 static HOOKS: LazyLock<[Hook; 6]> = LazyLock::new(|| {
@@ -96,22 +96,22 @@ static HOOKS: LazyLock<[Hook; 6]> = LazyLock::new(|| {
     ]
 });
 
-/// The hooks of the window's SDL3 functions ([`crate::sdl_input`] has the input's).
+/// ウィンドウの SDL3 の関数のフック（入力のものは [`crate::sdl_input`]）。
 pub fn hooks() -> &'static [Hook] {
     &*HOOKS
 }
 
-/// Whether `module` is the hooked SDL3 library.
+/// `module` がフックした SDL3 のライブラリか。
 pub fn is_hooked(module: usize) -> bool {
     module != 0 && MODULE.load(Ordering::Acquire) == module
 }
 
-/// An SDL3 library was offered, whether or not it could be hooked.
+/// SDL3 のライブラリが来た（フックできたかどうかにかかわらず）。
 static ATTACHED: AtomicBool = AtomicBool::new(false);
 static RENDERER_LOGGED: AtomicBool = AtomicBool::new(false);
 static SWAPS: AtomicU64 = AtomicU64::new(0);
 
-/// SDL3 functions the agent calls itself.
+/// エージェント自身が呼ぶ SDL3 の関数。
 struct Sdl {
     get_version: GetVersionFn,
     get_window_flags: GetWindowFlagsFn,
@@ -129,7 +129,7 @@ impl Sdl {
             export(module, name)
                 .ok_or_else(|| format!("SDL3 does not export {}", name.to_string_lossy()))
         };
-        // SAFETY: SDL3 exports with these C signatures.
+        // SAFETY: この C のシグネチャの SDL3 の export。
         unsafe {
             Ok(Sdl {
                 get_version: std::mem::transmute::<*const c_void, GetVersionFn>(get(
@@ -161,31 +161,31 @@ impl Sdl {
     }
 
     fn version(&self) -> String {
-        // SAFETY: SDL_GetVersion takes no arguments.
+        // SAFETY: SDL_GetVersion は引数を取らない。
         let v = unsafe { (self.get_version)() };
         format!("{}.{}.{}", v / 1_000_000, v / 1000 % 1000, v % 1000)
     }
 }
 
-// Every call below gets the SDL_Window* SDL itself passed to SDL_GL_SwapWindow, on the
-// thread that swaps it.
+// 下の呼び出しはどれも、SDL 自身が SDL_GL_SwapWindow に渡した SDL_Window* を、それを
+// スワップするスレッドで受け取る。
 impl WindowSystem for Sdl {
     fn describe(&self) -> String {
         format!("SDL {}", self.version())
     }
 
     fn is_visible(&self, window: *mut c_void) -> bool {
-        // SAFETY: see above.
+        // SAFETY: 上を参照。
         unsafe { (self.get_window_flags)(window) & WINDOW_HIDDEN == 0 }
     }
 
-    /// SDL3 reads raw input in relative mouse mode unless the game asked it to warp the
-    /// system pointer instead or to apply the system's pointer speed itself.
+    /// SDL3 は相対マウスモードで生の入力を読む。ただし、ゲームがシステムのポインターを動かす
+    /// ように頼んだときや、システムのポインターの速度を自分で使うように頼んだときは別。
     fn raw_motion(&self, _window: *mut c_void) -> bool {
         let Some(get) = self.get_hint_boolean else {
             return true;
         };
-        // SAFETY: NUL-terminated hint names; hints may be read from any thread.
+        // SAFETY: NUL で終わるヒントの名前。ヒントはどのスレッドから読んでもよい。
         unsafe {
             !get(c"SDL_MOUSE_RELATIVE_MODE_WARP".as_ptr(), false)
                 && !get(c"SDL_MOUSE_RELATIVE_SYSTEM_SCALE".as_ptr(), false)
@@ -200,7 +200,7 @@ impl WindowSystem for Sdl {
         Naming::Modern
     }
 
-    /// Any scancode SDL3 knows, and the five buttons it reports on Windows.
+    /// SDL3 が知っているどのスキャンコードも、Windows で SDL3 が報告する 5 つのボタンも。
     fn can_send(&self, id: InputId) -> bool {
         match id {
             InputId::Key(scancode) => (4..SCANCODE_COUNT).contains(&usize::from(scancode)),
@@ -208,15 +208,14 @@ impl WindowSystem for Sdl {
         }
     }
 
-    /// The same as [`can_send`](Self::can_send): the hooks take SDL3's scancodes and buttons
-    /// as they are.
+    /// [`can_send`](Self::can_send) と同じ：フックは SDL3 のスキャンコードとボタンをそのまま受け取る。
     fn can_receive(&self, id: InputId) -> bool {
         self.can_send(id)
     }
 
     fn framebuffer_size(&self, window: *mut c_void) -> (i32, i32) {
         let (mut w, mut h) = (0, 0);
-        // SAFETY: see above; the real size (the game's calls go through the hook).
+        // SAFETY: 上を参照。本当の大きさ（ゲームの呼び出しはフックを通る）。
         if unsafe { (self.get_window_size_in_pixels)(window, &mut w, &mut h) } {
             (w, h)
         } else {
@@ -225,7 +224,7 @@ impl WindowSystem for Sdl {
     }
 
     fn content_scale(&self, window: *mut c_void) -> f32 {
-        // SAFETY: see above; 0 means failure.
+        // SAFETY: 上を参照。0 は失敗。
         let scale = unsafe { (self.get_window_display_scale)(window) };
         if scale.is_finite() && scale > 0.0 {
             scale
@@ -234,10 +233,10 @@ impl WindowSystem for Sdl {
         }
     }
 
-    /// The window property the OS names ([`crate::os::Os::sdl_native_window`]).
+    /// OS が名前を挙げるウィンドウのプロパティ（[`crate::os::Os::sdl_native_window`]）。
     fn native_window(&self, window: *mut c_void) -> Option<usize> {
         let property = crate::os::get().sdl_native_window()?;
-        // SAFETY: see above; the property names are NUL-terminated.
+        // SAFETY: 上を参照。プロパティの名前は NUL で終わる。
         let native = unsafe {
             let props = (self.get_window_properties)(window);
             if props == 0 {
@@ -256,12 +255,12 @@ impl WindowSystem for Sdl {
     }
 
     fn minimized(&self, window: *mut c_void) -> bool {
-        // SAFETY: see above.
+        // SAFETY: 上を参照。
         unsafe { (self.get_window_flags)(window) & WINDOW_MINIMIZED != 0 }
     }
 }
 
-/// Identifies SDL3 by its exports, like GLFW: those SDL2 has too, and two only SDL3 has.
+/// SDL3 を、GLFW と同じく export で見分ける：SDL2 にもあるものと、SDL3 だけにある 2 つ。
 pub fn is_sdl3(module: usize) -> bool {
     [
         c"SDL_Init",
@@ -274,12 +273,12 @@ pub fn is_sdl3(module: usize) -> bool {
     .all(|name| export(module, name).is_some())
 }
 
-/// Whether an SDL3 library was hooked.
+/// SDL3 のライブラリをフックしたか。
 pub fn attached() -> bool {
     SDL.get().is_some()
 }
 
-/// Hooks `module` (called by [`crate::library`], one library at a time).
+/// `module` をフックする（[`crate::library`] が、1 度に 1 つのライブラリについて呼ぶ）。
 pub fn attach(module: usize, path: &str) {
     if ATTACHED.swap(true, Ordering::AcqRel) {
         log::warn!("a second SDL3 library is ignored: {path}");
@@ -290,14 +289,14 @@ pub fn attach(module: usize, path: &str) {
             let _ = SDL.set(sdl);
         }
         Err(e) => {
-            // Not the SDL3 the game opens its window with: no hooks at all.
+            // ゲームがウィンドウを開く SDL3 ではない：何もフックしない。
             log::error!("SDL3 loaded ({path}), but the overlay cannot use it: {e}");
             return;
         }
     }
     log::info!("SDL3 loaded: {path}");
     crate::sdl_input::install(module);
-    // Hooked only now, all set up: other threads hand out the hooks from here on.
+    // 準備が全部終わったここで初めてフックしたことにする：ここから、ほかのスレッドもフックを渡す。
     MODULE.store(module, Ordering::Release);
     log::info!("SDL3 hooks installed");
 }
@@ -319,13 +318,13 @@ unsafe extern "C" fn create_window_hook(
     let Some(original) = CREATE_WINDOW.get() else {
         return std::ptr::null_mut();
     };
-    // SAFETY: same arguments the caller passed us.
+    // SAFETY: 呼び出し側が渡したのと同じ引数。
     let window = unsafe { original(title, w, h, flags) };
     crate::catch("SDL_CreateWindow probe", || {
         let title = if title.is_null() {
             String::new()
         } else {
-            // SAFETY: SDL window titles are NUL-terminated UTF-8.
+            // SAFETY: SDL のウィンドウのタイトルは NUL で終わる UTF-8。
             unsafe { CStr::from_ptr(title) }
                 .to_string_lossy()
                 .into_owned()
@@ -353,7 +352,7 @@ unsafe extern "C" fn gl_create_context_hook(window: *mut c_void) -> *mut c_void 
     let Some(original) = GL_CREATE_CONTEXT.get() else {
         return std::ptr::null_mut();
     };
-    // SAFETY: same arguments the caller passed us.
+    // SAFETY: 呼び出し側が渡したのと同じ引数。
     let context = unsafe { original(window) };
     crate::catch("SDL_GL_CreateContext probe", || {
         log_renderer("OpenGL", "SDL_GL_CreateContext");
@@ -378,7 +377,7 @@ unsafe extern "C" fn gl_swap_window_hook(window: *mut c_void) -> bool {
         }
     });
     let swapping = crate::tall::Swapping::begin();
-    // SAFETY: same arguments the caller passed us.
+    // SAFETY: 呼び出し側が渡したのと同じ引数。
     let swapped = unsafe { original(window) };
     drop(swapping);
     crate::catch("rebinds", || crate::sdl_input::release_lost_keys(window));
@@ -387,7 +386,7 @@ unsafe extern "C" fn gl_swap_window_hook(window: *mut c_void) -> bool {
     swapped
 }
 
-/// Reports the zoom's tall size to the game while zooming.
+/// ズーム中は、ゲームにズームの縦長の大きさを答える。
 unsafe extern "C" fn get_window_size_in_pixels_hook(
     window: *mut c_void,
     w: *mut c_int,
@@ -396,10 +395,10 @@ unsafe extern "C" fn get_window_size_in_pixels_hook(
     let Some(original) = GET_WINDOW_SIZE_IN_PIXELS.get() else {
         return false;
     };
-    // SAFETY: the caller's arguments.
+    // SAFETY: 呼び出し側の引数。
     let ok = unsafe { original(window, w, h) };
     if ok && let Some([tall_w, tall_h]) = crate::tall::size_override(window) {
-        // SAFETY: SDL allows either pointer to be null.
+        // SAFETY: SDL は、どちらのポインタも null でよい。
         unsafe {
             if !w.is_null() {
                 *w = tall_w;
@@ -412,20 +411,20 @@ unsafe extern "C" fn get_window_size_in_pixels_hook(
     ok
 }
 
-/// While the zoom tells the game a taller window, the game's warps (26.3 re-grabs the mouse
-/// at the centre of the window it believes in whenever the window is resized) are scaled
-/// back into the real window. Else the system's cursor lands below the window, and a click
-/// there goes to another window: the game loses the focus and the mouse.
+/// ズームがゲームに縦長のウィンドウだと伝えている間は、ゲームのマウスの移動（26.3 は、
+/// ウィンドウの大きさが変わるたびに、ゲームが思っているウィンドウの中央でマウスを捕まえ直す）を、
+/// 本当のウィンドウに縮めて写す。そうしないと、システムのカーソルがウィンドウの下に出て、
+/// そこでのクリックがほかのウィンドウに行く：ゲームがフォーカスとマウスを失う。
 unsafe extern "C" fn warp_mouse_in_window_hook(window: *mut c_void, x: f32, y: f32) {
     let Some(original) = WARP_MOUSE_IN_WINDOW.get() else {
         return;
     };
     let y = crate::catch("SDL_WarpMouseInWindow hook", || real_warp_y(window, y)).unwrap_or(y);
-    // SAFETY: the caller's window; the coordinates are within it.
+    // SAFETY: 呼び出し側のウィンドウ。座標はその中。
     unsafe { original(window, x, y) };
 }
 
-/// `y` in the real window, for a warp the game made in the tall one (as it is otherwise).
+/// ゲームが縦長のウィンドウで行った移動の `y` を、本当のウィンドウで（ほかのときはそのまま）。
 fn real_warp_y(window: *mut c_void, y: f32) -> f32 {
     let Some([_, tall_h]) = crate::tall::own_query(|| crate::tall::size_override(window)) else {
         return y;
@@ -434,12 +433,11 @@ fn real_warp_y(window: *mut c_void, y: f32) -> f32 {
         return y;
     };
     let (mut w, mut h) = (0, 0);
-    // SAFETY: the window SDL passed the caller; valid out parameters. The real function gives
-    // the real size.
+    // SAFETY: SDL が呼び出し側に渡したウィンドウと、使える出力の引数。本物の関数は本当の大きさを返す。
     if !unsafe { real_size(window, &mut w, &mut h) } || h <= 0 || tall_h <= 0 {
         return y;
     }
-    // The tall size is k times the real one in pixels; the window units scale alike.
+    // 縦長の大きさはピクセルで本当の k 倍。ウィンドウの単位も同じ割合で変わる。
     let mapped = y * h as f32 / tall_h as f32;
     log::debug!("zoom: the game warped the mouse to y {y:.0}; warping to {mapped:.0}");
     mapped
@@ -454,7 +452,7 @@ unsafe extern "C" fn vulkan_create_surface_hook(
     let Some(original) = VULKAN_CREATE_SURFACE.get() else {
         return false;
     };
-    // SAFETY: same arguments the caller passed us.
+    // SAFETY: 呼び出し側が渡したのと同じ引数。
     let ok = unsafe { original(window, instance, allocator, surface) };
     crate::catch("SDL_Vulkan_CreateSurface probe", || {
         log_renderer("Vulkan", "SDL_Vulkan_CreateSurface");

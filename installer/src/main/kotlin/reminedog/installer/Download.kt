@@ -9,28 +9,28 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
-/** Downloads reminedog.dll from the latest GitHub release. */
+/** GitHub の最新のリリースから reminedog.dll をダウンロードする。 */
 object Download {
     const val REPOSITORY = "bafv4/reminedog"
 
-    /** The DLL's name on the PC, whatever the version (JVM arguments keep naming the same file). */
+    /** 版によらない PC での DLL の名前（JVM 引数が同じファイルを指し続けるように）。 */
     const val ASSET = "reminedog.dll"
 
-    /** A release's DLL: `reminedog-1.2.3.dll` (or `reminedog.dll`). */
+    /** リリースの DLL：`reminedog-1.2.3.dll`（か `reminedog.dll`）。 */
     private val RELEASE_DLL = Regex("""reminedog(-[0-9A-Za-z.+-]+)?\.dll""", RegexOption.IGNORE_CASE)
     private const val API = "https://api.github.com/repos/$REPOSITORY/releases/latest"
 
-    /** This installer's version, from its jar's manifest ("dev" when built without one). */
+    /** このインストーラーの版。jar の manifest から（なしでビルドしたら "dev"）。 */
     val INSTALLER_VERSION: String = Download::class.java.`package`?.implementationVersion ?: "dev"
 
     /**
-     * The DLL of a release, with its size and SHA-256 (lowercase hex) as GitHub gave them. They
-     * show that the download arrived whole, not who made the file: GitHub's answer is all there
-     * is to compare with.
+     * リリースの DLL と、GitHub が答えた大きさと SHA-256（小文字の 16 進）。これで分かるのは
+     * ダウンロードが欠けずに届いたことで、誰がファイルを作ったかではない：比べられるのは GitHub の
+     * 答えだけ。
      */
     class Release(val tag: String, val url: String, val size: Long, val sha256: String)
 
-    /** A downloaded DLL could not be put in place (a game has it loaded, the folder cannot be written). */
+    /** ダウンロードした DLL を置けなかった（ゲームが読み込んでいる、フォルダに書けない）。 */
     class PlaceException(message: String, cause: Throwable) : IOException(message, cause)
 
     fun latest(): Release {
@@ -45,7 +45,7 @@ object Download {
         return parse(connection.inputStream.use { String(it.readBytes(), Charsets.UTF_8) })
     }
 
-    /** Reads the release JSON of the GitHub API. */
+    /** GitHub の API のリリースの JSON を読む。 */
     fun parse(text: String): Release {
         val release = try {
             Json.parse(text).asJsonObject()
@@ -66,9 +66,9 @@ object Download {
     }
 
     /**
-     * Puts the release's DLL at [target] (through a temporary file, checking its size and hash).
-     * Returns false when the file there is already the same; [onDownload] runs just before
-     * downloading. A file that cannot be put there throws [PlaceException].
+     * リリースの DLL を [target] に置く（一時ファイルを通し、大きさとハッシュを確かめる）。
+     * そこのファイルがもう同じなら false を返す。[onDownload] はダウンロードの直前に動く。
+     * 置けないファイルは [PlaceException] を投げる。
      */
     fun save(release: Release, target: Path, onDownload: () -> Unit = {}): Boolean =
         when (val result = replaceAll(release, listOf(target), onDownload).single()) {
@@ -77,10 +77,10 @@ object Download {
             is Replaced.Failed -> throw PlaceException(result.reason, result.cause)
         }
 
-    /** Whether [target] is a file other than the release's DLL (a test build, an older version). */
+    /** [target] がリリースの DLL と違うファイル（テスト用のビルド、古い版）か。 */
     fun differs(release: Release, target: Path): Boolean = hashOrNull(target)?.let { it != release.sha256 } ?: false
 
-    /** What [replaceAll] did to one DLL file. */
+    /** [replaceAll] が 1 つの DLL のファイルにしたこと。 */
     sealed class Replaced(val path: Path) {
         class Updated(path: Path) : Replaced(path)
 
@@ -90,10 +90,10 @@ object Download {
     }
 
     /**
-     * Puts the release's DLL at each of [targets] (the DLLs that instances load, each once).
-     * It is downloaded once, and not at all when GitHub's hash shows every file is already the
-     * same; [onDownload] runs just before downloading. A target that cannot be replaced (a game
-     * has loaded it) fails alone; a failed download throws.
+     * リリースの DLL を [targets]（インスタンスが読み込む DLL。それぞれ 1 回）のそれぞれに置く。
+     * ダウンロードは 1 回で、GitHub のハッシュからどのファイルももう同じと分かれば、ダウンロード
+     * しない。[onDownload] はダウンロードの直前に動く。置き換えられない置き先（ゲームが読み込んで
+     * いる）はそれだけが失敗する。ダウンロードの失敗は投げる。
      */
     fun replaceAll(release: Release, targets: List<Path>, onDownload: () -> Unit = {}): List<Replaced> {
         val hashes = targets.associateWith { hashOrNull(it) }
@@ -119,8 +119,8 @@ object Download {
     }
 
     /**
-     * Downloads the release's DLL to a temporary file and checks it; the file and its SHA-256.
-     * The caller deletes the file.
+     * リリースの DLL を一時ファイルにダウンロードして確かめる。ファイルとその SHA-256。
+     * ファイルは呼び出し側が消す。
      */
     private fun fetch(release: Release): Pair<Path, String> {
         val file = Files.createTempFile("reminedog-", ".dll")
@@ -138,8 +138,8 @@ object Download {
     }
 
     /**
-     * Replaces [target] with [dll] through a temporary file next to it. A folder made for it is
-     * made writable for the user (and SYSTEM and the administrators) only.
+     * [target] を、隣の一時ファイルを通して [dll] で置き換える。そのために作ったフォルダは、利用者
+     * （と SYSTEM と管理者）だけが書けるようにする。
      */
     private fun place(dll: Path, target: Path) {
         val temp = target.resolveSibling("${target.fileName}.download")
@@ -159,13 +159,13 @@ object Download {
                 throw IOException("$target を置き換えられません。reminedog を読み込んだゲームが起動していたら閉じてください", e)
             }
         } finally {
-            // Where the folder cannot be written, removing the temporary file can fail too (on
-            // Linux, under a path that is a file); the error above says why, so this one goes.
+            // フォルダに書けないところでは、一時ファイルの削除も失敗しうる（Linux で、ファイルである
+            // パスの下）。理由は上のエラーが言うので、こちらは捨てる。
             runCatching { Files.deleteIfExists(temp) }
         }
     }
 
-    /** The SHA-256 of a file, or null when it is not there or cannot be read. */
+    /** ファイルの SHA-256。ないか読めなければ null。 */
     private fun hashOrNull(file: Path): String? =
         try {
             if (Files.isRegularFile(file)) sha256(file) else null
@@ -173,7 +173,7 @@ object Download {
             null
         }
 
-    /** Checks a downloaded DLL; its SHA-256. */
+    /** ダウンロードした DLL を確かめる。その SHA-256。 */
     private fun check(release: Release, file: Path): String {
         val size = Files.size(file)
         if (size != release.size) throw IOException("ダウンロードが途中で切れました（$size / ${release.size} バイト）")

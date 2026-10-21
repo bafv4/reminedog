@@ -1,15 +1,15 @@
-//! OpenGL contexts on macOS with `NSOpenGLContext`, for [`crate::macos`] (the agent keeps its
-//! own context on the game's view with them).
+//! macOS の `NSOpenGLContext` の OpenGL のコンテキスト。[`crate::macos`] のため（エージェントは
+//! これで、ゲームのビューの上に自前のコンテキストを持つ）。
 //!
-//! GLFW and SDL3 make their contexts current with `makeCurrentContext`, so the current
-//! `NSOpenGLContext` is the game's, and its view is what it draws on (the "surface"). The
-//! agent's context is made with the game context's pixel format and attached to the same view:
-//! contexts attached to one view draw on the same surface, so the overlay lands in the back
-//! buffer the game presents. AppKit wants views touched on the main thread, which is where
-//! macOS's GLFW and SDL3 render (Minecraft starts the JVM with `-XstartOnFirstThread`).
+//! GLFW と SDL3 は `makeCurrentContext` でコンテキストを今のものにするので、今の
+//! `NSOpenGLContext` はゲームのもので、そのビューが描画先（「サーフェス」）。エージェントの
+//! コンテキストはゲームのコンテキストのピクセルフォーマットで作り、同じビューに付ける：1 つの
+//! ビューに付けたコンテキストは同じサーフェスに描くので、オーバーレイはゲームが見せるバック
+//! バッファに載る。AppKit はビューをメインスレッドで触ることを求め、macOS の GLFW と SDL3 は
+//! そこで描く（Minecraft は JVM を `-XstartOnFirstThread` で起動する）。
 //!
-//! Handles are `NSOpenGLContext` and `NSView` pointers. GL functions come from
-//! OpenGL.framework's exports (CGL has no `GetProcAddress`).
+//! ハンドルは `NSOpenGLContext` と `NSView` のポインタ。GL の関数は OpenGL.framework の export
+//! から引く（CGL には `GetProcAddress` がない）。
 
 use std::ffi::{CStr, c_int, c_void};
 use std::sync::{Mutex, OnceLock};
@@ -48,14 +48,14 @@ unsafe extern "C" {
     fn pthread_main_np() -> c_int;
 }
 
-/// One of the agent's contexts, and the size of its view when it last followed it.
+/// エージェントのコンテキストの 1 つと、最後にビューに合わせたときのビューの大きさ。
 struct Own {
     context: usize,
     view: usize,
     size: Option<(f64, f64)>,
 }
 
-/// The agent's contexts (one per window it draws on).
+/// エージェントのコンテキスト（描くウィンドウごとに 1 つ）。
 static OWN: Mutex<Vec<Own>> = Mutex::new(Vec::new());
 
 fn opengl() -> Option<usize> {
@@ -76,67 +76,67 @@ fn context_class() -> Result<Id, String> {
     }
 }
 
-/// The current `NSOpenGLContext` (0 if none).
+/// 今の `NSOpenGLContext`（なければ 0）。
 pub fn current_context() -> usize {
     let Ok(class) = context_class() else {
         return 0;
     };
-    // SAFETY: a class method answering an object or nil.
+    // SAFETY: オブジェクトか nil を答えるクラスメソッド。
     objc::autoreleased(|| unsafe { objc::send::<Id>(class, &CURRENT_CONTEXT) as usize })
 }
 
-/// The view and context current on this thread (0 if none).
+/// このスレッドで今のビューとコンテキスト（なければ 0）。
 pub fn current() -> (usize, usize) {
     let context = current_context();
     if context == 0 {
         return (0, 0);
     }
-    // SAFETY: an NSOpenGLContext; its view may be nil.
+    // SAFETY: NSOpenGLContext。そのビューは nil のことがある。
     let view = objc::autoreleased(|| unsafe { objc::send::<Id>(context as Id, &VIEW) as usize });
     (view, context)
 }
 
-/// The view the game draws on: the current context's, else the content view of `window` (an
-/// `NSWindow`).
+/// ゲームが描くビュー：今のコンテキストのもの、なければ `window`（`NSWindow`）のコンテンツ
+/// ビュー。
 pub fn window_view(window: Option<usize>) -> usize {
     match current() {
         (0, _) => window.map_or(0, |window| {
-            // SAFETY: GLFW's and SDL3's NSWindow.
+            // SAFETY: GLFW と SDL3 の NSWindow。
             objc::autoreleased(|| unsafe { objc::send::<Id>(window as Id, &CONTENT_VIEW) as usize })
         }),
         (view, _) => view,
     }
 }
 
-/// A GL function, null if OpenGL.framework does not export it.
+/// GL の関数。OpenGL.framework が export していなければ null。
 pub fn function(name: &CStr) -> *const c_void {
     opengl()
         .and_then(|gl| dl::symbol(gl, name))
         .unwrap_or(std::ptr::null())
 }
 
-/// Submits the current context's commands before another context draws on the same view.
+/// 別のコンテキストが同じビューに描く前に、今のコンテキストのコマンドを送り出す。
 fn flush() {
     static GL_FLUSH: OnceLock<Option<unsafe extern "C" fn()>> = OnceLock::new();
     let flush = GL_FLUSH.get_or_init(|| {
         let p = function(c"glFlush");
-        // SAFETY: glFlush's type.
+        // SAFETY: glFlush の型。
         (!p.is_null())
             .then(|| unsafe { std::mem::transmute::<*const c_void, unsafe extern "C" fn()>(p) })
     });
     if let Some(flush) = flush {
-        // SAFETY: a context is current.
+        // SAFETY: コンテキストが今のものになっている。
         unsafe { flush() };
     }
 }
 
-/// Whether this is the main thread, the only one that may touch AppKit's views.
+/// メインスレッド（AppKit のビューを触ってよい唯一のスレッド）か。
 pub fn on_main_thread() -> bool {
-    // SAFETY: no preconditions.
+    // SAFETY: 前提はない。
     unsafe { pthread_main_np() != 0 }
 }
 
-/// A context for `view`, with the pixel format of the game's current context.
+/// `view` のための、ゲームの今のコンテキストのピクセルフォーマットのコンテキスト。
 pub fn create_context(view: usize) -> Result<usize, String> {
     if !on_main_thread() {
         return Err("not on the main thread (AppKit needs it to attach to a view)".into());
@@ -147,7 +147,8 @@ pub fn create_context(view: usize) -> Result<usize, String> {
         return Err("no NSOpenGLContext is current".into());
     }
     objc::autoreleased(|| {
-        // SAFETY: NSOpenGLContext's methods; the format is the game context's, alive while it is.
+        // SAFETY: NSOpenGLContext のメソッド。フォーマットはゲームのコンテキストのもので、それが
+        // 生きている間は生きている。
         unsafe {
             let format = objc::send::<Id>(game as Id, &PIXEL_FORMAT);
             if format.is_null() {
@@ -164,8 +165,8 @@ pub fn create_context(view: usize) -> Result<usize, String> {
                 objc::send::<()>(context, &RELEASE);
                 return Err(format!("cannot attach to the view 0x{view:x}"));
             }
-            // Whether contexts share a layer-backed view's surface is what this prototype has to
-            // find out.
+            // コンテキストがレイヤーで裏打ちしたビューのサーフェスを共有するかは、この試作で確かめる
+            // こと。
             log::info!(
                 "nsgl: overlay context 0x{:x} on view 0x{view:x} (layer-backed {})",
                 context as usize,
@@ -181,10 +182,10 @@ pub fn create_context(view: usize) -> Result<usize, String> {
     })
 }
 
-/// The view's size in pixels (its bounds times its window's backing scale).
+/// ビューのピクセルでの大きさ（境界にウィンドウのバッキングの倍率を掛けたもの）。
 fn view_size(view: usize) -> (f64, f64) {
     objc::autoreleased(|| {
-        // SAFETY: an NSView; its window may be nil (then the scale is 0).
+        // SAFETY: NSView。そのウィンドウは nil のことがある（そのとき倍率は 0）。
         unsafe {
             let bounds: Rect = objc::send_rect(view as Id, &BOUNDS);
             let window = objc::send::<Id>(view as Id, &WINDOW);
@@ -198,15 +199,15 @@ fn view_size(view: usize) -> (f64, f64) {
     })
 }
 
-/// Makes `context` current (0: none). The agent's own contexts follow their view's size first,
-/// as GLFW and SDL3 do for theirs (`update`).
+/// `context` を今のものにする（0：なし）。エージェント自前のコンテキストは、GLFW と SDL3 が
+/// 自分のものにするように（`update`）、先にビューの大きさに合わせる。
 pub fn make_current(_view: usize, context: usize) -> Result<(), String> {
     let class = context_class()?;
     let current = current_context();
     if current != 0 && current != context {
         flush();
     }
-    // SAFETY: NSOpenGLContext's methods on a context of the game or the agent's.
+    // SAFETY: ゲームかエージェントのコンテキストへの NSOpenGLContext のメソッド。
     unsafe {
         if context == 0 {
             objc::send::<()>(class, &CLEAR_CURRENT_CONTEXT);
@@ -214,7 +215,7 @@ pub fn make_current(_view: usize, context: usize) -> Result<(), String> {
         }
         let mut own = OWN.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(own) = own.iter_mut().find(|own| own.context == context) {
-            // Following the view is AppKit's; a swap on another thread skips the overlay.
+            // ビューに合わせるのは AppKit の仕事。ほかのスレッドのスワップではオーバーレイを省く。
             if !on_main_thread() {
                 return Err("not on the main thread".into());
             }
@@ -233,8 +234,8 @@ pub fn make_current(_view: usize, context: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// Deletes one of the agent's contexts, not current. Off the main thread it is left (detaching
-/// it from the view is AppKit's).
+/// エージェントのコンテキストの 1 つ（今のものでない）を消す。メインスレッドの外では残す
+/// （ビューから外すのは AppKit の仕事）。
 pub fn delete_context(context: usize) -> Result<(), String> {
     if !on_main_thread() {
         return Err("not on the main thread; the context is left".into());
@@ -242,7 +243,7 @@ pub fn delete_context(context: usize) -> Result<(), String> {
     OWN.lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|own| own.context != context);
-    // SAFETY: the agent's context, released once.
+    // SAFETY: エージェントのコンテキスト。1 回だけ解放する。
     unsafe {
         objc::send::<()>(context as Id, &CLEAR_DRAWABLE);
         objc::send::<()>(context as Id, &RELEASE);
@@ -250,14 +251,14 @@ pub fn delete_context(context: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// The current context's pixel format, for the log.
+/// 今のコンテキストのピクセルフォーマット（ログ用）。
 pub fn describe(view: usize) -> String {
     let context = current_context();
     if context == 0 {
         return format!("view 0x{view:x}");
     }
     objc::autoreleased(|| {
-        // SAFETY: the current NSOpenGLContext and its pixel format.
+        // SAFETY: 今の NSOpenGLContext とそのピクセルフォーマット。
         unsafe {
             let format = objc::send::<Id>(context as Id, &PIXEL_FORMAT);
             if format.is_null() {

@@ -1,16 +1,15 @@
-//! Sees LWJGL's calls into the window library and OpenGL through JVMTI, patching nothing.
+//! LWJGL からウィンドウのライブラリと OpenGL への呼び出しを、JVMTI で見る。何も書き換えない。
 //!
-//! The JVM reports each native method as it binds it (NativeMethodBind) and lets the agent
-//! bind another function in its place. LWJGL looks up every GLFW and SDL function with a JNI
-//! native in every version (`WinBase.nGetProcAddress` on Windows, `DynamicLinkLoader.ndlsym`
-//! on Linux and macOS): in its place, the agent hands LWJGL the hook for the function
-//! ([`crate::library::hook`], [`crate::hook::Hook`]), which calls the real one. LWJGL then
-//! calls the hook whichever way it calls: JNI natives up to LWJGL 3.3 (`JavaCritical_`
-//! entries on Java 8 with 3.2), FFM downcalls in LWJGL 3.4 on Java 25. Other natives of
-//! LWJGL (the zoom's GL functions) are replaced as they are bound
-//! ([`crate::library::native`]).
+//! JVM は、ネイティブのメソッドを結び付けるたびに知らせ（NativeMethodBind）、エージェントが
+//! 代わりに別の関数を結び付けられるようにする。LWJGL は、どの版でも、GLFW と SDL の関数を
+//! JNI のネイティブで引く（Windows は `WinBase.nGetProcAddress`、Linux と macOS は
+//! `DynamicLinkLoader.ndlsym`）：その代わりに、エージェントは LWJGL に関数のフック
+//! （[`crate::library::hook`]、[`crate::hook::Hook`]）を渡し、フックが本物を呼ぶ。LWJGL は、
+//! どの呼び方でもフックを呼ぶ：LWJGL 3.3 までは JNI のネイティブ（Java 8 の 3.2 では
+//! `JavaCritical_` の入口）、Java 25 の LWJGL 3.4 では FFM の downcall。LWJGL のほかの
+//! ネイティブ（ズームの GL の関数）は、結び付けるときに差し替える（[`crate::library::native`]）。
 //!
-//! Only natives bound after `Agent_OnLoad` are seen, which are all of LWJGL's.
+//! 見えるのは `Agent_OnLoad` の後に結び付くネイティブだけで、LWJGL のものはすべてそう。
 
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,10 +22,10 @@ const JVMTI_ENABLE: i32 = 1;
 const JVMTI_EVENT_NATIVE_METHOD_BIND: i32 = 67;
 const JVMTI_PHASE_LIVE: i32 = 4;
 const JVMTI_PHASE_START: i32 = 6;
-/// `can_generate_native_method_bind_events`, the 31st flag of `jvmtiCapabilities`.
+/// `can_generate_native_method_bind_events`：`jvmtiCapabilities` の 31 番目のフラグ。
 const CAN_GENERATE_NATIVE_METHOD_BIND_EVENTS: u32 = 1 << 30;
 
-// Slots of jvmtiInterface_1 (jvmti.h numbers them from 1).
+// jvmtiInterface_1 の枠（jvmti.h は 1 から数える）。
 const SET_EVENT_NOTIFICATION_MODE: usize = 2 - 1;
 const DEALLOCATE: usize = 47 - 1;
 const GET_CLASS_SIGNATURE: usize = 48 - 1;
@@ -35,7 +34,7 @@ const GET_METHOD_DECLARING_CLASS: usize = 65 - 1;
 const SET_EVENT_CALLBACKS: usize = 122 - 1;
 const GET_PHASE: usize = 133 - 1;
 const ADD_CAPABILITIES: usize = 142 - 1;
-/// Slot of GetEnv in JNIInvokeInterface.
+/// JNIInvokeInterface の GetEnv の枠。
 const GET_ENV: usize = 6;
 
 type Env = *mut *const *const c_void;
@@ -49,37 +48,37 @@ type NativeMethodBindFn = unsafe extern "system" fn(
     address: Ptr,
     new_address: *mut Ptr,
 );
-/// `WinBase.nGetProcAddress(module, name)` (LWJGL 3.2 and 3.3), and
-/// `DynamicLinkLoader.ndlsym(handle, name)`.
+/// `WinBase.nGetProcAddress(module, name)`（LWJGL 3.2 と 3.3）と、
+/// `DynamicLinkLoader.ndlsym(handle, name)`。
 type GetProcAddressFn = unsafe extern "system" fn(Ptr, Ptr, i64, i64) -> i64;
-/// `WinBase.nGetProcAddress(lastError, module, name)` (LWJGL 3.4).
+/// `WinBase.nGetProcAddress(lastError, module, name)`（LWJGL 3.4）。
 type GetProcAddressLastErrorFn = unsafe extern "system" fn(Ptr, Ptr, i64, i64, i64) -> i64;
 
-/// jvmtiEventCallbacks up to NativeMethodBind (event 67; the first, VMInit, is 50). The JVM
-/// copies the size it is given and clears the rest.
+/// NativeMethodBind までの jvmtiEventCallbacks（イベント 67。最初の VMInit は 50）。JVM は
+/// 渡された大きさだけを写し、残りは空にする。
 #[repr(C)]
 struct EventCallbacks {
     before: [Ptr; 17],
     native_method_bind: NativeMethodBindFn,
 }
 
-/// The JVM's own natives that LWJGL looks functions up with, by signature: (handle, name) on
-/// every system up to LWJGL 3.3 and on Linux and macOS, (last error, handle, name) on Windows
-/// with LWJGL 3.4.
+/// LWJGL が関数を引くのに使う JVM 自身のネイティブ（シグネチャごと）：LWJGL 3.3 までの
+/// どの OS と、Linux・macOS では (handle, name)、LWJGL 3.4 の Windows では
+/// (last error, handle, name)。
 static GET_PROC_ADDRESS: AtomicUsize = AtomicUsize::new(0);
 static GET_PROC_ADDRESS_LAST_ERROR: AtomicUsize = AtomicUsize::new(0);
 
-/// Has the JVM report native methods as it binds them.
+/// JVM に、ネイティブのメソッドを結び付けるたびに知らせてもらう。
 ///
 /// # Safety
-/// `vm` is the `JavaVM*` the JVM passed `Agent_OnLoad`.
+/// `vm` は、JVM が `Agent_OnLoad` に渡した `JavaVM*`。
 pub unsafe fn start(vm: *mut c_void) -> Result<(), String> {
     if vm.is_null() {
         return Err("no JavaVM".into());
     }
     let vm = vm as *mut *const Ptr;
     let mut env: Env = std::ptr::null_mut();
-    // SAFETY: GetEnv of the JavaVM's function table, with its C signature.
+    // SAFETY: JavaVM の関数表の GetEnv（C のシグネチャで）。
     let status = unsafe {
         let get_env: unsafe extern "system" fn(*mut *const Ptr, *mut Env, i32) -> i32 =
             std::mem::transmute(*(*vm).add(GET_ENV));
@@ -88,13 +87,13 @@ pub unsafe fn start(vm: *mut c_void) -> Result<(), String> {
     if status != JNI_OK || env.is_null() {
         return Err(format!("GetEnv(JVMTI) failed: {status}"));
     }
-    // jvmtiCapabilities is 128 bits of flags.
+    // jvmtiCapabilities は 128 ビットのフラグ。
     let capabilities = [CAN_GENERATE_NATIVE_METHOD_BIND_EVENTS, 0, 0, 0];
     let callbacks = EventCallbacks {
         before: [std::ptr::null_mut(); 17],
         native_method_bind,
     };
-    // SAFETY: JVMTI functions with their signatures from jvmti.h, on the env just obtained.
+    // SAFETY: jvmti.h のシグネチャの JVMTI の関数を、いま得た env で呼ぶ。
     unsafe {
         let add_capabilities: unsafe extern "system" fn(Env, *const u32) -> i32 =
             function(env, ADD_CAPABILITIES);
@@ -131,21 +130,21 @@ fn check(what: &str, error: i32) -> Result<(), String> {
 }
 
 /// # Safety
-/// `slot` holds a function of jvmtiInterface_1 whose type is `F`.
+/// `slot` は、型が `F` の jvmtiInterface_1 の関数を持つ。
 unsafe fn function<F: Copy>(env: Env, slot: usize) -> F {
-    // SAFETY: the table holds function pointers.
+    // SAFETY: 表は関数ポインタを持つ。
     unsafe { std::mem::transmute_copy(&*(*env).add(slot)) }
 }
 
-/// A string the JVM allocated, released after reading.
+/// JVM が確保した文字列。読んだ後に解放する。
 ///
 /// # Safety
-/// `s` is null or a string JVMTI returned on `env`.
+/// `s` は null か、`env` で JVMTI が返した文字列。
 unsafe fn take_string(env: Env, s: *mut c_char) -> Option<String> {
     if s.is_null() {
         return None;
     }
-    // SAFETY: the JVM's modified UTF-8, NUL-terminated; Deallocate frees what JVMTI gave.
+    // SAFETY: JVM の modified UTF-8 で NUL で終わる。JVMTI が渡したものは Deallocate で解放する。
     unsafe {
         let text = CStr::from_ptr(s).to_string_lossy().into_owned();
         let deallocate: unsafe extern "system" fn(Env, *mut c_char) -> i32 =
@@ -155,14 +154,13 @@ unsafe fn take_string(env: Env, s: *mut c_char) -> Option<String> {
     }
 }
 
-/// The class signature (`Lorg/lwjgl/...;`), name and signature of `method`; only once the VM
-/// has started (natives bound earlier are the JVM's own).
+/// `method` のクラスのシグネチャ（`Lorg/lwjgl/...;`）、名前、シグネチャ。VM が始まった後だけ
+/// （それより前に結び付くネイティブは JVM 自身のもの）。
 ///
 /// # Safety
-/// The env and method of a NativeMethodBind event.
+/// NativeMethodBind のイベントの env と method。
 unsafe fn describe(env: Env, method: Ptr) -> Option<(String, String, String)> {
-    // SAFETY: JVMTI functions with their signatures from jvmti.h; the strings they return
-    // are released by take_string.
+    // SAFETY: jvmti.h のシグネチャの JVMTI の関数。返った文字列は take_string が解放する。
     unsafe {
         let mut phase = 0;
         let get_phase: unsafe extern "system" fn(Env, *mut i32) -> i32 = function(env, GET_PHASE);
@@ -215,7 +213,7 @@ unsafe extern "system" fn native_method_bind(
     new_address: *mut Ptr,
 ) {
     crate::catch("NativeMethodBind", || {
-        // SAFETY: the event's env and method.
+        // SAFETY: イベントの env と method。
         let Some((class, name, signature)) = (unsafe { describe(env, method) }) else {
             return;
         };
@@ -236,7 +234,7 @@ unsafe extern "system" fn native_method_bind(
             ),
             _ => {
                 if let Some(ours) = library::native(&class, &name, &signature, address) {
-                    // SAFETY: the JVM binds what the event leaves here.
+                    // SAFETY: JVM は、イベントがここに残したものを結び付ける。
                     unsafe { *new_address = ours.cast_mut() };
                 }
                 return;
@@ -246,26 +244,26 @@ unsafe extern "system" fn native_method_bind(
             return;
         }
         original.store(address as usize, Ordering::Release);
-        // SAFETY: the JVM binds what the event leaves here.
+        // SAFETY: JVM は、イベントがここに残したものを結び付ける。
         unsafe { *new_address = ours };
         log::info!("jvmti: LWJGL's {name}{signature} goes through the agent");
     });
 }
 
-/// In place of LWJGL 3.2's and 3.3's `WinBase.nGetProcAddress`, and of
-/// `DynamicLinkLoader.ndlsym` (Linux, macOS).
+/// LWJGL 3.2 と 3.3 の `WinBase.nGetProcAddress`、および `DynamicLinkLoader.ndlsym`
+/// （Linux、macOS）の代わり。
 unsafe extern "system" fn get_proc_address(env: Ptr, class: Ptr, module: i64, name: i64) -> i64 {
-    // SAFETY: bound only after the JVM's own native was stored, with its signature.
+    // SAFETY: JVM 自身のネイティブを覚えた後にだけ、そのシグネチャで結び付く。
     let address = unsafe {
         let original: GetProcAddressFn =
             std::mem::transmute(GET_PROC_ADDRESS.load(Ordering::Acquire));
         original(env, class, module, name)
     };
-    // SAFETY: `name` is the NUL-terminated name LWJGL looked up.
+    // SAFETY: `name` は、LWJGL が引いた NUL で終わる名前。
     unsafe { handed(module, name, address) }
 }
 
-/// In place of LWJGL 3.4's `WinBase.nGetProcAddress`.
+/// LWJGL 3.4 の `WinBase.nGetProcAddress` の代わり。
 unsafe extern "system" fn get_proc_address_last_error(
     env: Ptr,
     class: Ptr,
@@ -273,32 +271,31 @@ unsafe extern "system" fn get_proc_address_last_error(
     module: i64,
     name: i64,
 ) -> i64 {
-    // SAFETY: as above.
+    // SAFETY: 上と同じ。
     let address = unsafe {
         let original: GetProcAddressLastErrorFn =
             std::mem::transmute(GET_PROC_ADDRESS_LAST_ERROR.load(Ordering::Acquire));
         original(env, class, last_error, module, name)
     };
-    // SAFETY: as above.
+    // SAFETY: 上と同じ。
     unsafe { handed(module, name, address) }
 }
 
-/// What LWJGL gets for the function it looked up in `module`: the hook in place of a hooked
-/// function.
+/// LWJGL が `module` で引いた関数の代わりに渡すもの：フックする関数ならフック。
 ///
 /// # Safety
-/// `name` is 0 or a NUL-terminated string; `address` is that function of `module`.
+/// `name` は 0 か NUL で終わる文字列。`address` は `module` のその関数。
 unsafe fn handed(module: i64, name: i64, address: i64) -> i64 {
     if name == 0 || address == 0 {
         return address;
     }
     crate::catch("LWJGL's lookup", || {
-        // SAFETY: guaranteed by the caller.
+        // SAFETY: 呼び出し側が保証する。
         let name = unsafe { CStr::from_ptr(name as *const c_char) };
         let Some(hook) = library::hook(module as usize, name) else {
             return Some(address);
         };
-        // SAFETY: the function of the hook's name, of the slot's type.
+        // SAFETY: フックの名前の関数で、置き場所の型。
         unsafe { hook.original.set_looked_up(address as *const c_void) };
         log::info!(
             "jvmti: LWJGL looked up {}; handed the agent's hook",

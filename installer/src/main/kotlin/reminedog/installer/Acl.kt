@@ -10,13 +10,12 @@ import java.nio.file.attribute.AclEntryType
 import java.nio.file.attribute.AclFileAttributeView
 
 /**
- * Who may change the DLL. The game runs the DLL with the rights of whoever starts it, so one
- * that other users of the PC can replace (a folder right under C:\ lets every signed-in user
- * change what is put in it) runs their code. Only Windows has these lists; elsewhere nothing
- * is checked or changed.
+ * DLL を変えてよい人。ゲームは起動した人の権限で DLL を動かすので、PC のほかの利用者が置き換え
+ * られる DLL（C:\ の直下のフォルダは、サインインしたどの利用者も中に置くものを変えられる）は、
+ * その人のコードを動かす。この一覧があるのは Windows だけ。ほかでは何も確かめず、変えない。
  */
 object Acl {
-    /** Groups that hold other users of the PC (the name after the domain, in lowercase). */
+    /** PC のほかの利用者を含むグループ（ドメインの後の名前、小文字）。 */
     private val OTHERS = setOf("everyone", "users", "authenticated users")
 
     private val WRITE = setOf(
@@ -28,7 +27,7 @@ object Acl {
         AclEntryPermission.WRITE_OWNER,
     )
 
-    /** Whether other users of the PC may change [path] (false when it cannot be told). */
+    /** PC のほかの利用者が [path] を変えられるか（分からなければ false）。 */
     fun othersCanWrite(path: Path): Boolean {
         val view = Files.getFileAttributeView(path, AclFileAttributeView::class.java) ?: return false
         val acl = try {
@@ -46,8 +45,8 @@ object Acl {
     }
 
     /**
-     * Lets only the owner of [dir] (the user who made it), SYSTEM and the administrators at it and
-     * at what goes in it. For a folder just made; a failure leaves it as it was.
+     * [dir] とその中のものに触れるのを、[dir] の持ち主（作った利用者）・SYSTEM・管理者だけにする。
+     * 作ったばかりのフォルダのため。失敗したらそのまま。
      */
     fun restrict(dir: Path) {
         val view = Files.getFileAttributeView(dir, AclFileAttributeView::class.java) ?: return
@@ -67,7 +66,7 @@ object Acl {
                     .build()
             }
         } catch (e: IOException) {
-            // Kept as the parent folder gave it; the window warns about such folders.
+            // 親のフォルダが与えたままにする。ウィンドウはそういうフォルダについて警告する。
         } catch (e: SecurityException) {
         }
     }

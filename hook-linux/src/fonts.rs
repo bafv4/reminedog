@@ -1,13 +1,13 @@
-//! A Japanese font for egui's fallbacks, found with fontconfig (`fc-match`), else in the
-//! places distributions put Noto Sans CJK or IPA Gothic. The agent reads it once, on a thread
-//! of its own, and keeps it for the process.
+//! egui の代わりの字形に使う日本語フォント。fontconfig（`fc-match`）で探し、なければ
+//! ディストリビューションが Noto Sans CJK や IPA ゴシックを置く場所から。エージェントは専用の
+//! スレッドで 1 回だけ読み、プロセスの間持つ。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use reminedog_agent::os::FontFile;
 
-/// Files tried when fontconfig gives none, with the face of Japanese in collections.
+/// fontconfig が答えないときに試すファイルと、コレクションの中の日本語の面。
 const CANDIDATES: &[(&str, u32)] = &[
     ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0),
     ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),
@@ -19,7 +19,7 @@ const CANDIDATES: &[(&str, u32)] = &[
     ("/usr/share/fonts/ipa-gothic/ipag.ttf", 0),
 ];
 
-/// The Japanese font fontconfig chooses, else one in the usual places.
+/// fontconfig が選ぶ日本語フォント。なければよくある場所のもの。
 pub fn read() -> Option<FontFile> {
     let found = fontconfig().into_iter().chain(
         CANDIDATES
@@ -43,7 +43,7 @@ pub fn read() -> Option<FontFile> {
     None
 }
 
-/// fontconfig's choice for Japanese sans-serif text: its file and face.
+/// fontconfig が日本語のゴシック体に選ぶもの：そのファイルと面。
 fn fontconfig() -> Option<(PathBuf, u32)> {
     let output = Command::new("fc-match")
         .args(["--format=%{file}\n%{index}\n%{lang}", "sans-serif:lang=ja"])
@@ -59,9 +59,9 @@ fn fontconfig() -> Option<(PathBuf, u32)> {
     choice
 }
 
-/// fc-match's file, index and languages: the file and face, if the font has Japanese
-/// (fc-match answers its closest font even without one). The index of a variable font's named
-/// instance carries the instance above the face's 16 bits.
+/// fc-match のファイル・番号・言語：フォントに日本語があればファイルと面（fc-match は日本語が
+/// なくても一番近いフォントを答える）。可変フォントの名前付きインスタンスの番号は、面の 16 ビットの
+/// 上にインスタンスを持つ。
 fn parse_match(text: &str) -> Option<(PathBuf, u32)> {
     let mut lines = text.lines();
     let file = lines.next()?.trim();

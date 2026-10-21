@@ -1,4 +1,4 @@
-//! Process-wide agent state, set once by the platform's `Agent_OnLoad`.
+//! プロセスに 1 つのエージェントの状態。各 OS の `Agent_OnLoad` が 1 回だけ入れる。
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -14,12 +14,12 @@ pub struct Globals {
 
 static GLOBALS: OnceLock<Globals> = OnceLock::new();
 
-/// Sets the globals; false if they were set already (the agent was loaded twice).
+/// 状態を入れる。もう入っていれば false（エージェントが 2 回読み込まれた）。
 pub fn init(globals: Globals) -> bool {
     GLOBALS.set(globals).is_ok()
 }
 
-/// `None` until `Agent_OnLoad` has run.
+/// `Agent_OnLoad` が動くまでは `None`。
 pub fn globals() -> Option<&'static Globals> {
     GLOBALS.get()
 }

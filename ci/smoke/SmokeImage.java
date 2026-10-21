@@ -1,6 +1,6 @@
-// Helpers shared by the smoke harnesses (Smoke, SmokeSdl): screenshots, the drawn frames,
-// Minecraft's debug keys around F3+C, a screen that releases the cursor, and the files of an
-// open world. Java 8 source.
+// スモークのテスト用プログラム（Smoke、SmokeSdl）が共有する補助：スクリーンショット、描くフレーム、
+// F3+C の周りの Minecraft のデバッグのキー、カーソルを放す画面、開いているワールドのファイル。
+// Java 8 のソース。
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -25,8 +25,8 @@ import static org.lwjgl.opengl.GL11.*;
 final class SmokeImage {
     private SmokeImage() {}
 
-    // Saves the current context's back buffer as a PNG (diagnostic: after a swap it still
-    // holds the presented frame on drivers that copy, as Wine + llvmpipe does).
+    // 今のコンテキストのバックバッファを PNG で保存する（調べるため：Wine＋llvmpipe のようにコピーする
+    // ドライバでは、スワップの後も見せたフレームが残っている）。
     static void saveBackBuffer(int width, int height, String path) {
         glFinish();
         glReadBuffer(GL_BACK);
@@ -41,12 +41,13 @@ final class SmokeImage {
         System.out.println("SCREENSHOT " + path);
     }
 
-    // Minimal PNG encoder (8-bit RGB, no filtering), so the harness needs no java.desktop.
+    // 最小の PNG のエンコーダ（8 ビットの RGB、フィルタなし）。テスト用プログラムに java.desktop が
+    // 要らないように。
     private static void writePng(String path, int width, int height, ByteBuffer rgb) throws IOException {
         ByteArrayOutputStream raw = new ByteArrayOutputStream();
         byte[] row = new byte[width * 3];
-        for (int y = height - 1; y >= 0; y--) { // GL rows go bottom-up, PNG rows top-down
-            raw.write(0); // filter type: none
+        for (int y = height - 1; y >= 0; y--) { // GL の行は下から上、PNG の行は上から下
+            raw.write(0); // フィルタの種類：なし
             rgb.position(y * width * 3);
             rgb.get(row);
             raw.write(row);
@@ -80,8 +81,8 @@ final class SmokeImage {
         out.writeInt((int) crc.getValue());
     }
 
-    // A pattern around the centre of the frame (scissored clears work in any profile), so
-    // a zoomed frame looks different from an unzoomed one.
+    // フレームの中央の周りの模様（シザーでのクリアはどのプロファイルでも動く）。ズームしたフレームが
+    // ズームしていないものと違って見えるように。
     static void drawPattern(int width, int height) {
         glEnable(GL_SCISSOR_TEST);
         int cx = width / 2, cy = height / 2;
@@ -95,10 +96,10 @@ final class SmokeImage {
         glDisable(GL_SCISSOR_TEST);
     }
 
-    // --sodium: the viewport as Minecraft with Sodium sets it. Sodium's GlStateManagerMixin
-    // does not call glViewport with the values of the last call, and Minecraft's lightmap pass
-    // sets a 16x16 viewport once a tick (here every 13th frame). So most frames set no
-    // viewport at all, which the agent's high-resolution zoom must cope with.
+    // --sodium：Sodium を入れた Minecraft が設定する viewport。Sodium の GlStateManagerMixin は
+    // 直前の呼び出しと同じ値で glViewport を呼ばず、Minecraft のライトマップの描画は 1 tick に 1 回
+    // 16x16 の viewport を設定する（ここでは 13 フレームごと）。なので、ほとんどのフレームは viewport を
+    // まったく設定せず、エージェントの高精細のズームはそれに対応しなければならない。
     static boolean sodium;
     private static int lastViewportX = -1, lastViewportY, lastViewportW, lastViewportH;
 
@@ -113,9 +114,9 @@ final class SmokeImage {
         glViewport(x, y, w, h);
     }
 
-    // Minecraft's frame: the scene goes into its own framebuffer ("main render target") at
-    // the framebuffer size the window system reports, and is then copied into the window
-    // (framebuffer 0), as Minecraft 1.21.5+ does. Needs GL 3.0.
+    // Minecraft のフレーム：場面を、ウィンドウシステムが報告するフレームバッファの大きさで自前の
+    // フレームバッファ（"main render target"）に描き、それからウィンドウ（フレームバッファ 0）に
+    // 写す。Minecraft 1.21.5 以降と同じ。GL 3.0 が要る。
     static final class MainTarget {
         private int framebuffer, texture, width, height, frame;
 
@@ -161,9 +162,8 @@ final class SmokeImage {
         }
     }
 
-    // Squares at fixed angles from the view direction, drawn with a vertical field of view
-    // of 70 degrees like Minecraft's default: their size in pixels grows with the frame's
-    // height only, so a taller frame shows them larger and in more detail.
+    // 視線の方向から決まった角度にある四角形を、Minecraft の既定と同じく縦の視野角 70 度で描く：
+    // ピクセルでの大きさはフレームの高さだけで大きくなるので、縦長のフレームでは大きく細かく見える。
     static void drawScene(int width, int height) {
         double pixelsPerTan = height / 2.0 / Math.tan(Math.toRadians(35));
         int cx = width / 2, cy = height / 2;
@@ -176,7 +176,7 @@ final class SmokeImage {
             glClearColor(colors[i][0], colors[i][1], colors[i][2], 1f);
             glClear(GL_COLOR_BUFFER_BIT);
         }
-        // Blue markers left and right, to check the horizontal scale too.
+        // 横の倍率も確かめるための、左右の青い印。
         for (int side = -1; side <= 1; side += 2) {
             int x = cx + (int) Math.round(side * 0.08 * pixelsPerTan);
             int half = (int) Math.max(1, Math.round(0.01 * pixelsPerTan));
@@ -187,19 +187,19 @@ final class SmokeImage {
         glDisable(GL_SCISSOR_TEST);
     }
 
-    // Minecraft's debug keys as far as F3+C goes; 1.16.1, 1.21.11 and 26.3 agree on this part.
-    // The harness decides whether the modifier (F3) is held, as its version does, and feeds
-    // every key event of the game's window in:
-    // - a key pressed or repeated while the modifier is held is a debug key; C copies the
-    //   location ("F3C copied"), unless refused like in a world with reduced debug info
-    //   ("F3C refused": the game then handles C as a normal key press);
-    // - releasing the modifier toggles the debug overlay unless a debug key was handled while
-    //   it was held, so a refused F3+C toggles it;
-    // - the crash key (C) physically down while the modifier is held arms the debug crash
-    //   ("F3C crash armed"; the harness never crashes), which counts as handled; once armed for
-    //   100 ms, debug keys do nothing, so a held F3+C copies once.
+    // F3+C に関わるところまでの Minecraft のデバッグのキー。この部分は 1.16.1、1.21.11、26.3 で同じ。
+    // 修飾キー（F3）を押しているかはテスト用プログラムがその版と同じく決め、ゲームのウィンドウの
+    // キーのイベントをすべて入れる：
+    // - 修飾キーを押している間に押すかリピートしたキーはデバッグのキー。C は位置をコピーする
+    //   （"F3C copied"）。ただし、デバッグ情報を制限したワールドのように拒否されたときは除く
+    //   （"F3C refused"：ゲームはそのとき C をふつうのキーの押下として処理する）
+    // - 修飾キーを離すと、押している間にデバッグのキーを処理していなければデバッグ画面を切り替える。
+    //   なので拒否された F3+C は切り替える
+    // - 修飾キーを押している間にクラッシュのキー（C）を物理的に押していると、デバッグのクラッシュが
+    //   動き始め（"F3C crash armed"。テスト用プログラムは落ちない）、処理したものとして数える。
+    //   動き始めて 100 ms たつとデバッグのキーは何もしないので、押したままの F3+C は 1 回だけコピーする
     static final class DebugKeys {
-        // What Minecraft copies on F3+C (format of 1.13+), so the agent's F3+C capture can be tested.
+        // Minecraft が F3+C でコピーするもの（1.13 以降の形式）。エージェントの F3+C の横取りを試せるように。
         static final String F3C_TEXT =
             "/execute in minecraft:overworld run tp @s 12.50 64.00 -7.25 90.00 15.00";
 
@@ -214,7 +214,7 @@ final class SmokeImage {
             this.copy = copy;
         }
 
-        // First thing for every key event.
+        // どのキーのイベントでも最初に。
         void keyEvent(boolean crashKeyDown, boolean modifierHeld) {
             if (!crashKeyDown || !modifierHeld) {
                 crashArmed = false;
@@ -228,7 +228,7 @@ final class SmokeImage {
             handled = true;
         }
 
-        // A key pressed or repeated while the modifier is held.
+        // 修飾キーを押している間に押すかリピートしたキー。
         void debugKey(boolean copyKey) {
             if (crashArmed && System.nanoTime() - crashArmedAt > 100_000_000L) {
                 handled = true;
@@ -257,13 +257,13 @@ final class SmokeImage {
         }
     }
 
-    // A Minecraft screen opened and closed with one key (--screen-key), as the inventory is,
-    // so the agent's key state spoofing can be tested:
-    // - opening it releases the cursor ("SCREEN open");
-    // - closing it grabs the cursor again (MouseHandler.grabMouse), which first re-reads the
-    //   keyboard mappings' keys from the window system (KeyMapping.setAll). The harness prints
-    //   the watched keys (--watch-keys) as read the same way: "SETALL <code>=<0|1> ...".
-    // The harness feeds in the key presses (not repeats) of the game's window.
+    // インベントリのように 1 つのキーで開け閉めする Minecraft の画面（--screen-key）。エージェントの
+    // キーの状態の偽装を試せるように：
+    // - 開くとカーソルを放す（"SCREEN open"）
+    // - 閉じるとカーソルをまた捕まえる（MouseHandler.grabMouse）。その前に、キーの割り当てのキーを
+    //   ウィンドウシステムから読み直す（KeyMapping.setAll）。テスト用プログラムは、見ているキー
+    //   （--watch-keys）を同じように読んで出す："SETALL <code>=<0|1> ..."
+    // テスト用プログラムは、ゲームのウィンドウのキーの押下（リピートでないもの）を入れる。
     static final class Screen {
         private final int key;
         private final int[] watchKeys;
@@ -271,7 +271,7 @@ final class SmokeImage {
         private final Runnable release, grab;
         private boolean open;
 
-        // open: whether the game starts on a screen (the cursor is not grabbed).
+        // open：ゲームが画面を開いて始まるか（カーソルを捕まえていない）。
         Screen(int key, boolean open, int[] watchKeys, IntPredicate keyDown, Runnable release, Runnable grab) {
             this.key = key;
             this.open = open;
@@ -301,8 +301,8 @@ final class SmokeImage {
         }
     }
 
-    // The key codes of an option like --watch-keys=87,341 (GLFW key codes or SDL scancodes),
-    // each from min to max.
+    // --watch-keys=87,341 のようなオプションのキーコード（GLFW のキーコードか SDL のスキャンコード）。
+    // それぞれ min から max の間。
     static int[] keyCodes(String arg, int min, int max) {
         int eq = arg.indexOf('=');
         String[] parts = arg.substring(eq + 1).split(",", -1);
@@ -323,7 +323,7 @@ final class SmokeImage {
         return codes;
     }
 
-    // The one key code of an option like --screen-key=69.
+    // --screen-key=69 のようなオプションの 1 つのキーコード。
     static int keyCode(String arg, int min, int max) {
         int[] codes = keyCodes(arg, min, max);
         if (codes.length != 1) {
@@ -332,10 +332,10 @@ final class SmokeImage {
         return codes[0];
     }
 
-    // What Minecraft leaves in its game directory while a singleplayer world is open, which is
-    // how the agent tells the world: saves/<name>/session.lock (the most recently written one is
-    // the open world) and the integrated server's start line in logs/latest.log. Written into
-    // the current directory, the agent's game directory unless its gamedir= option says otherwise.
+    // シングルプレイのワールドを開いている間に Minecraft がゲームのフォルダに残すもの。エージェントは
+    // これでワールドを知る：saves/<name>/session.lock（最も新しく書いたものが開いているワールド）と、
+    // logs/latest.log の統合サーバーの開始の行。今のフォルダに書く。gamedir= のオプションで指定しない
+    // 限り、ここがエージェントのゲームのフォルダ。
     static void writeWorld(String name) {
         if (name.isEmpty() || name.equals(".") || name.equals("..") || name.contains("/") || name.contains("\\")) {
             throw new IllegalArgumentException("--world needs a folder name, not '" + name + "'");
@@ -343,7 +343,7 @@ final class SmokeImage {
         try {
             Path lock = Paths.get("saves", name, "session.lock");
             Files.createDirectories(lock.getParent());
-            Files.write(lock, "☃".getBytes(StandardCharsets.UTF_8)); // the game writes a snowman
+            Files.write(lock, "☃".getBytes(StandardCharsets.UTF_8)); // ゲームは雪だるまを書く
             Path log = Paths.get("logs", "latest.log");
             Files.createDirectories(log.getParent());
             String line = "[00:00:00] [Server thread/INFO]: Starting integrated minecraft server version smoke\n";

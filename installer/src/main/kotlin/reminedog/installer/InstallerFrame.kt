@@ -46,7 +46,7 @@ import javax.swing.table.AbstractTableModel
 import javax.swing.table.DefaultTableCellRenderer
 import kotlin.concurrent.thread
 
-/** The installer's window. */
+/** インストーラーのウィンドウ。 */
 class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTALLER_VERSION}") {
     private val downloadChoice = JRadioButton("GitHub から最新版をダウンロードする", true)
     private val folderField = JTextField(DEFAULT_FOLDER)
@@ -89,7 +89,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
             add(instanceSection(), BorderLayout.CENTER)
             add(bottomSection(), BorderLayout.SOUTH)
         }
-        // Looks like the default button, without becoming one: Enter in a text field must not install.
+        // 既定のボタンに見せるが、既定のボタンにはしない：入力欄の Enter でインストールしてはいけない。
         installButton.putClientProperty(
             FlatClientProperties.STYLE,
             "background: \$Button.default.background; foreground: \$Button.default.foreground;" +
@@ -97,8 +97,8 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
                 " pressedBackground: \$Button.default.pressedBackground",
         )
 
-        // A DLL already on the PC (maybe a test build) is used as it is, unless the user picks
-        // the download.
+        // PC にもうある DLL（テスト用のビルドかもしれない）は、利用者がダウンロードを選ばない限り
+        // そのまま使う。
         existingDll()?.let {
             fileField.text = it.toString()
             existingChoice.isSelected = true
@@ -205,7 +205,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
         }
     }
 
-    /** The DLL the arguments point at: the downloaded one or the chosen file. */
+    /** 引数が指す DLL：ダウンロードしたものか、選んだファイル。 */
     private fun dllPath(): String {
         if (existingChoice.isSelected) return fileField.text.trim()
         val folder = folderField.text.trim().let { if (it.length > 3) it.trimEnd('\\', '/') else it }
@@ -213,7 +213,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
         return if (folder.endsWith("\\")) folder + Download.ASSET else "$folder\\${Download.ASSET}"
     }
 
-    /** Why the DLL cannot be used for installing, or null. */
+    /** DLL をインストールに使えない理由。使えれば null。 */
     private fun dllProblem(path: String): String? {
         AgentArg.problem(path)?.let { return it }
         if (existingChoice.isSelected) {
@@ -245,14 +245,14 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
         rows.fireTableDataChanged()
     }
 
-    /** A warning when other users of the PC could replace the DLL at [path] (or its folder). */
+    /** PC のほかの利用者が [path] の DLL（かそのフォルダ）を置き換えられるときの警告。 */
     private fun othersCanChange(path: String): String? {
         val file = try {
             Paths.get(path)
         } catch (e: InvalidPathException) {
             return null
         }
-        // A folder still to be made is made for this user only.
+        // これから作るフォルダは、この利用者だけのものとして作る。
         val exposed = listOfNotNull(file, file.parent).filter { Files.exists(it) }.any { Acl.othersCanWrite(it) }
         return if (exposed) {
             "注意：この場所は PC のほかのユーザーも書き換えられます。共用の PC なら、自分だけの場所（例：%LOCALAPPDATA%\\reminedog）にしてください"
@@ -317,7 +317,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
         return true
     }
 
-    /** Reads the instances and their arguments again, keeping the checked ones checked. */
+    /** インスタンスとその引数を読み直す。チェックしたものはチェックしたまま。 */
     private fun reload() {
         val checked = rows.rows.filter { it.checked }.map { it.key }.toSet()
         val list = mutableListOf<Row>()
@@ -339,14 +339,14 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
                 list += row
             }
         }
-        // Instances of one launcher with the same name are told apart by their folder.
+        // 同じ名前の 1 つのランチャーのインスタンスは、フォルダで見分ける。
         list.groupBy { it.instance.launcher.key to it.instance.name }.values.filter { it.size > 1 }.flatten()
             .forEach { it.name = "${it.instance.name}（${it.instance.place}）" }
         rows.rows = list
         rows.fireTableDataChanged()
     }
 
-    /** The checked rows, or null (after saying so) when there are none. */
+    /** チェックした行。なければ（そう伝えてから）null。 */
     private fun checkedRows(): List<Row>? {
         val chosen = rows.rows.filter { it.checked }
         if (chosen.isEmpty()) {
@@ -437,12 +437,12 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
     }
 
     /**
-     * Replaces the DLLs the checked instances load with the latest release, where they are: the
-     * instances' arguments stay as they are. A DLL that several instances load is replaced once.
+     * チェックしたインスタンスが読み込む DLL を、その場所のまま最新のリリースで置き換える：
+     * インスタンスの引数はそのまま。いくつかのインスタンスが読み込む DLL は 1 回だけ置き換える。
      */
     private fun updateDlls() {
         val chosen = checkedRows() ?: return
-        // The DLL files by pathKey, with the instances that load each.
+        // pathKey ごとの DLL のファイルと、それぞれを読み込むインスタンス。
         val dlls = LinkedHashMap<String, InstalledDll>()
         for (row in chosen) {
             val args = row.args
@@ -517,8 +517,8 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
     }
 
     /**
-     * Runs [task] off the event thread with the window busy, then shows the dialog it returns
-     * (none for null: the user stopped it). The window is usable again whatever happens.
+     * ウィンドウを使用中にしてイベントのスレッドの外で [task] を動かし、それが返すダイアログを
+     * 出す（null なら出さない：利用者がやめた）。何が起きてもウィンドウはまた使えるようになる。
      */
     private fun runInBackground(task: () -> Outcome?) {
         setBusy(true)
@@ -540,7 +540,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
         }
     }
 
-    /** Asks a yes-or-no question from a background task (the dialog shows on the event thread). */
+    /** 裏のタスクから、はいかいいえで答える質問をする（ダイアログはイベントのスレッドで出る）。 */
     private fun ask(title: String, message: String): Boolean {
         var answer = JOptionPane.NO_OPTION
         SwingUtilities.invokeAndWait {
@@ -550,8 +550,8 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
     }
 
     /**
-     * Until the launchers of [chosen] are closed, asks the user to close them (from a background
-     * task: listing the programs takes a moment). False when they stop.
+     * [chosen] のランチャーが閉じるまで、利用者に閉じるように頼む（裏のタスクから：プログラムの
+     * 一覧には少しかかる）。利用者がやめたら false。
      */
     private fun launchersClosed(chosen: List<Row>): Boolean {
         while (true) {
@@ -596,11 +596,11 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
             pathChanged()
         }
         cursor = if (busy) Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR) else Cursor.getDefaultCursor()
-        // Closing the window ends the program, so not in the middle of writing the files.
+        // ウィンドウを閉じるとプログラムが終わるので、ファイルを書いている途中では閉じない。
         defaultCloseOperation = if (busy) DO_NOTHING_ON_CLOSE else EXIT_ON_CLOSE
     }
 
-    /** Adds a line to the log (from any thread). */
+    /** ログに 1 行足す（どのスレッドからでも）。 */
     private fun logLine(line: String) {
         val append = {
             log.append(line + "\n")
@@ -624,12 +624,12 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
         }
     }
 
-    /** A DLL file that checked instances load, and the titles of those instances. */
+    /** チェックしたインスタンスが読み込む DLL のファイルと、それらのインスタンスの名前。 */
     private class InstalledDll(val path: String) {
         val users = mutableListOf<String>()
     }
 
-    /** The dialog a background task ends with. */
+    /** 裏のタスクが最後に出すダイアログ。 */
     private class Outcome(val title: String, val message: String, val type: Int) {
         companion object {
             fun done(message: String) = Outcome("reminedog インストーラー", message, JOptionPane.INFORMATION_MESSAGE)
@@ -640,13 +640,13 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
         }
     }
 
-    /** A line of the instance list. */
+    /** インスタンスの一覧の 1 行。 */
     private class Row(val instance: Instance) {
         var checked = false
         var args: Args? = null
         var error: String? = null
 
-        /** The instance's name, with its folder when another one has the same name. */
+        /** インスタンスの名前。同じ名前のものがほかにあればフォルダ付き。 */
         var name = instance.name
         val key: String get() = instance.key
         val title: String get() = "${instance.launcher.label} / $name"
@@ -691,7 +691,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
         }
     }
 
-    /** Colors the status: green when installed, red when the instance cannot be read, and so on. */
+    /** 状態に色を付ける：インストール済みなら緑、インスタンスが読めなければ赤、など。 */
     private class StatusRenderer : DefaultTableCellRenderer() {
         override fun getTableCellRendererComponent(
             table: JTable,
@@ -716,12 +716,12 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
     }
 
     companion object {
-        /** Where the DLL went before %LOCALAPPDATA% (and still goes where that path cannot be used). */
+        /** %LOCALAPPDATA% より前に DLL を置いていた場所（そのパスが使えないところでは今もここに置く）。 */
         private const val FALLBACK_FOLDER = "C:\\reminedog"
 
         /**
-         * `%LOCALAPPDATA%\reminedog`, where only the user can change the DLL, when its path can be
-         * put in JVM arguments (no spaces, ASCII only); else [FALLBACK_FOLDER].
+         * `%LOCALAPPDATA%\reminedog`（利用者だけが DLL を変えられる）。そのパスを JVM 引数に入れられる
+         * とき（空白なし、ASCII だけ）。そうでなければ [FALLBACK_FOLDER]。
          */
         private val DEFAULT_FOLDER: String =
             System.getenv("LOCALAPPDATA")
@@ -730,7 +730,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
                 ?.takeIf { AgentArg.problem("$it\\${Download.ASSET}") == null }
                 ?: FALLBACK_FOLDER
 
-        /** A DLL already in one of the usual places. */
+        /** いつもの場所の 1 つにもうある DLL。 */
         private fun existingDll(): Path? =
             listOf(DEFAULT_FOLDER, FALLBACK_FOLDER).distinct().firstNotNullOfOrNull { folder ->
                 try {
@@ -740,7 +740,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
                 }
             }
 
-        /** One of FlatLaf's icon colors (Actions.Green, Actions.Red, ...). */
+        /** FlatLaf のアイコンの色の 1 つ（Actions.Green、Actions.Red、...）。 */
         private fun color(key: String): Color = UIManager.getColor(key) ?: UIManager.getColor("Label.foreground")
 
         private fun sectionTitle(text: String) =
@@ -777,7 +777,7 @@ class InstallerFrame : JFrame("reminedog インストーラー ${Download.INSTAL
             add(component, constraints)
         }
 
-        /** What went wrong, in words for the user where Java's own are not. */
+        /** 何がうまくいかなかったか。Java の文言が利用者向けでないところは利用者向けの言葉で。 */
         private fun message(e: Throwable): String =
             when (e) {
                 is UnknownHostException -> "${e.message} が見つかりません（インターネットにつながっているか確かめてください）"

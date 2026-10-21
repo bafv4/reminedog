@@ -1,5 +1,5 @@
-//! These start a real WebView2, so they need the WebView2 Runtime and a desktop session:
-//! `cargo test -p reminedog-hook-win -- --ignored browser`.
+//! これらは本物の WebView2 を始めるので、WebView2 ランタイムとデスクトップのセッションが要る：
+//! `cargo test -p reminedog-hook-win -- --ignored browser`。
 
 use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -8,7 +8,7 @@ use reminedog_core::browser::{PageButton, PageKey, PageModifiers};
 
 use super::*;
 
-/// A red page taller than the view, recording where the mouse went down.
+/// 見え方より高い赤いページ。マウスが下りた場所を記録する。
 const PAGE: &str = "data:text/html;charset=utf-8,<!doctype html><title>test</title>\
     <body style='margin:0;background:red;height:3000px'>\
     <input id='text' style='position:absolute;left:10px;top:200px;width:100px;height:20px'>\
@@ -17,7 +17,7 @@ const PAGE: &str = "data:text/html;charset=utf-8,<!doctype html><title>test</tit
     <script>window.downs = []; addEventListener('mousedown', \
     (e) => downs.push([e.clientX, e.clientY]));</script>";
 
-/// The browser is one per process: one test at a time.
+/// ブラウザはプロセスに 1 つ：テストは 1 つずつ。
 static SERIAL: Mutex<()> = Mutex::new(());
 
 fn wait_for(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
@@ -43,18 +43,18 @@ fn eval(script: &str) -> String {
         .unwrap_or_else(|_| panic!("no answer to {script}"))
 }
 
-/// Stops the browser at the end of a test, also a failed one (the next test starts its own).
+/// テストの終わりに（失敗したテストでも）ブラウザを止める（次のテストは自分のものを始める）。
 struct Running;
 
 impl Drop for Running {
     fn drop(&mut self) {
         quit();
-        // Time to close the WebView before its folder goes.
+        // フォルダが消える前に、WebView を閉じる時間。
         std::thread::sleep(Duration::from_secs(2));
     }
 }
 
-/// Starts the browser on `page` at 400×300 and waits until it is ready.
+/// `page` で 400×300 のブラウザを始め、用意ができるまで待つ。
 fn start(page: &str, data: &std::path::Path) -> Running {
     set_layout(PageLayout {
         size: [400, 300],
@@ -69,7 +69,7 @@ fn start(page: &str, data: &std::path::Path) -> Running {
     running
 }
 
-/// Waits until the page stops scrolling (the wheel and the keys scroll smoothly).
+/// ページのスクロールが止まるまで待つ（ホイールとキーは滑らかにスクロールする）。
 fn settled_scroll() -> f64 {
     let mut last = f64::NAN;
     loop {
@@ -128,21 +128,21 @@ fn browser_draws_and_takes_input() {
         shared_now().state == BrowserState::Ready
     });
 
-    // The picture arrives, at the page's size, red.
+    // 絵はページの大きさで、赤く来る。
     wait_for("a red picture", Duration::from_secs(10), || {
         center_pixel().is_some_and(|[b, g, r, _]| r > 200 && g < 50 && b < 50)
     });
     assert_eq!(FRAME.lock().unwrap().size, [400, 300]);
 
-    // Clicks land where they are sent, in CSS pixels.
+    // クリックは、送ったところ（CSS ピクセル）に当たる。
     click([100.0, 50.0]);
     wait_for("the click", Duration::from_secs(5), || {
         eval("downs.length") == "1"
     });
     assert_eq!(eval("downs[0]"), "[100,50]");
 
-    // The page is as many CSS pixels wide as pixels over the scale and the zoom, and
-    // positions stay the page's own CSS pixels.
+    // ページの幅の CSS ピクセルは、ピクセルを拡大率と拡大で割ったもので、位置はページ自身の
+    // CSS ピクセルのまま。
     assert_eq!(eval("innerWidth"), "400");
     set_layout(PageLayout {
         zoom: 1.5,
@@ -168,20 +168,20 @@ fn browser_draws_and_takes_input() {
         eval("innerWidth") == "400"
     });
 
-    // Typing goes into the field clicked.
+    // 打つ文字は、クリックした欄に入る。
     click([50.0, 210.0]);
     wait_for("the field's focus", Duration::from_secs(5), || {
         eval("document.activeElement.id") == "\"text\""
     });
     send(Command::Input(PageInput::Text("a".into())));
     send(Command::Input(PageInput::Text("日本語".into())));
-    // GLFW hands over committed text one character at a time.
+    // GLFW は確定した文字を 1 文字ずつ渡す。
     send(Command::Input(PageInput::Text("ン".into())));
     wait_for("the text", Duration::from_secs(5), || {
         eval("document.getElementById('text').value") == "\"a日本語ン\""
     });
 
-    // Page Down scrolls (the field has the focus, so click the page first).
+    // Page Down でスクロールする（欄がフォーカスを持つので、先にページをクリックする）。
     click([300.0, 100.0]);
     for key in [
         PageInput::KeyDown {
@@ -200,7 +200,7 @@ fn browser_draws_and_takes_input() {
         eval("window.scrollY").parse::<f64>().unwrap_or(0.0) > 100.0
     });
 
-    // A link to a new window opens in place.
+    // 新しいウィンドウへのリンクは、その場で開く。
     settled_scroll();
     eval("window.scrollTo({ top: 0, behavior: 'instant' })");
     assert_eq!(settled_scroll(), 0.0);
@@ -209,7 +209,7 @@ fn browser_draws_and_takes_input() {
         shared_now().url == "about:blank"
     });
 
-    // Hidden, no pictures come; shown again, they do.
+    // 隠すと絵は来ない。また見せると来る。
     hide();
     std::thread::sleep(Duration::from_millis(500));
     let seq = FRAME.lock().unwrap().seq;
@@ -238,7 +238,7 @@ fn the_scroll_keys_work_on_a_page_never_clicked() {
     wait_for("a picture", Duration::from_secs(10), || {
         center_pixel().is_some()
     });
-    // A key alone does nothing here (no frame has the focus before a click).
+    // ここではキーだけでは何もしない（クリックの前は、どのフレームもフォーカスを持たない）。
     send(Command::Input(PageInput::KeyDown {
         key: PageKey::PAGE_DOWN,
         repeat: false,
@@ -249,15 +249,15 @@ fn the_scroll_keys_work_on_a_page_never_clicked() {
         modifiers: PageModifiers::default(),
     }));
     send(Command::Scroll(1.0));
-    // Seven eighths of the 300 pixels.
+    // 300 ピクセルの 8 分の 7。
     let y = settled_scroll();
     assert!((y - 262.5).abs() < 1.0, "{y}");
     send(Command::Scroll(-1.0));
     assert!(settled_scroll() < 1.0);
 }
 
-/// A page with a player of 30 seconds of silence (a WAV made by the page), and a hidden video
-/// first in it, which is not the one to play.
+/// 30 秒の無音（ページが作った WAV）のプレイヤーと、その前の隠れた動画（再生するものではない）が
+/// あるページ。
 const AUDIO_PAGE: &str = "data:text/html,<body><script>\
     const rate = 8000, n = rate * 30, buf = new ArrayBuffer(44 + n), v = new DataView(buf);\
     const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };\
@@ -300,7 +300,7 @@ fn the_media_keys_play_seek_and_hiding_pauses() {
     notices();
     let paused = || eval("document.querySelector('audio').paused");
 
-    // Played without a click first.
+    // 先にクリックせずに再生した。
     send(Command::Media(MediaCommand::PlayPause));
     wait_for("playing", Duration::from_secs(5), || paused() == "false");
     let mut said = Vec::new();
@@ -324,12 +324,12 @@ fn the_media_keys_play_seek_and_hiding_pauses() {
             .is_ok_and(|t| t < 5.0)
     });
 
-    // Hidden, it pauses; shown again, it plays on.
+    // 隠すと止まり、また見せると続きを再生する。
     hide();
     wait_for("paused by hiding", Duration::from_secs(5), || {
         paused() == "true"
     });
-    // Players in frames of other sites are not paused, but muted.
+    // ほかのサイトのフレームの中のプレイヤーは止めないが、ミュートする。
     assert!(muted());
     show(AUDIO_PAGE, data.path().to_path_buf());
     wait_for("playing again", Duration::from_secs(5), || {
@@ -356,13 +356,13 @@ fn a_file_input_opens_no_dialog() {
     wait_for("a picture", Duration::from_secs(10), || {
         center_pixel().is_some()
     });
-    // The first picture can be the blank page from before the document loaded.
+    // 最初の絵は、文書を読み込む前の空のページのことがある。
     wait_for("the page's script", Duration::from_secs(10), || {
         eval("window.cancelled === false") == "true"
     });
     click([20.0, 20.0]);
-    // The page hears the dialog was cancelled. Had it opened (in this process, on the browser
-    // thread), the script would get no answer.
+    // ページは、ダイアログがキャンセルされたと聞く。開いていたら（このプロセスで、ブラウザの
+    // スレッドで）、スクリプトは答えを受け取らない。
     wait_for("the cancelled dialog", Duration::from_secs(10), || {
         eval("window.cancelled") == "true"
     });

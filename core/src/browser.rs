@@ -1,14 +1,13 @@
-//! The in-game browser's OS-independent parts: input for the page as Chrome DevTools Protocol
-//! (CDP) calls, the address bar's text as a URL, and the scripts that control the page's video.
+//! ゲーム内ブラウザの OS に依存しない部分：Chrome DevTools Protocol（CDP）の呼び出しとしての
+//! ページへの入力、URL としてのアドレス欄の文字、ページの動画を操作するスクリプト。
 //!
-//! The page gets its input through CDP rather than as window messages: the browser then never
-//! takes the system's keyboard focus from the game (a fullscreen game minimizes when it loses
-//! it).
+//! ページはウィンドウのメッセージではなく CDP で入力を受け取る：そうすればブラウザは、ゲームから
+//! システムのキーボードのフォーカスを取らない（フルスクリーンのゲームは、それを失うと最小化する）。
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// A mouse button as the page sees it.
+/// ページから見たマウスのボタン。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageButton {
     Left,
@@ -27,7 +26,7 @@ impl PageButton {
         PageButton::Forward,
     ];
 
-    /// CDP's name.
+    /// CDP の名前。
     fn name(self) -> &'static str {
         match self {
             PageButton::Left => "left",
@@ -38,7 +37,7 @@ impl PageButton {
         }
     }
 
-    /// The button's bit in [`PageInput`]'s `buttons` (CDP's bit field).
+    /// [`PageInput`] の `buttons` での、ボタンのビット（CDP のビットのフィールド）。
     pub fn bit(self) -> u8 {
         match self {
             PageButton::Left => 1,
@@ -50,7 +49,7 @@ impl PageButton {
     }
 }
 
-/// Modifier keys held during a page event.
+/// ページのイベントの間に押している修飾キー。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PageModifiers {
     pub alt: bool,
@@ -59,14 +58,14 @@ pub struct PageModifiers {
 }
 
 impl PageModifiers {
-    /// CDP's bit field (Alt 1, Ctrl 2, Meta 4, Shift 8).
+    /// CDP のビットのフィールド（Alt 1、Ctrl 2、Meta 4、Shift 8）。
     fn bits(self) -> u8 {
         u8::from(self.alt) | u8::from(self.ctrl) << 1 | u8::from(self.shift) << 3
     }
 }
 
-/// A key as the page sees it: the Windows virtual-key code and the DOM `code` and `key`
-/// (`key` unshifted; a letter's is upper case while Shift is held).
+/// ページから見たキー：Windows の仮想キーのコードと、DOM の `code` と `key`（`key` は Shift なし。
+/// 文字のものは、Shift を押している間は大文字）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageKey {
     pub vk: u16,
@@ -87,16 +86,16 @@ impl PageKey {
     };
 }
 
-/// One input event for the page. Positions are in CSS pixels from the page's top left corner.
+/// ページへの 1 つの入力のイベント。位置は、ページの左上の隅からの CSS ピクセル。
 #[derive(Debug, Clone, PartialEq)]
 pub enum PageInput {
-    /// The pointer moved, with `buttons` ([`PageButton::bit`]) held.
+    /// `buttons`（[`PageButton::bit`]）を押したまま、ポインターが動いた。
     MouseMove {
         pos: [f32; 2],
         buttons: u8,
         modifiers: PageModifiers,
     },
-    /// `button` went down; `clicks` counts the clicks of a double click.
+    /// `button` が下りた。`clicks` はダブルクリックのクリックを数える。
     MouseDown {
         pos: [f32; 2],
         button: PageButton,
@@ -111,7 +110,7 @@ pub enum PageInput {
         buttons: u8,
         modifiers: PageModifiers,
     },
-    /// The wheel turned; `delta` is in CSS pixels, positive to scroll right and down.
+    /// ホイールが回った。`delta` は CSS ピクセルで、正なら右と下にスクロールする。
     Wheel {
         pos: [f32; 2],
         delta: [f32; 2],
@@ -126,13 +125,12 @@ pub enum PageInput {
         key: PageKey,
         modifiers: PageModifiers,
     },
-    /// Committed text: one character right after its key went down, or a converted string
-    /// from the IME.
+    /// 確定した文字：キーが下りた直後の 1 文字、または IME で変換した文字列。
     Text(String),
 }
 
 impl PageInput {
-    /// The CDP method to call and its parameters as JSON.
+    /// 呼ぶ CDP のメソッドと、その JSON の引数。
     pub fn cdp(&self) -> (&'static str, String) {
         match self {
             PageInput::MouseMove {
@@ -190,8 +188,8 @@ impl PageInput {
             } => {
                 let mut params = key_params(*key, *modifiers);
                 params["autoRepeat"] = json!(repeat);
-                // Enter acts (submits, breaks the line) on the character it types, which the
-                // input never carries: control characters are not text.
+                // Enter は、自分が打つ文字で動く（送信する、改行する）が、入力はそれを運ばない：制御文字は
+                // 文字ではない。
                 if *key == PageKey::ENTER && !modifiers.ctrl && !modifiers.alt {
                     params["type"] = json!("keyDown");
                     params["text"] = json!("\r");
@@ -253,8 +251,7 @@ fn key_params(key: PageKey, modifiers: PageModifiers) -> Value {
     })
 }
 
-/// The DOM `key` of a US-layout digit or symbol key with Shift held (a letter's is its upper
-/// case).
+/// Shift を押したときの、US 配列の数字か記号のキーの DOM の `key`（文字のものは大文字）。
 fn shifted(key: &str) -> Option<&'static str> {
     Some(match key {
         "1" => "!",
@@ -282,8 +279,8 @@ fn shifted(key: &str) -> Option<&'static str> {
     })
 }
 
-/// File name extensions searched for rather than opened as a site (`options.txt`,
-/// `latest.log`), unless typed with a scheme.
+/// スキームを付けて打たない限り、サイトとして開かずに検索するファイル名の拡張子
+/// （`options.txt`、`latest.log`）。
 const FILE_EXTENSIONS: [&str; 26] = [
     "bat",
     "cfg",
@@ -313,10 +310,9 @@ const FILE_EXTENSIONS: [&str; 26] = [
     "yml",
 ];
 
-/// The page the address bar's text names: a URL as typed (`https://` added when it has no
-/// scheme; `http://` for the local machine and IPv4 addresses, where servers' maps such as
-/// Dynmap run without TLS), or a web search for anything else (a file name like
-/// `options.txt` too). `None` for empty text.
+/// アドレス欄の文字が指すページ：打ったとおりの URL（スキームがなければ `https://` を足す。
+/// 自分の機械と IPv4 のアドレスには `http://`。Dynmap などのサーバーの地図は TLS なしで動く）、
+/// それ以外はウェブの検索（`options.txt` のようなファイル名も）。空の文字なら `None`。
 pub fn normalize_url(text: &str) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {
@@ -343,8 +339,8 @@ pub fn normalize_url(text: &str) -> Option<String> {
     ))
 }
 
-/// A host name with a top-level domain (`minecraft.wiki`), or an IPv4 address. A number like
-/// `1.21` is neither.
+/// トップレベルドメインのあるホスト名（`minecraft.wiki`）、または IPv4 のアドレス。`1.21` のような
+/// 数はどちらでもない。
 fn is_domain(host: &str) -> bool {
     let labels: Vec<&str> = host.split('.').collect();
     if labels.len() < 2 || labels.iter().any(|label| label.is_empty()) {
@@ -359,7 +355,7 @@ fn is_domain(host: &str) -> bool {
         .is_some_and(|tld| tld.chars().all(char::is_alphabetic))
 }
 
-/// Four numbers with dots: an IPv4 address.
+/// 点で区切った 4 つの数：IPv4 のアドレス。
 fn is_ipv4(host: &str) -> bool {
     let labels: Vec<&str> = host.split('.').collect();
     labels.len() == 4
@@ -368,7 +364,7 @@ fn is_ipv4(host: &str) -> bool {
             .all(|label| !label.is_empty() && label.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Percent-encodes a query value (`application/x-www-form-urlencoded`: a space is `+`).
+/// 問い合わせの値をパーセントエンコードする（`application/x-www-form-urlencoded`：空白は `+`）。
 fn encode_query(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
@@ -383,28 +379,28 @@ fn encode_query(text: &str) -> String {
     out
 }
 
-/// What to do with the page's video (or audio).
+/// ページの動画（か音声）をどうするか。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MediaCommand {
     PlayPause,
-    /// Moves the position by this many seconds (negative: back).
+    /// 位置をこの秒数だけ動かす（負なら戻る）。
     Seek(f64),
-    /// Pauses everything playing and remembers it (the browser is being hidden).
+    /// 再生中のものを全部止め、それを覚える（ブラウザを隠すところ）。
     PauseAll,
-    /// Plays again what [`MediaCommand::PauseAll`] paused.
+    /// [`MediaCommand::PauseAll`] が止めたものをまた再生する。
     Resume,
 }
 
-/// The page's media elements, also those in open shadow roots (players made of web
-/// components). Not those in frames: scripts run in the top frame only.
+/// ページのメディアの要素。開いた shadow root の中のもの（ウェブコンポーネントで作った
+/// プレイヤー）も。フレームの中のものは除く：スクリプトはいちばん外のフレームでだけ動く。
 const MEDIA: &str = "const media = () => { const out = [];\
     const walk = (root) => { out.push(...root.querySelectorAll('video, audio'));\
         for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) walk(el.shadowRoot); } };\
     walk(document); return out; };";
 
-/// The script that carries out `command` in the page. [`MediaCommand::PlayPause`] and
-/// [`MediaCommand::Seek`] act on the media playing, or else the largest one shown on the page
-/// (pages keep hidden players around), and evaluate to its [`MediaState`] (`null` without any).
+/// ページで `command` を行うスクリプト。[`MediaCommand::PlayPause`] と [`MediaCommand::Seek`] は、
+/// 再生中のメディアか、なければページに見えているいちばん大きいもの（ページは隠したプレイヤーを
+/// 残していることがある）に働き、その [`MediaState`] を値とする（なければ `null`）。
 pub fn media_script(command: MediaCommand) -> String {
     const PICK: &str = "const all = media();\
         const area = (m) => { const r = m.getBoundingClientRect(); return r.width * r.height; };\
@@ -437,18 +433,18 @@ pub fn media_script(command: MediaCommand) -> String {
     }
 }
 
-/// What [`media_script`] reports about the media it acted on.
+/// [`media_script`] が、働いたメディアについて報告するもの。
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 pub struct MediaState {
     pub paused: bool,
-    /// Seconds.
+    /// 秒。
     pub time: f64,
-    /// Seconds; `None` for a live stream.
+    /// 秒。ライブ配信なら `None`。
     pub duration: Option<f64>,
 }
 
-/// The notice after `command` acted on the page: `result` is the script's value as JSON.
-/// `None` for the commands that report nothing.
+/// `command` がページに働いた後の通知：`result` はスクリプトの値の JSON。何も報告しない命令なら
+/// `None`。
 pub fn media_notice(command: MediaCommand, result: &str) -> Option<String> {
     let action = match command {
         MediaCommand::PlayPause => None,
@@ -631,9 +627,9 @@ mod tests {
             "https://www.google.com/search?q=%E3%82%A8%E3%83%B3%E3%83%81%E3%83%A3%E3%83%B3%E3%83%88"
         );
         assert_eq!(url("minecraft.wiki"), "https://minecraft.wiki");
-        // A server's map on the LAN (Dynmap, BlueMap) has no TLS.
+        // LAN のサーバーの地図（Dynmap、BlueMap）は TLS を持たない。
         assert_eq!(url("192.168.0.2:8123"), "http://192.168.0.2:8123");
-        // File names are looked up, not opened as sites.
+        // ファイル名はサイトとして開かず、検索する。
         assert_eq!(
             url("options.txt"),
             "https://www.google.com/search?q=options.txt"

@@ -1,16 +1,15 @@
-//! Minecraft's key names, generated from the games' own tables.
+//! Minecraft のキーの名前。ゲーム自身の表から作った。
 //!
-//! - [`SDL_KEYS`]: 26.x's `InputConstants.Type.KEYBOARD` (26.3), whose values are SDL3
-//!   scancodes. The keycodes are SDL3's default keymap with a US layout and no modifiers.
-//! - [`GLFW_KEYS`]: 1.13 to 1.21's `InputConstants.Type.KEYSYM` (1.21.11; 1.16.1's table is
-//!   the same), whose values are GLFW key codes, joined to the SDL3 scancode of the same
-//!   physical key on Windows. The Win32 scancodes are what GLFW 3.4 reports
-//!   (`glfwGetKeyScancode`).
+//! - [`SDL_KEYS`]：26.x の `InputConstants.Type.KEYBOARD`（26.3）。値は SDL3 のスキャンコード。
+//!   キーコードは、US 配列で修飾キーなしの SDL3 の既定のキーマップのもの。
+//! - [`GLFW_KEYS`]：1.13〜1.21 の `InputConstants.Type.KEYSYM`（1.21.11。1.16.1 の表も同じ）。
+//!   値は GLFW のキーコードで、Windows で同じ物理のキーの SDL3 のスキャンコードと結び付ける。
+//!   Win32 のスキャンコードは、GLFW 3.4 が報告するもの（`glfwGetKeyScancode`）。
 //!
-//! Edit with care: the tests in `keybinds.rs` check the tables against each other.
+//! 注意して書き換えること：`keybinds.rs` のテストが、表どうしを照らし合わせる。
 
-/// 26.x's keyboard keys: SDL3 scancode, name after `key.keyboard.`, SDL3 keycode. Sorted by
-/// scancode.
+/// 26.x のキーボードのキー：SDL3 のスキャンコード、`key.keyboard.` の後の名前、SDL3 の
+/// キーコード。スキャンコードの順。
 pub(crate) const SDL_KEYS: [(u16, &str, u32); 246] = [
     (4, "a", 0x61),
     (5, "b", 0x62),
@@ -260,12 +259,12 @@ pub(crate) const SDL_KEYS: [(u16, &str, u32); 246] = [
     (290, "end.call", 0x4000_0122),
 ];
 
-/// 1.21's keyboard keys: GLFW key code, name after `key.keyboard.`, SDL3 scancode of the same
-/// key (0: none, F25), Win32 scancode (set 1, 0x100 for the 0xE0 prefix; 0: no such key on
-/// Windows). Sorted by key code. `world.1` and `world.2` both map to the ISO key next to the
-/// left Shift; only `world.2` has a Win32 scancode (0x56). The three names 26.x gives to other
-/// keys are `keypad.decimal` (26.x `keypad.period`), `menu` (26.x `application`) and
-/// `world.2` (26.x `world.1`).
+/// 1.21 のキーボードのキー：GLFW のキーコード、`key.keyboard.` の後の名前、同じキーの SDL3 の
+/// スキャンコード（0：なし、F25）、Win32 のスキャンコード（セット 1。0xE0 の前置きは 0x100。
+/// 0：Windows にそのキーはない）。キーコードの順。`world.1` と `world.2` はどちらも左の Shift の
+/// 隣の ISO 配列のキーで、Win32 のスキャンコード（0x56）があるのは `world.2` だけ。26.x が
+/// 別のキーに付ける 3 つの名前は、`keypad.decimal`（26.x では `keypad.period`）、`menu`
+/// （26.x では `application`）、`world.2`（26.x では `world.1`）。
 pub(crate) const GLFW_KEYS: [(i32, &str, u16, u16); 120] = [
     (32, "space", 44, 0x39),
     (39, "apostrophe", 52, 0x28),

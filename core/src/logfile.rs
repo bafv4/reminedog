@@ -1,8 +1,7 @@
-//! A small `log` backend that writes to a file, shared by the platform hooks.
+//! 各 OS のフックが共有する、ファイルに書く小さな `log` の出力先。
 //!
-//! Each record is written and flushed as one line, since the host process may be killed at
-//! any moment:
-//! `[<secs since start>] [<LEVEL>] [<thread>] <target>: <message>`.
+//! ホストのプロセスはいつ止められるか分からないので、記録は 1 行ずつ書いて flush する：
+//! `[<始まってからの秒>] [<LEVEL>] [<スレッド>] <target>: <message>`。
 
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
@@ -14,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use log::{LevelFilter, Log, Metadata, Record};
 
-/// The process-wide file logger. Obtain it through [`FileLogger::install`].
+/// プロセスに 1 つのファイルのロガー。[`FileLogger::install`] で得る。
 pub struct FileLogger {
     sink: OnceLock<Sink>,
 }
@@ -29,21 +28,21 @@ static LOGGER: FileLogger = FileLogger {
     sink: OnceLock::new(),
 };
 
-/// Serializes installs; `true` once `LOGGER` holds the global logger slot.
+/// 入れるのを 1 つずつにする。`LOGGER` が全体のロガーの枠を持ったら `true`。
 static CLAIMED: Mutex<bool> = Mutex::new(false);
 
 impl FileLogger {
-    /// Starts logging to `path` at `level`.
+    /// `level` で `path` へのログを始める。
     ///
-    /// Creates the parent directory and keeps the previous log as `<stem>.prev.log`. If a
-    /// logger is already installed (this one or another), returns `Ok` without touching any
-    /// file. Logging never panics; I/O errors after installation are ignored.
+    /// 親のフォルダを作り、前のログは `<stem>.prev.log` として残す。ロガーがもう入っていれば
+    /// （これでもほかのものでも）、どのファイルにも触れずに `Ok` を返す。ログはパニックしない。
+    /// 入れた後の I/O のエラーは無視する。
     pub fn install(path: &Path, level: LevelFilter) -> io::Result<()> {
         let mut claimed = CLAIMED.lock().unwrap_or_else(PoisonError::into_inner);
         if LOGGER.sink.get().is_some() {
             return Ok(());
         }
-        // Take the slot before touching files, so losing to another logger changes nothing.
+        // ファイルに触れる前に枠を取る。ほかのロガーに負けたら何も変えない。
         if !*claimed {
             if log::set_logger(&LOGGER).is_err() {
                 return Ok(());
@@ -66,7 +65,7 @@ impl FileLogger {
                 module_path!()
             ));
         }
-        // Cannot fail: `sink` is only set here, under the `CLAIMED` lock.
+        // 失敗しない：`sink` を入れるのはここだけで、`CLAIMED` のロックの下。
         let _ = LOGGER.sink.set(sink);
         log::set_max_level(level);
         Ok(())
@@ -85,9 +84,9 @@ impl Log for FileLogger {
         if record.level() > sink.level {
             return;
         }
-        // A panicking `Display` impl in the arguments must not take the caller down.
+        // 引数の `Display` の実装がパニックしても、呼び出し側を巻き込んではならない。
         let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-            // Format before locking so that logging from inside a `Display` impl cannot deadlock.
+            // ロックの前に組み立てるので、`Display` の実装の中からログを出してもデッドロックしない。
             let line = format_line(sink.start.elapsed(), &thread_label(), record);
             sink.write(&line);
         }));
@@ -107,19 +106,18 @@ impl Log for FileLogger {
 impl Sink {
     fn write(&self, line: &str) {
         let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
-        // A single write keeps concurrent lines whole; File has no user-space buffer.
+        // 1 回の write なら、同時の行が混ざらない。File はユーザー空間のバッファを持たない。
         let _ = file.write_all(line.as_bytes());
         let _ = file.flush();
     }
 }
 
-/// Creates the parent directory, moves an existing log to `<stem>.prev.log` and opens `path`
-/// empty.
+/// 親のフォルダを作り、今のログを `<stem>.prev.log` に移し、`path` を空で開く。
 fn open_fresh(path: &Path) -> io::Result<File> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         fs::create_dir_all(dir)?;
     }
-    // Best effort: if the old log cannot be moved, it is truncated instead.
+    // できる範囲で：古いログを移せなければ、代わりに空にする。
     let _ = fs::rename(path, prev_path(path));
     OpenOptions::new()
         .write(true)
@@ -247,7 +245,7 @@ mod tests {
         }
     }
 
-    /// The only test that installs the global logger (it can be set once per process).
+    /// 全体のロガーを入れる唯一のテスト（プロセスに 1 回しか入れられない）。
     #[test]
     fn install_writes_lines_and_second_install_is_a_no_op() {
         let dir = tempfile::tempdir().unwrap();
@@ -287,7 +285,7 @@ mod tests {
             "previous session\n"
         );
 
-        // A second install neither fails nor touches the new path.
+        // 2 回目に入れても失敗せず、新しいパスにも触れない。
         let other = dir.path().join("other").join("second.log");
         FileLogger::install(&other, LevelFilter::Trace).unwrap();
         assert!(!other.exists());

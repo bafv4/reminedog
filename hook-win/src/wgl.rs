@@ -1,8 +1,8 @@
-//! WGL: OpenGL contexts on Windows, for [`crate::windows`] (the agent keeps its own context on
-//! the game's device context with them).
+//! WGL：Windows の OpenGL のコンテキスト。[`crate::windows`] のため（エージェントはこれで、
+//! ゲームのデバイスコンテキストの上に自前のコンテキストを持つ）。
 //!
-//! opengl32.dll is resolved at runtime (GLFW loads it) instead of being imported, so
-//! loading the agent does not change when or from where it gets loaded.
+//! opengl32.dll は import せずに動いている間に引く（GLFW が読み込む）ので、エージェントを
+//! 読み込んでも、それがいつどこから読み込まれるかは変わらない。
 
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::OnceLock;
@@ -36,14 +36,14 @@ pub struct Wgl {
     get_proc_address: GetProcAddressFn,
 }
 
-// SAFETY: plain function pointers and a module handle.
+// SAFETY: ただの関数ポインタとモジュールのハンドル。
 unsafe impl Send for Wgl {}
-// SAFETY: as above; nothing is mutated after construction.
+// SAFETY: 上と同じ。作った後は何も変えない。
 unsafe impl Sync for Wgl {}
 
 static WGL: OnceLock<Result<Wgl, String>> = OnceLock::new();
 
-/// opengl32.dll's entry points; fails if the process has not loaded it.
+/// opengl32.dll の入口。プロセスがそれを読み込んでいなければ失敗する。
 pub fn get() -> Result<&'static Wgl, String> {
     WGL.get_or_init(Wgl::resolve).as_ref().map_err(Clone::clone)
 }
@@ -51,7 +51,7 @@ pub fn get() -> Result<&'static Wgl, String> {
 impl Wgl {
     fn resolve() -> Result<Wgl, String> {
         let name = ffi::wide("opengl32.dll");
-        // SAFETY: NUL-terminated wide string.
+        // SAFETY: NUL で終わるワイド文字列。
         let module = unsafe { GetModuleHandleW(name.as_ptr()) };
         if module.is_null() {
             return Err("opengl32.dll is not loaded".into());
@@ -60,7 +60,7 @@ impl Wgl {
             ffi::proc_address(module, name)
                 .ok_or_else(|| format!("opengl32.dll does not export {}", name.to_string_lossy()))
         };
-        // SAFETY: documented signatures of these opengl32 exports.
+        // SAFETY: これらの opengl32 の export の、文書どおりのシグネチャ。
         unsafe {
             Ok(Wgl {
                 module,
@@ -86,24 +86,24 @@ impl Wgl {
         }
     }
 
-    /// The context and device context current on this thread (null if none).
+    /// このスレッドで今のコンテキストとデバイスコンテキスト（なければ null）。
     pub fn current(&self) -> (HDC, HGLRC) {
-        // SAFETY: no preconditions.
+        // SAFETY: 前提はない。
         unsafe { ((self.get_current_dc)(), (self.get_current_context)()) }
     }
 
-    /// The context current on this thread (null if none).
+    /// このスレッドで今のコンテキスト（なければ null）。
     pub fn current_context(&self) -> HGLRC {
-        // SAFETY: no preconditions.
+        // SAFETY: 前提はない。
         unsafe { (self.get_current_context)() }
     }
 
-    /// Looks up a GL function for the current context: extensions and GL > 1.1 come from
-    /// the driver via wglGetProcAddress, GL 1.1 only from opengl32's exports.
+    /// 今のコンテキストの GL の関数を引く：拡張と GL 1.1 より後のものはドライバから
+    /// wglGetProcAddress で、GL 1.1 のものは opengl32 の export からだけ。
     pub fn load(&self, name: &CStr) -> *const c_void {
-        // SAFETY: NUL-terminated name.
+        // SAFETY: NUL で終わる名前。
         let p = unsafe { (self.get_proc_address)(name.as_ptr()) };
-        // Some drivers return small sentinel values instead of null on failure.
+        // 失敗したときに、null の代わりに小さな番兵の値を返すドライバがある。
         if matches!(p as isize, -1..=3) {
             ffi::proc_address(self.module, name).unwrap_or(std::ptr::null())
         } else {
@@ -111,32 +111,32 @@ impl Wgl {
         }
     }
 
-    /// A context with the pixel format already set on `hdc` by the window library.
+    /// ウィンドウのライブラリが `hdc` にもう設定したピクセルフォーマットのコンテキスト。
     pub fn create_context(&self, hdc: HDC) -> Result<HGLRC, String> {
-        // SAFETY: `hdc` is the DC of the game's current context.
+        // SAFETY: `hdc` は、ゲームの今のコンテキストの DC。
         let hglrc = unsafe { (self.create_context)(hdc) };
         if hglrc.is_null() {
-            // SAFETY: no preconditions.
+            // SAFETY: 前提はない。
             let error = unsafe { GetLastError() };
             return Err(format!("wglCreateContext failed (error {error})"));
         }
         Ok(hglrc)
     }
 
-    /// Makes `hglrc` current on `hdc` (null and null: none).
+    /// `hglrc` を `hdc` で今のものにする（null と null：なし）。
     pub fn make_current(&self, hdc: HDC, hglrc: HGLRC) -> Result<(), String> {
-        // SAFETY: a context made for this DC, or none.
+        // SAFETY: この DC のために作ったコンテキスト、またはなし。
         if unsafe { (self.make_current)(hdc, hglrc) } == 0 {
-            // SAFETY: no preconditions.
+            // SAFETY: 前提はない。
             let error = unsafe { GetLastError() };
             return Err(format!("wglMakeCurrent failed (error {error})"));
         }
         Ok(())
     }
 
-    /// Deletes a context that is not current.
+    /// 今のものでないコンテキストを消す。
     pub fn delete_context(&self, hglrc: HGLRC) -> Result<(), String> {
-        // SAFETY: the caller's context, not current.
+        // SAFETY: 呼び出し側の、今のものでないコンテキスト。
         if unsafe { (self.delete_context)(hglrc) } == 0 {
             return Err("wglDeleteContext failed".into());
         }
@@ -144,9 +144,9 @@ impl Wgl {
     }
 }
 
-/// Pixel format of the window's DC, for diagnosing driver/context problems.
+/// ウィンドウの DC のピクセルフォーマット（ドライバやコンテキストの問題を調べるため）。
 pub fn describe_pixel_format(hdc: HDC) -> String {
-    // SAFETY: plain GDI queries on a valid DC.
+    // SAFETY: 有効な DC への、ただの GDI の問い合わせ。
     unsafe {
         let index = GetPixelFormat(hdc);
         if index == 0 {
